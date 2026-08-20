@@ -1,6 +1,6 @@
 # ClaudeLearningSkills
 
-Kirill's collection of Claude Code plugins and skills, organized as a plugin marketplace.
+Сollection of Claude Code plugins and skills, organized as a plugin marketplace.
 
 ## Structure
 
