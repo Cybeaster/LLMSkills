@@ -1,13 +1,13 @@
 {
-  "name": "claude-learning-skills",
-  "description": "Kirill's personal marketplace of skills for learning to code.",
+  "name": "kirill-skills",
+  "description": "Kirill's personal marketplace of Claude Code plugins and skills.",
   "owner": {
     "name": "Kirill Valitskii"
   },
   "plugins": [
     {
-      "name": "claude-learning-skills",
-      "source": "./",
+      "name": "learning-skills",
+      "source": "./plugins/learning-skills",
       "description": "Skills for learning to code: mentoring a beginner through building their first project, and explaining unfamiliar codebases from zero."
     }
   ]
