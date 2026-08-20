@@ -1,8 +1,8 @@
 {
-  "name": "kirill-skills",
-  "description": "Kirill's personal marketplace of Claude Code plugins and skills.",
+  "name": "claude-skills",
+  "description": "A marketplace of Claude Code plugins and skills for learning, building, and understanding code.",
   "owner": {
-    "name": "Kirill Valitskii"
+    "name": "Cybeaster"
   },
   "plugins": [
     {

@@ -1,6 +1,6 @@
-# ClaudeLearningSkills
+# ClaudeSkills
 
-Сollection of Claude Code plugins and skills, organized as a plugin marketplace.
+A collection of Claude Code plugins and skills, organized as a plugin marketplace.
 
 ## Structure
 
@@ -19,8 +19,8 @@ Each plugin lives in its own directory under `plugins/` with a `.claude-plugin/p
 ## Install
 
 ```
-/plugin marketplace add <path-or-github-repo>
-/plugin install learning-skills@kirill-skills
+/plugin marketplace add Cybeaster/ClaudeSkills
+/plugin install learning-skills@claude-skills
 ```
 
 ## Adding a new plugin
