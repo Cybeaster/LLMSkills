@@ -1,0 +1,3 @@
+# Local tool/session state — not part of the marketplace
+.bkit/
+.claude/
