@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "learning-skills",
+  "version": "0.1.0",
+  "description": "Skills for learning to code: mentoring a beginner through building their first project, and explaining unfamiliar codebases from zero.",
+  "author": {
+    "name": "Cybeaster",
+    "email": "cybeastermail@gmail.com"
+  },
+  "repository": "https://github.com/Cybeaster/LLMSkills",
+  "license": "MIT",
+  "keywords": ["learning", "mentoring", "onboarding", "code-explanation"]
+}

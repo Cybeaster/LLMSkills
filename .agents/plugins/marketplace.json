@@ -1,0 +1,20 @@
+{
+  "name": "llm-skills",
+  "interface": {
+    "displayName": "LLM Skills"
+  },
+  "plugins": [
+    {
+      "name": "learning-skills",
+      "source": {
+        "source": "local",
+        "path": "./plugins/learning-skills"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Learning"
+    }
+  ]
+}
