@@ -2598,6 +2598,7 @@ import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { run } from '../src/cli.js'
+import { OrchError } from '../src/errors.js'
 import { newPool, plan } from '../src/model.js'
 import { readPool, writePool } from '../src/store.js'
 import { makeCtx, type TestCtx } from './helpers.js'
@@ -2631,6 +2632,18 @@ describe('orch spawn-child', () => {
     const out = await run(['spawn-child', 't2', '--name', 'go', '--cwd', '.', '--brief', 'brief.md'], ctx)
     expect(out.stdout).toMatch(/ORCH_PARENT=s-self ORCH_PARENT_TASK=t2 ORCH_BRIEF='.*brief\.md' claude --remote-control 'go'/)
     expect(ctx.herdr.calls).toEqual([])
+  })
+
+  it('explains a child stuck on the folder-trust prompt', async () => {
+    const ctx = makeCtx()
+    Object.assign(ctx.env, { HERDR_ENV: '1', HERDR_WORKSPACE_ID: 'w1' })
+    ctx.herdr.startClaude = async () => {
+      throw new OrchError('herdr agent start failed: agent_not_ready')
+    }
+    parent(ctx)
+    const out = await run(['spawn-child', 't2', '--name', 'go', '--cwd', '.', '--brief', 'brief.md'], ctx)
+    expect(out.code).toBe(1)
+    expect(out.stderr).toMatch(/agent_not_ready.*trust this folder.*orch link go s-self t2/s)
   })
 
   it('needs the brief to exist and the task to be real', async () => {
@@ -2733,7 +2746,16 @@ export async function spawnChild(ctx: Ctx, o: SpawnOptions): Promise<Out> {
 
   const name = agentName(o.name, (await ctx.herdr.list()).map(a => a.name))
   const { paneId } = await ctx.herdr.createTab({ workspace: ctx.env.HERDR_WORKSPACE_ID, cwd, label: name })
-  await ctx.herdr.startClaude({ name, paneId, args: ['--remote-control', name] })
+  try {
+    await ctx.herdr.startClaude({ name, paneId, args: ['--remote-control', name] })
+  } catch (e) {
+    // Observed in the Task 0 spike: in a folder Claude has never opened, the new session stops at
+    // "Do you trust this folder?" and herdr reports agent_not_ready.
+    throw new OrchError(
+      `${name} did not become ready in ${paneId} (${e instanceof Error ? e.message : String(e)}). ` +
+        `If that pane asks "Do you trust this folder?", ${cwd} has never been opened in Claude: answer it there, then run: orch link ${name} ${parentId} ${task.id}`,
+    )
+  }
   let childId: string | undefined
   for (let i = 0; i < 60 && !childId; i++) {
     childId = await ctx.herdr.sessionIdOf(name)
