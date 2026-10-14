@@ -29,7 +29,7 @@ Out of scope for v1 (see §10): pools derived from transcripts, a web view, resu
 | `herdr agent list` (JSON) | `pane_id`, `agent_status`, `terminal_title`, `agent_session.value` = `sessionId` | herdr tag, pane focus, extra state |
 | `~/.claude/projects/*/<sessionId>.jsonl` | Full transcript | Not used in v1 |
 | TodoWrite / Task tools | Nothing: 0 calls across the 68 local transcripts | Not used |
-| Hooks | `SessionStart`, `UserPromptSubmit`, `Stop` | Registration, ⚑ clearing, staleness nudge |
+| Hooks | `SessionStart`, `UserPromptSubmit` (a Stop hook cannot add context without blocking) | Registration, ⚑ clearing, staleness nudge |
 
 Nothing records which session spawned which, so the parent link has to be declared at spawn time.
 
@@ -49,10 +49,11 @@ Nothing records which session spawned which, so the parent link has to be declar
 
 ```
 plugins/orchestrator/
-  bin/orch          CLI: every read and write goes through it
-  skills/orch/      teaches: draft the pool first, tick with evidence, spawn children via orch, push on ask
+  bin/orch          CLI, a prebuilt single-file bundle (plugins install without node_modules); Claude Code puts bin/ on PATH
+  lib/orch-tui.mjs  the TUI bundle, loaded only by `orch tui` so hooks stay fast
+  skills/orch-pool/ teaches: draft the pool first, tick with evidence, spawn children via orch, push on ask
   commands/orch.md  /orch: the interactive overview for Remote Control (§8)
-  hooks/            SessionStart → orch register ; UserPromptSubmit → orch answered ; Stop → orch nudge
+  hooks/            SessionStart → orch hook session-start ; UserPromptSubmit → orch hook prompt-submit
   src/              TypeScript: store, model, sources, CLI, TUI (Ink)
 ```
 
@@ -68,8 +69,11 @@ type Pool = {
   parent?: { sessionId: string; taskId: string }  // set by spawn-child or the TUI link key
   brief?: string                                  // absolute path of the brief this child must read
   tasks: Task[]
+  seq: number                                     // last task number handed out; ids are never reused
   createdAt: number
-  updatedAt: number
+  updatedAt: number                               // any write
+  touchedAt?: number                              // last write by the session itself through the CLI
+  turnStartedAt?: number                          // set by the UserPromptSubmit hook
 }
 
 type Task = {
@@ -101,7 +105,7 @@ type Evidence =
 
 ## 6. Session side
 
-**Session identity.** The SessionStart hook resolves the session id and makes it available to later `orch` calls as `CLAUDE_SESSION_ID`; without it, `orch` matches its parent PID chain against `~/.claude/sessions/*.json`.
+**Session identity.** The SessionStart hook writes `export CLAUDE_SESSION_ID=<id>` to `CLAUDE_ENV_FILE`, so every later Bash call carries it; without it, `orch` walks its parent PID chain (`/proc/<pid>/stat`) until it meets a pid listed in `~/.claude/sessions/*.json`.
 
 **CLI:**
 
@@ -114,6 +118,7 @@ orch task block t2 "why"
 orch task done t2 --evidence commit:abc123 | pr:41 | ci:<run-url> | cmd:"npm test" | note:"…"
 orch ask t2 "Which difficulty curve for Go?"          # sets needsInput
 orch spawn-child t1 --name course-go --cwd .worktrees/course-go --brief docs/course-brief.md
+orch link <child> <parent> <taskId>                  # attach a session under a parent task by hand
 orch status                                           # this session's pool as text
 orch status --all [--json]                            # every session, as text or JSON (§8)
 orch reply <session> "text"                           # answer a session's ⚑ (§8)
@@ -122,7 +127,7 @@ orch tui                                              # the viewer (§7)
 
 `orch plan` keeps done and in-progress tasks and replaces only pending ones, so re-planning never loses evidence.
 
-**Skill `orch`.** Short; three habits:
+**Skill `orch-pool`** (not `orch`, which would collide with the `/orch` command). Short; three habits:
 
 1. On a real task, run `orch plan` before starting work.
 2. Tick each step with evidence as soon as it is done, not in a batch at the end.
@@ -130,13 +135,14 @@ orch tui                                              # the viewer (§7)
 
 **Hooks.** None of them ever blocks a turn; any error is appended to `$ORCH_HOME/orch.log` and swallowed.
 
+A Stop hook cannot add context without blocking the turn, so the staleness check runs at the start of the next prompt instead.
+
 | Hook | Action |
 | --- | --- |
-| SessionStart | `orch register`: create the pool file if missing. If `ORCH_PARENT`, `ORCH_PARENT_TASK`, `ORCH_BRIEF` are set, record the parent link and brief, add this session to the parent task's `children`, and inject as context: *"Read <brief> first; your parent session is <title>."* |
-| UserPromptSubmit | `orch answered`: clear `needsInput` on this session's tasks, since the person just replied |
-| Stop | `orch nudge`: if the turn used Edit, Write or Bash and the pool is missing or was not touched this turn, add one line of context: *"Your orch pool is stale — update it."* |
+| SessionStart | `orch hook session-start`: export `CLAUDE_SESSION_ID`, create the pool file if missing. If `ORCH_PARENT`, `ORCH_PARENT_TASK`, `ORCH_BRIEF` are set, record the parent link and brief, add this session to the parent task's `children`, and inject as context: *"Read <brief> first; your parent session is <title>."* |
+| UserPromptSubmit | `orch hook prompt-submit`: clear `needsInput` on this session's tasks, since the person just replied. If the previous turn used Edit, Write, MultiEdit, NotebookEdit or Bash (read from the transcript after `turnStartedAt`) and the pool has no tasks or `touchedAt < turnStartedAt`, add one line of context asking the session to update its pool. Then set `turnStartedAt` |
 
-**`spawn-child`.** Reuses the `herdr-spawn-rc` approach: opens a new herdr tab in the target cwd and starts `claude` with `ORCH_PARENT`, `ORCH_PARENT_TASK`, `ORCH_BRIEF` set and an initial prompt naming the task. The parent task is set `in_progress`. The link becomes visible once the child's SessionStart hook registers. Outside herdr, `spawn-child` prints the env-prefixed command for the person to run.
+**`spawn-child`.** Follows the `herdr-spawn-rc` recipe: `herdr tab create` in the target cwd, `herdr agent start <name> --kind claude -- --remote-control <name>`, then `herdr agent get` until the child's session id is known. `herdr agent start` cannot set the child's environment, so the parent writes the link itself: the child's pool gets `parent` and `brief`, the parent task gets the child in `children` and goes `in_progress`. Only then is the intro sent with `herdr agent prompt`: which task this child serves, read the brief, run `orch plan`. Outside herdr, `spawn-child` prints a `cd … && ORCH_PARENT=… ORCH_PARENT_TASK=… ORCH_BRIEF=… claude --remote-control <name> "<intro>"` command for the person to run; the child's SessionStart hook then records the link from those variables.
 
 ## 7. TUI (`orch tui`)
 
@@ -169,9 +175,9 @@ beginner-courses — Beginner courses for all languages
 
 Evidence marks: ✓ proven, `~` claimed (no evidence or note only), ✗ a live CI/PR check disagrees with the tick.
 
-**Keys:** `↑↓`/`jk` move, `Enter` open, `Esc` back, `f` focus the session's herdr pane (external sessions show cwd and TTY instead), `o` print the session's claude.ai link, `l` link the selected session under a parent task, `r` refresh, `/` filter, `q` quit.
+**Keys:** `↑↓`/`jk` move, `Enter` open, `Esc` back, `f` focus the session's herdr pane (external sessions show cwd and pid instead), `o` print the session's claude.ai link, `l` link the selected session under a parent task, `r` refresh, `/` filter, `q` quit.
 
-**Refresh:** fs.watch on `$ORCH_HOME` and `~/.claude/sessions/`; `herdr agent list` every 3 s; `gh` every 60 s, only for CI and PR evidence.
+**Refresh:** every 3 s the TUI re-reads `$ORCH_HOME`, `~/.claude/sessions/` and `herdr agent list`; `gh` answers are cached 60 s and asked only for CI and PR evidence.
 
 ## 8. Remote use (`claude rc`)
 
