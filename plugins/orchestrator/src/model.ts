@@ -44,6 +44,12 @@ function find(p: Pool, id: string): Task {
   return t
 }
 
+// seq may be missing from a hand-edited or older file; never hand out an id already present.
+function nextId(p: Pool): string {
+  p.seq = Math.max(p.seq ?? 0, ...p.tasks.map(t => Number(t.id.slice(1)) || 0)) + 1
+  return `t${p.seq}`
+}
+
 // A write by the session itself through the CLI: it keeps the pool current.
 function own(p: Pool, now: number): Pool {
   p.updatedAt = now
@@ -54,13 +60,14 @@ function own(p: Pool, now: number): Pool {
 export function plan(pool: Pool, texts: string[], now: number): Pool {
   const p = clone(pool)
   const kept = p.tasks.filter(t => t.status !== 'pending' || t.children?.length || t.needsInput)
-  p.tasks = [...kept, ...texts.map(text => ({ id: `t${++p.seq}`, text, status: 'pending' as const }))]
+  const fresh = texts.map(text => ({ id: nextId(p), text, status: 'pending' as const }))
+  p.tasks = [...kept, ...fresh]
   return own(p, now)
 }
 
 export function addTask(pool: Pool, text: string, now: number): Pool {
   const p = clone(pool)
-  p.tasks.push({ id: `t${++p.seq}`, text, status: 'pending' })
+  p.tasks.push({ id: nextId(p), text, status: 'pending' })
   return own(p, now)
 }
 
@@ -75,6 +82,7 @@ export function startTask(pool: Pool, id: string, now: number): Pool {
   const t = find(p, id)
   t.status = 'in_progress'
   delete t.blockedReason
+  delete t.evidence
   return own(p, now)
 }
 
@@ -83,6 +91,7 @@ export function blockTask(pool: Pool, id: string, reason: string, now: number): 
   const t = find(p, id)
   t.status = 'blocked'
   t.blockedReason = reason
+  delete t.evidence
   return own(p, now)
 }
 
@@ -91,6 +100,7 @@ export function doneTask(pool: Pool, id: string, evidence: Evidence | undefined,
   const t = find(p, id)
   t.status = 'done'
   delete t.blockedReason
+  delete t.needsInput
   if (evidence) t.evidence = evidence
   else delete t.evidence
   return own(p, now)
@@ -113,17 +123,21 @@ export function clearQuestions(pool: Pool, now: number, taskId?: string): Pool |
 
 export function setParent(pool: Pool, parent: ParentLink, brief: string | undefined, now: number): Pool {
   const p = clone(pool)
+  const moved = p.parent?.sessionId !== parent.sessionId
   p.parent = parent
   if (brief) p.brief = brief
+  else if (moved) delete p.brief
   p.updatedAt = now
   return p
 }
 
-export function linkChild(pool: Pool, taskId: string, childId: string, now: number): Pool {
+// byOwner: the parent session itself made the link (spawn-child, its own orch link), so it counts as keeping its pool current.
+export function linkChild(pool: Pool, taskId: string, childId: string, now: number, byOwner = false): Pool {
   const p = clone(pool)
   const t = find(p, taskId)
   t.children = [...new Set([...(t.children ?? []), childId])]
   if (t.status === 'pending') t.status = 'in_progress'
+  if (byOwner) return own(p, now)
   p.updatedAt = now
   return p
 }
@@ -135,6 +149,14 @@ export function unlinkChild(pool: Pool, taskId: string, childId: string, now: nu
     t.children = t.children.filter(c => c !== childId)
     if (!t.children.length) delete t.children
   }
+  p.updatedAt = now
+  return p
+}
+
+// Set by the UserPromptSubmit hook: not an own write.
+export function startTurn(pool: Pool, now: number): Pool {
+  const p = clone(pool)
+  p.turnStartedAt = now
   p.updatedAt = now
   return p
 }
