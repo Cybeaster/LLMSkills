@@ -17,7 +17,9 @@ Three things are needed:
 
 Sessions can spawn **child sessions** in other terminals (a parent `beginner-courses` spawns `course-python`, `course-javascript`, `course-go`). Children are nested under the parent task that spawned them, share a brief written by the parent, and their progress and open questions roll up to the parent.
 
-Out of scope for v1 (see §9): pools derived from transcripts, a web view, resuming external sessions in herdr, sending prompts to sessions, cross-machine sessions.
+The person often drives the machine from a phone through Remote Control (`claude rc`). The overview must work there too: `/orch` in any session shows every session as tap-through choices, and the person can answer a waiting session's question from it (§8).
+
+Out of scope for v1 (see §10): pools derived from transcripts, a web view, resuming external sessions in herdr, free-form prompting of sessions (only answers to ⚑ are sent), cross-machine sessions.
 
 ## 2. What already exists on the machine
 
@@ -40,6 +42,7 @@ Nothing records which session spawned which, so the parent link has to be declar
 | UI | A TUI (`orch tui`) run in its own herdr pane |
 | Sessions not started through herdr | Listed like the rest, tagged `external`; pool and evidence work the same, only pane focus is unavailable |
 | Parent/child link | Declared by the parent through `orch spawn-child`, which passes the link and brief to the child's environment; a TUI key links by hand as fallback |
+| Remote use (`claude rc`) | `/orch` in any session: an interactive overview through AskUserQuestion, links to each session on claude.ai, push notification on ⚑, and answers to ⚑ delivered into the waiting session. Not an artifact page, not a local web server |
 | Build approach | One plugin with one CLI that owns every write; skill, hooks and TUI are thin layers over it. Not hand-edited JSON, not an MCP server |
 
 ## 4. Architecture
@@ -47,7 +50,8 @@ Nothing records which session spawned which, so the parent link has to be declar
 ```
 plugins/orchestrator/
   bin/orch          CLI: every read and write goes through it
-  skills/orch/      teaches: draft the pool first, tick with evidence, spawn children via orch
+  skills/orch/      teaches: draft the pool first, tick with evidence, spawn children via orch, push on ask
+  commands/orch.md  /orch: the interactive overview for Remote Control (§8)
   hooks/            SessionStart → orch register ; UserPromptSubmit → orch answered ; Stop → orch nudge
   src/              TypeScript: store, model, sources, CLI, TUI (Ink)
 ```
@@ -111,6 +115,8 @@ orch task done t2 --evidence commit:abc123 | pr:41 | ci:<run-url> | cmd:"npm tes
 orch ask t2 "Which difficulty curve for Go?"          # sets needsInput
 orch spawn-child t1 --name course-go --cwd .worktrees/course-go --brief docs/course-brief.md
 orch status                                           # this session's pool as text
+orch status --all [--json]                            # every session, as text or JSON (§8)
+orch reply <session> "text"                           # answer a session's ⚑ (§8)
 orch tui                                              # the viewer (§7)
 ```
 
@@ -163,11 +169,34 @@ beginner-courses — Beginner courses for all languages
 
 Evidence marks: ✓ proven, `~` claimed (no evidence or note only), ✗ a live CI/PR check disagrees with the tick.
 
-**Keys:** `↑↓`/`jk` move, `Enter` open, `Esc` back, `f` focus the session's herdr pane (external sessions show cwd and TTY instead), `l` link the selected session under a parent task, `r` refresh, `/` filter, `q` quit.
+**Keys:** `↑↓`/`jk` move, `Enter` open, `Esc` back, `f` focus the session's herdr pane (external sessions show cwd and TTY instead), `o` print the session's claude.ai link, `l` link the selected session under a parent task, `r` refresh, `/` filter, `q` quit.
 
 **Refresh:** fs.watch on `$ORCH_HOME` and `~/.claude/sessions/`; `herdr agent list` every 3 s; `gh` every 60 s, only for CI and PR evidence.
 
-## 8. Failure handling
+## 8. Remote use (`claude rc`)
+
+The TUI lives in a terminal pane and cannot be seen from a phone. Remote use goes through the chat of any session instead.
+
+**`/orch` command.** It runs `orch status --all --json` and drives an AskUserQuestion loop, which Remote Control renders as tappable choices:
+
+1. *Which session?* One option per session, the ones with ⚑ first: `beginner-courses 2/4 ⚑`. With more than four, the ⚑ sessions and the most recently active fill the slots and *Other* takes a name.
+2. The chosen session's pool is printed as a short list, then *What now?* with **Answer ⚑** (only when the session has one), **Open session**, **Back**.
+3. **Answer ⚑** takes the person's text and runs `orch reply`. **Open session** prints the claude.ai link.
+
+**Links.** A session's entry in `~/.claude/sessions/<pid>.json` carries `bridgeSessionId` when it is on Remote Control; its link is `https://claude.ai/code/<bridgeSessionId>`. Sessions without one show no link.
+
+**Push on ⚑.** The skill tells a session that runs `orch ask` to also send a push notification naming itself and the question, so the person learns about it on the phone without opening `/orch`.
+
+**`orch reply <session> "text"`.** Delivers the answer into the waiting session as its next prompt, then clears that task's `needsInput`:
+
+| Target | Route |
+| --- | --- |
+| herdr pane | `herdr agent prompt <pane_id> "<text>"`; if the agent is working, `herdr agent wait` for idle up to 10 min first |
+| not in herdr | `orch reply` exits with code 3 and prints the session's name; `/orch` then sends the text with Claude's SendMessage to that session |
+
+The text is prefixed `[orch reply to: "<question>"]` so the receiving session knows which ⚑ it answers. `orch reply` refuses a session with no open ⚑; free-form prompting stays out of scope.
+
+## 9. Failure handling
 
 | Case | Behaviour |
 | --- | --- |
@@ -176,19 +205,21 @@ Evidence marks: ✓ proven, `~` claimed (no evidence or note only), ✗ a live C
 | `gh` missing or offline | CI/PR evidence shown as *unverified*, not ✗ |
 | Child's parent pool gone | Child shown at top level as *orphan*; `l` relinks it |
 | Two sessions in one cwd | Always told apart by `sessionId`, never by path |
+| `orch reply` target ended or its pane gone | Refused with the reason; the ⚑ stays open |
 | Concurrent writes (child registering into parent) | Atomic rename plus a per-file lock in `orch` |
 
-## 9. Out of scope for v1
+## 10. Out of scope for v1
 
 - Pools derived from transcripts for sessions that never wrote one.
 - A local web view (the store is plain JSON, so it can be added without redesign).
 - Resuming an exited external session inside herdr.
-- The orchestrator sending prompts or keys to sessions.
+- Sending free-form prompts or keys to sessions; only answers to ⚑ go through `orch reply`.
 - Sessions on other machines.
 
-## 10. Testing
+## 11. Testing
 
 - **Unit:** the pool model and rules (evidence states, child rollup, ⚑ bubbling, `plan` keeping done tasks), and the join of registry, herdr and `gh` output, against fixtures recorded from real `~/.claude/sessions/*.json` and `herdr agent list`.
 - **CLI:** each command against a temp `ORCH_HOME`, including concurrent writes to one pool.
+- **Remote:** `orch status --all --json` against fixtures, including `bridgeSessionId` links; `orch reply` against stubbed herdr (idle, busy then idle, pane gone) and the non-herdr exit code.
 - **TUI:** snapshot tests of the list and pool views with `ink-testing-library`.
 - **End-to-end smoke:** a fake parent runs `spawn-child` with herdr stubbed; the child's SessionStart hook links it, and the parent's rollup updates.
