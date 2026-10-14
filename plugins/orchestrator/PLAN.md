@@ -202,6 +202,7 @@ process.chdir(fileURLToPath(new URL('.', import.meta.url)))
 const banner = {
   js: "#!/usr/bin/env node\nimport { createRequire as __orchRequire } from 'node:module';\nconst require = __orchRequire(import.meta.url);",
 }
+
 // Ink imports react-devtools-core only when DEV=true; as an external it would be hoisted to a
 // top-level import and crash the ESM bundle at load, so it is stubbed instead.
 const stubDevtools = {
@@ -211,7 +212,10 @@ const stubDevtools = {
     b.onLoad({ filter: /.*/, namespace: 'orch-stub' }, () => ({ contents: 'export default { initialize() {}, connectToDevTools() {} }', loader: 'js' }))
   },
 }
+
+// esbuild captures process.cwd() when it is imported, before the chdir above runs, so pin it here.
 const common = {
+  absWorkingDir: process.cwd(),
   bundle: true,
   platform: 'node',
   format: 'esm',
@@ -219,8 +223,6 @@ const common = {
   jsx: 'automatic',
   banner,
   plugins: [stubDevtools],
-  // esbuild reads process.cwd() when it is imported, before the chdir above
-  absWorkingDir: process.cwd(),
   logLevel: 'warning',
 }
 
