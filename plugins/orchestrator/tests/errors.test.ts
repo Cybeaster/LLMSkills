@@ -7,6 +7,7 @@ describe('OrchError', () => {
     expect(e).toBeInstanceOf(Error)
     expect(e.message).toBe('nope')
     expect(e.code).toBe(1)
+    expect(e.name).toBe('OrchError')
     expect(new OrchError('usage', 2).code).toBe(2)
   })
 })
