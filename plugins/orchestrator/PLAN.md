@@ -3004,6 +3004,7 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
 - Create: `plugins/orchestrator/src/tui/main.tsx`
 - Modify: `plugins/orchestrator/src/main.ts` (route `tui`)
 - Modify: `plugins/orchestrator/build.mjs` (second bundle)
+- Modify: `plugins/orchestrator/package.json` (`check:bundle` also requires the bundles to be tracked)
 - Test: `plugins/orchestrator/tests/tui.test.tsx`
 
 - [ ] **Step 1: Write the failing tests**
@@ -3322,6 +3323,12 @@ mkdirSync('lib', { recursive: true })
 await build({ ...common, banner: { js: banner.js + nodeGuard }, entryPoints: ['src/tui/main.tsx'], outfile: 'lib/orch-tui.mjs' })
 ```
 
+In `package.json`, make `check:bundle` also fail when a bundle was built but never added to git (`git diff` alone only sees tracked files):
+
+```json
+    "check:bundle": "node build.mjs && git diff --exit-code -- bin lib && git ls-files --error-unmatch bin/orch lib/orch-tui.mjs",
+```
+
 - [ ] **Step 4: Run them to see them pass**
 
 Run: `npm test && npm run typecheck`
@@ -3335,7 +3342,7 @@ Expected: the header and one row per running Claude session (they show `no pool`
 - [ ] **Step 6: Commit**
 
 ```bash
-git add plugins/orchestrator/src plugins/orchestrator/tests plugins/orchestrator/build.mjs plugins/orchestrator/bin plugins/orchestrator/lib
+git add plugins/orchestrator/src plugins/orchestrator/tests plugins/orchestrator/build.mjs plugins/orchestrator/package.json plugins/orchestrator/bin plugins/orchestrator/lib
 git commit -m "Add the orchestrator TUI" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
 ```
