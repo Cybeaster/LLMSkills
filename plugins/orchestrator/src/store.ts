@@ -19,7 +19,7 @@ export function readPool(home: string, id: string): Pool | undefined {
 export function writePool(home: string, pool: Pool): void {
   mkdirSync(home, { recursive: true })
   const path = poolPath(home, pool.sessionId)
-  const tmp = `${path}.${process.pid}.tmp`
+  const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`
   writeFileSync(tmp, JSON.stringify(pool, null, 2))
   renameSync(tmp, path)
 }
@@ -56,6 +56,10 @@ async function withLock<T>(home: string, id: string, fn: () => T): Promise<T> {
       break
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
+      // Known race: two processes that both judge the same crashed holder's lock stale can, inside a
+      // microseconds-wide window, both proceed (one removes the other's fresh lock). That needs a
+      // crash first, costs at most one lost update, and the pool file stays valid JSON because
+      // writePool renames atomically.
       try {
         if (Date.now() - statSync(lock).mtimeMs > STALE_LOCK_MS) {
           rmSync(lock, { recursive: true, force: true })
