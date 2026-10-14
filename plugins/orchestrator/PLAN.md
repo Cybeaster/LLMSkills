@@ -144,8 +144,10 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
   "name": "orchestrator",
   "private": true,
   "type": "module",
+  "engines": { "node": ">=20" },
   "scripts": {
     "build": "node build.mjs",
+    "check:bundle": "node build.mjs && git diff --exit-code -- bin lib",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
@@ -188,14 +190,26 @@ import { defineConfig } from 'vitest/config'
 export default defineConfig({ esbuild: { jsx: 'automatic' } })
 ```
 
-`build.mjs` (the `require` shim lets bundled CommonJS code such as React load Node built-ins inside an ESM bundle):
+`build.mjs` (the `require` shim lets bundled CommonJS code such as React load Node built-ins inside an ESM bundle; `react-devtools-core` is stubbed because, marked external, esbuild hoists Ink's lazy import of it to a top-level import that fails at load with `ERR_MODULE_NOT_FOUND`, found in review):
 
 ```js
 import { build } from 'esbuild'
 import { chmodSync, mkdirSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+
+process.chdir(fileURLToPath(new URL('.', import.meta.url)))
 
 const banner = {
   js: "#!/usr/bin/env node\nimport { createRequire as __orchRequire } from 'node:module';\nconst require = __orchRequire(import.meta.url);",
+}
+// Ink imports react-devtools-core only when DEV=true; as an external it would be hoisted to a
+// top-level import and crash the ESM bundle at load, so it is stubbed instead.
+const stubDevtools = {
+  name: 'stub-react-devtools-core',
+  setup(b) {
+    b.onResolve({ filter: /^react-devtools-core$/ }, () => ({ path: 'react-devtools-core', namespace: 'orch-stub' }))
+    b.onLoad({ filter: /.*/, namespace: 'orch-stub' }, () => ({ contents: 'export default { initialize() {}, connectToDevTools() {} }', loader: 'js' }))
+  },
 }
 const common = {
   bundle: true,
@@ -204,7 +218,9 @@ const common = {
   target: 'node20',
   jsx: 'automatic',
   banner,
-  external: ['react-devtools-core'],
+  plugins: [stubDevtools],
+  // esbuild reads process.cwd() when it is imported, before the chdir above
+  absWorkingDir: process.cwd(),
   logLevel: 'warning',
 }
 
@@ -238,6 +254,7 @@ describe('OrchError', () => {
     expect(e).toBeInstanceOf(Error)
     expect(e.message).toBe('nope')
     expect(e.code).toBe(1)
+    expect(e.name).toBe('OrchError')
     expect(new OrchError('usage', 2).code).toBe(2)
   })
 })
@@ -254,6 +271,8 @@ Expected: FAIL, `Cannot find module '../src/errors.js'`.
 
 ```ts
 export class OrchError extends Error {
+  override name = 'OrchError'
+
   constructor(message: string, readonly code = 1) {
     super(message)
   }
@@ -3292,11 +3311,13 @@ if (argv[0] === 'tui') {
 }
 ```
 
-In `build.mjs`, add after the `bin/orch` build line:
+In `build.mjs`, add after the `chmodSync('bin/orch', 0o755)` line. The TUI bundle gets a Node version guard ahead of all bundled code: a dependency of Ink uses the RegExp `v` flag and dies on Node 18 with a cryptic `SyntaxError`, and `/usr/bin/node` on this machine is v18. `bin/orch` itself gets no guard, because the CLI and hooks run fine on Node 18.
 
 ```js
+const nodeGuard =
+  "\nif (+process.versions.node.split('.')[0] < 20) { process.stderr.write('orch tui: needs Node 20 or newer, got ' + process.version + ' at ' + process.execPath + '\\n'); process.exit(1); }"
 mkdirSync('lib', { recursive: true })
-await build({ ...common, entryPoints: ['src/tui/main.tsx'], outfile: 'lib/orch-tui.mjs' })
+await build({ ...common, banner: { js: banner.js + nodeGuard }, entryPoints: ['src/tui/main.tsx'], outfile: 'lib/orch-tui.mjs' })
 ```
 
 - [ ] **Step 4: Run them to see them pass**
@@ -3307,7 +3328,7 @@ Expected: every suite passes; no type errors.
 - [ ] **Step 5: Build and open the TUI against the real machine**
 
 Run: `npm run build && ./bin/orch tui`
-Expected: the header and one row per running Claude session (they show `no pool` until the plugin is installed), `j`/`k` move, `f` jumps to a herdr pane, `q` quits. If the bundle fails to load with `Top-level await` or `Dynamic require` errors, the `banner` / `external` settings in `build.mjs` are what to fix.
+Expected: the header and one row per running Claude session (they show `no pool` until the plugin is installed), `j`/`k` move, `f` jumps to a herdr pane, `q` quits. Also run `/usr/bin/node lib/orch-tui.mjs` (Node 18): it must print `orch tui: needs Node 20 or newer, got v18…` and exit 1. If the bundle fails to load with `ERR_MODULE_NOT_FOUND` for some package, add it to the stub plugin in `build.mjs` the way `react-devtools-core` is; `Dynamic require` errors point at the `require` shim in `banner`.
 
 - [ ] **Step 6: Commit**
 
@@ -3435,6 +3456,7 @@ cd plugins/orchestrator
 npm install
 npm test && npm run typecheck
 npm run build      # bin/orch and lib/orch-tui.mjs are committed: rebuild before committing
+npm run check:bundle   # after committing: fails if the committed bundles are stale
 ```
 
 Pools live in `~/.claude/orchestrator/<sessionId>.json` (`ORCH_HOME` overrides); hook errors go to `orch.log` there.
