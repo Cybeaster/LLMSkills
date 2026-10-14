@@ -317,8 +317,9 @@ import { describe, expect, it } from 'vitest'
 import { OrchError } from '../src/errors.js'
 import {
   addTask, askTask, blockTask, clearQuestions, doneTask, linkChild, newPool, plan,
-  setParent, setTitle, startTask, unlinkChild,
+  setParent, setTitle, startTask, startTurn, unlinkChild,
 } from '../src/model.js'
+import type { Pool } from '../src/model.js'
 
 const base = () => newPool('s1', '/repo', 100)
 
@@ -329,14 +330,22 @@ describe('plan', () => {
     expect(p.touchedAt).toBe(200)
   })
 
-  it('keeps started, done, blocked, parent and asking tasks and never reuses ids', () => {
+  it('keeps started, done, blocked and asking tasks and never reuses ids', () => {
     let p = plan(base(), ['a', 'b', 'c', 'd'], 200)
     p = doneTask(p, 't1', { kind: 'commit', ref: 'abc1234' }, 210)
+    p = blockTask(p, 't3', 'x', 215)
     p = startTask(p, 't2', 220)
     p = askTask(p, 't4', 'which?', 230)
     p = plan(p, ['x'], 240)
-    expect(p.tasks.map(t => t.id)).toEqual(['t1', 't2', 't4', 't5'])
+    expect(p.tasks.map(t => t.id)).toEqual(['t1', 't2', 't3', 't4', 't5'])
     expect(p.tasks[0].evidence).toEqual({ kind: 'commit', ref: 'abc1234' })
+  })
+
+  it('takes the next id from the highest existing one when seq is missing', () => {
+    const p = plan(base(), ['a', 'b'], 200)
+    delete (p as Partial<Pool>).seq
+    expect(addTask(p, 'c', 210).tasks.map(t => t.id)).toEqual(['t1', 't2', 't3'])
+    expect(plan(p, ['x', 'y'], 210).tasks.map(t => t.id)).toEqual(['t3', 't4'])
   })
 
   it('does not mutate its input', () => {
@@ -363,6 +372,18 @@ describe('task edits', () => {
     p = doneTask(p, 't1', { kind: 'pr', ref: '41' }, 210)
     p = doneTask(p, 't1', undefined, 220)
     expect(p.tasks[0].evidence).toBeUndefined()
+  })
+
+  it('clears a pending question when the task is finished', () => {
+    let p = askTask(addTask(base(), 'a', 200), 't1', 'which?', 210)
+    p = doneTask(p, 't1', undefined, 220)
+    expect(p.tasks[0].needsInput).toBeUndefined()
+  })
+
+  it('drops evidence when a done task is started or blocked again', () => {
+    const done = doneTask(addTask(base(), 'a', 200), 't1', { kind: 'commit', ref: 'abc1234' }, 210)
+    expect(startTask(done, 't1', 220).tasks[0].evidence).toBeUndefined()
+    expect(blockTask(done, 't1', 'x', 220).tasks[0].evidence).toBeUndefined()
   })
 
   it('throws OrchError for an unknown id', () => {
@@ -397,16 +418,94 @@ describe('links', () => {
     expect(p.touchedAt).toBe(200)
   })
 
+  it('counts a link made by the owner as an own write', () => {
+    const p = linkChild(plan(base(), ['fan out'], 200), 't1', 'c1', 300, true)
+    expect(p).toMatchObject({ touchedAt: 300, updatedAt: 300 })
+    expect(p.tasks[0]).toMatchObject({ children: ['c1'], status: 'in_progress' })
+  })
+
+  it('keeps a done task done when a child is linked', () => {
+    let p = doneTask(plan(base(), ['a'], 200), 't1', undefined, 210)
+    p = linkChild(p, 't1', 'c1', 300, true)
+    expect(p.tasks[0]).toMatchObject({ status: 'done', children: ['c1'] })
+  })
+
   it('unlinks a child and drops an empty list', () => {
     let p = linkChild(plan(base(), ['fan out'], 200), 't1', 'c1', 300)
     p = unlinkChild(p, 't1', 'c1', 310)
     expect(p.tasks[0].children).toBeUndefined()
   })
 
+  it('leaves the tasks alone when unlinking from an unknown task', () => {
+    const p = plan(base(), ['a'], 200)
+    const q = unlinkChild(p, 't9', 'c1', 310)
+    expect(q.tasks).toEqual(p.tasks)
+    expect(q.updatedAt).toBe(310)
+  })
+
   it('records the parent and the brief', () => {
     const p = setParent(base(), { sessionId: 'p1', taskId: 't2' }, '/repo/brief.md', 300)
     expect(p).toMatchObject({ parent: { sessionId: 'p1', taskId: 't2' }, brief: '/repo/brief.md', updatedAt: 300 })
     expect(p.touchedAt).toBeUndefined()
+  })
+
+  it('drops the brief when moved to another parent without a new one', () => {
+    const p1 = setParent(base(), { sessionId: 'p1', taskId: 't1' }, '/a.md', 300)
+    const moved = setParent(p1, { sessionId: 'p2', taskId: 't1' }, undefined, 310)
+    expect(moved.parent).toEqual({ sessionId: 'p2', taskId: 't1' })
+    expect(moved.brief).toBeUndefined()
+    expect(setParent(p1, { sessionId: 'p2', taskId: 't1' }, '/b.md', 310).brief).toBe('/b.md')
+  })
+
+  it('keeps the brief when the same parent is recorded again without one', () => {
+    const p1 = setParent(base(), { sessionId: 'p1', taskId: 't1' }, '/a.md', 300)
+    expect(setParent(p1, { sessionId: 'p1', taskId: 't3' }, undefined, 310).brief).toBe('/a.md')
+  })
+})
+
+describe('turns', () => {
+  it('marks the start of a turn without counting as an own write', () => {
+    const p = startTurn(base(), 400)
+    expect(p).toMatchObject({ turnStartedAt: 400, updatedAt: 400 })
+    expect(p.touchedAt).toBeUndefined()
+    expect(startTurn(plan(base(), ['a'], 200), 400).touchedAt).toBe(200)
+  })
+})
+
+describe('immutability', () => {
+  const rich = (): Pool => {
+    let p = plan(base(), ['a', 'b', 'c', 'd'], 200)
+    p = doneTask(p, 't1', { kind: 'cmd', ref: 'npm test', exit: 0 }, 210)
+    p = linkChild(p, 't2', 'c1', 220)
+    p = blockTask(p, 't3', 'waiting', 230)
+    p = askTask(p, 't4', 'which?', 240)
+    p = setParent(p, { sessionId: 'p1', taskId: 't9' }, '/repo/brief.md', 250)
+    return startTurn(setTitle(p, 'Courses', 255), 260)
+  }
+
+  it('no mutation changes its input', () => {
+    const mutations: [string, (p: Pool) => Pool | undefined][] = [
+      ['plan', p => plan(p, ['x'], 300)],
+      ['addTask', p => addTask(p, 'x', 300)],
+      ['setTitle', p => setTitle(p, 'Other', 300)],
+      ['startTask', p => startTask(p, 't3', 300)],
+      ['blockTask', p => blockTask(p, 't1', 'x', 300)],
+      ['doneTask', p => doneTask(p, 't4', { kind: 'pr', ref: '1' }, 300)],
+      ['askTask', p => askTask(p, 't2', 'q', 300)],
+      ['clearQuestions', p => clearQuestions(p, 300)],
+      ['clearQuestions (one task)', p => clearQuestions(p, 300, 't4')],
+      ['setParent', p => setParent(p, { sessionId: 'p2', taskId: 't1' }, undefined, 300)],
+      ['linkChild', p => linkChild(p, 't2', 'c2', 300, true)],
+      ['unlinkChild', p => unlinkChild(p, 't2', 'c1', 300)],
+      ['startTurn', p => startTurn(p, 300)],
+    ]
+    const pool = rich()
+    const before = structuredClone(pool)
+    for (const [name, run] of mutations) {
+      const out = run(pool)
+      expect(out, name).not.toBe(pool)
+      expect(pool, name).toEqual(before)
+    }
   })
 })
 ```
@@ -467,6 +566,12 @@ function find(p: Pool, id: string): Task {
   return t
 }
 
+// seq may be missing from a hand-edited or older file; never hand out an id already present.
+function nextId(p: Pool): string {
+  p.seq = Math.max(p.seq ?? 0, ...p.tasks.map(t => Number(t.id.slice(1)) || 0)) + 1
+  return `t${p.seq}`
+}
+
 // A write by the session itself through the CLI: it keeps the pool current.
 function own(p: Pool, now: number): Pool {
   p.updatedAt = now
@@ -477,13 +582,14 @@ function own(p: Pool, now: number): Pool {
 export function plan(pool: Pool, texts: string[], now: number): Pool {
   const p = clone(pool)
   const kept = p.tasks.filter(t => t.status !== 'pending' || t.children?.length || t.needsInput)
-  p.tasks = [...kept, ...texts.map(text => ({ id: `t${++p.seq}`, text, status: 'pending' as const }))]
+  const fresh = texts.map(text => ({ id: nextId(p), text, status: 'pending' as const }))
+  p.tasks = [...kept, ...fresh]
   return own(p, now)
 }
 
 export function addTask(pool: Pool, text: string, now: number): Pool {
   const p = clone(pool)
-  p.tasks.push({ id: `t${++p.seq}`, text, status: 'pending' })
+  p.tasks.push({ id: nextId(p), text, status: 'pending' })
   return own(p, now)
 }
 
@@ -498,6 +604,7 @@ export function startTask(pool: Pool, id: string, now: number): Pool {
   const t = find(p, id)
   t.status = 'in_progress'
   delete t.blockedReason
+  delete t.evidence
   return own(p, now)
 }
 
@@ -506,6 +613,7 @@ export function blockTask(pool: Pool, id: string, reason: string, now: number): 
   const t = find(p, id)
   t.status = 'blocked'
   t.blockedReason = reason
+  delete t.evidence
   return own(p, now)
 }
 
@@ -514,6 +622,7 @@ export function doneTask(pool: Pool, id: string, evidence: Evidence | undefined,
   const t = find(p, id)
   t.status = 'done'
   delete t.blockedReason
+  delete t.needsInput
   if (evidence) t.evidence = evidence
   else delete t.evidence
   return own(p, now)
@@ -536,17 +645,21 @@ export function clearQuestions(pool: Pool, now: number, taskId?: string): Pool |
 
 export function setParent(pool: Pool, parent: ParentLink, brief: string | undefined, now: number): Pool {
   const p = clone(pool)
+  const moved = p.parent?.sessionId !== parent.sessionId
   p.parent = parent
   if (brief) p.brief = brief
+  else if (moved) delete p.brief
   p.updatedAt = now
   return p
 }
 
-export function linkChild(pool: Pool, taskId: string, childId: string, now: number): Pool {
+// byOwner: the parent session itself made the link (spawn-child, its own orch link), so it counts as keeping its pool current.
+export function linkChild(pool: Pool, taskId: string, childId: string, now: number, byOwner = false): Pool {
   const p = clone(pool)
   const t = find(p, taskId)
   t.children = [...new Set([...(t.children ?? []), childId])]
   if (t.status === 'pending') t.status = 'in_progress'
+  if (byOwner) return own(p, now)
   p.updatedAt = now
   return p
 }
@@ -558,6 +671,14 @@ export function unlinkChild(pool: Pool, taskId: string, childId: string, now: nu
     t.children = t.children.filter(c => c !== childId)
     if (!t.children.length) delete t.children
   }
+  p.updatedAt = now
+  return p
+}
+
+// Set by the UserPromptSubmit hook: not an own write.
+export function startTurn(pool: Pool, now: number): Pool {
+  const p = clone(pool)
+  p.turnStartedAt = now
   p.updatedAt = now
   return p
 }
@@ -2419,7 +2540,7 @@ Expected: FAIL, `orch: unknown command hook` makes the first assertions fail.
 ```ts
 import { appendFileSync, closeSync, fstatSync, openSync, readSync } from 'node:fs'
 import type { Ctx } from './ctx.js'
-import { clearQuestions, linkChild, newPool, setParent } from './model.js'
+import { clearQuestions, linkChild, newPool, setParent, startTurn } from './model.js'
 import { ok, type Out } from './out.js'
 import { log, readPool, update, updateIfExists } from './store.js'
 
@@ -2482,7 +2603,7 @@ async function promptSubmit(ctx: Ctx, input: Input): Promise<Out> {
 
   await update(ctx.orchHome, id, p => {
     const q = p ?? newPool(id, input.cwd ?? ctx.cwd, now)
-    return { ...(clearQuestions(q, now) ?? q), turnStartedAt: now }
+    return startTurn(clearQuestions(q, now) ?? q, now)
   })
 
   if (!didWork || !before) return ok()
@@ -2645,6 +2766,8 @@ describe('orch spawn-child', () => {
     expect(intro).toMatch(/child session of "Courses".*t2: "Course per language".*Read .*brief\.md first/s)
     expect(readPool(ctx.orchHome, 's-child')).toMatchObject({ parent: { sessionId: 's-self', taskId: 't2' }, brief: join(ctx.cwd, 'brief.md') })
     expect(readPool(ctx.orchHome, 's-self')!.tasks[1]).toMatchObject({ children: ['s-child'], status: 'in_progress' })
+    // spawning is the parent's own work: it must not look stale to the prompt-submit hook
+    expect(readPool(ctx.orchHome, 's-self')!.touchedAt).toBeGreaterThan(1000)
   })
 
   it('prints a command to run by hand outside herdr', async () => {
@@ -2709,16 +2832,21 @@ import { linkChild, newPool, setParent, unlinkChild } from './model.js'
 import { readPool, update, updateIfExists } from './store.js'
 import { readLiveSessions } from './sources/sessions.js'
 
-export async function linkSessions(ctx: Ctx, childId: string, parentId: string, taskId: string, brief?: string): Promise<void> {
+export type LinkOptions = {
+  brief?: string
+  byParent?: boolean // the parent session itself is linking (spawn-child, its own orch link): an own write
+}
+
+export async function linkSessions(ctx: Ctx, childId: string, parentId: string, taskId: string, opts: LinkOptions = {}): Promise<void> {
   if (childId === parentId) throw new OrchError('a session cannot be its own parent')
   if (!readPool(ctx.orchHome, parentId)?.tasks.some(t => t.id === taskId)) throw new OrchError(`the parent has no task ${taskId}`)
   const now = ctx.now()
   const previous = readPool(ctx.orchHome, childId)?.parent
   const cwd = readLiveSessions(ctx.claudeHome, ctx.isAlive).find(s => s.sessionId === childId)?.cwd ?? ''
-  await update(ctx.orchHome, childId, p => setParent(p ?? newPool(childId, cwd, now), { sessionId: parentId, taskId }, brief, now))
+  await update(ctx.orchHome, childId, p => setParent(p ?? newPool(childId, cwd, now), { sessionId: parentId, taskId }, opts.brief, now))
   if (previous && (previous.sessionId !== parentId || previous.taskId !== taskId))
     await updateIfExists(ctx.orchHome, previous.sessionId, p => unlinkChild(p, previous.taskId, childId, now))
-  await updateIfExists(ctx.orchHome, parentId, p => linkChild(p, taskId, childId, now))
+  await updateIfExists(ctx.orchHome, parentId, p => linkChild(p, taskId, childId, now, opts.byParent))
 }
 ```
 
@@ -2784,7 +2912,7 @@ export async function spawnChild(ctx: Ctx, o: SpawnOptions): Promise<Out> {
   }
   if (!childId) throw new OrchError(`started ${name} in ${paneId} but could not read its session id; link it later: orch link ${name} ${parentId} ${task.id}`)
   // herdr cannot set the child's environment, so the parent writes the link before the intro goes out.
-  await linkSessions(ctx, childId, parentId, task.id, brief)
+  await linkSessions(ctx, childId, parentId, task.id, { brief, byParent: true })
   await ctx.herdr.prompt(name, intro)
   return ok(`${JSON.stringify({ sessionId: childId, agent: name, paneId })}\n`)
 }
@@ -2806,7 +2934,7 @@ async function cmdLink(ctx: Ctx, args: string[]): Promise<Out> {
   const rows = await collect(ctx)
   const c = resolveTarget(rows, child)
   const p = resolveTarget(rows, parent)
-  await linkSessions(ctx, c.sessionId, p.sessionId, taskId)
+  await linkSessions(ctx, c.sessionId, p.sessionId, taskId, { byParent: ctx.env.CLAUDE_SESSION_ID === p.sessionId })
   return ok(`${c.name} is now under ${p.name} ${taskId}\n`)
 }
 
@@ -3373,7 +3501,7 @@ The person runs many Claude sessions at once and follows them through one overvi
 
 ## Three habits
 
-1. **Plan first.** Before real work, write the steps: `orch plan "Create course" "Run audit" "Re-check CI"` and give the session a title once: `orch title "Beginner courses for all languages"`. Re-planning keeps finished and started tasks.
+1. **Plan first.** Before real work, write the steps: `orch plan "Create course" "Run audit" "Re-check CI"` and give the session a title once: `orch title "Beginner courses for all languages"`. Running `orch plan` again replaces only the pending steps and keeps finished, started, blocked and asking ones, so list only the steps still to do.
 2. **Tick with evidence, as you go.** When a step is done, tick it right away, not in a batch at the end:
    - `orch task done t2 --evidence commit:<sha>`
    - `orch task done t3 --evidence pr:<number>` or `ci:<run-url>` (orch rechecks these live)
