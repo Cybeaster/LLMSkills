@@ -1,0 +1,6 @@
+#!/usr/bin/env node
+import { createRequire as __orchRequire } from 'node:module';
+const require = __orchRequire(import.meta.url);
+
+// src/main.ts
+process.stdout.write("orch: not built yet\n");
