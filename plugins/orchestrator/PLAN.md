@@ -388,6 +388,8 @@ describe('task edits', () => {
 
   it('throws OrchError for an unknown id', () => {
     expect(() => startTask(base(), 't9', 200)).toThrow(OrchError)
+    // the parent may re-plan between the link check and the locked update; never skip silently
+    expect(() => linkChild(base(), 't9', 'c1', 200)).toThrow(OrchError)
   })
 
   it('sets the title as an own write', () => {
@@ -2202,6 +2204,14 @@ export function resolveSelf(ctx: Ctx): string {
   }
   throw new OrchError('cannot tell which session this is: run orch from inside a Claude Code session')
 }
+
+export function trySelf(ctx: Ctx): string | undefined {
+  try {
+    return resolveSelf(ctx)
+  } catch {
+    return undefined
+  }
+}
 ```
 
 `src/collect.ts`:
@@ -2721,6 +2731,16 @@ describe('orch link', () => {
     expect(readPool(ctx.orchHome, 's-old')!.tasks[0].children).toBeUndefined()
   })
 
+  it('counts the parent linking a child under its own task as its own write', async () => {
+    const parents = new Map([[4242, 1]])
+    const ctx = makeCtx({ env: {}, ppidOf: pid => parents.get(pid) })
+    writeSession(ctx, { pid: 1, sessionId: 's-par', name: 'courses' })
+    writeSession(ctx, { pid: 2, sessionId: 's-kid', name: 'kid' })
+    writePool(ctx.orchHome, plan(newPool('s-par', '/r', 1), ['fan out'], 2))
+    await run(['link', 'kid', 'courses', 't1'], ctx)
+    expect(readPool(ctx.orchHome, 's-par')!.touchedAt).toBeGreaterThan(1000)
+  })
+
   it('refuses unknown tasks, self-links and ambiguous names', async () => {
     const ctx = makeCtx()
     writeSession(ctx, { pid: 1, sessionId: 's-par', name: 'dup' })
@@ -2926,6 +2946,8 @@ import { spawnChild } from './spawn.js'
 import { resolveTarget } from './targets.js'
 ```
 
+and change the existing `import { resolveSelf } from './self.js'` line to `import { resolveSelf, trySelf } from './self.js'`.
+
 add these two command functions above `run`:
 
 ```ts
@@ -2934,7 +2956,7 @@ async function cmdLink(ctx: Ctx, args: string[]): Promise<Out> {
   const rows = await collect(ctx)
   const c = resolveTarget(rows, child)
   const p = resolveTarget(rows, parent)
-  await linkSessions(ctx, c.sessionId, p.sessionId, taskId, { byParent: ctx.env.CLAUDE_SESSION_ID === p.sessionId })
+  await linkSessions(ctx, c.sessionId, p.sessionId, taskId, { byParent: trySelf(ctx) === p.sessionId })
   return ok(`${c.name} is now under ${p.name} ${taskId}\n`)
 }
 

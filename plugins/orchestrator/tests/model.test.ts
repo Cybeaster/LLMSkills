@@ -73,6 +73,8 @@ describe('task edits', () => {
 
   it('throws OrchError for an unknown id', () => {
     expect(() => startTask(base(), 't9', 200)).toThrow(OrchError)
+    // the parent may re-plan between the link check and the locked update; never skip silently
+    expect(() => linkChild(base(), 't9', 'c1', 200)).toThrow(OrchError)
   })
 
   it('sets the title as an own write', () => {
