@@ -1,0 +1,194 @@
+# orchestrator — one view over every local Claude Code session
+
+- **Date:** 2026-10-14
+- **Status:** design approved in brainstorm; implementation plan pending
+- **Target:** Claude Code on Linux, sessions run in herdr panes or any other terminal
+- **Home:** `plugins/orchestrator/` in the `claude-skills` marketplace (this repo)
+
+## 1. Goal and scope
+
+The person runs about ten Claude Code sessions at once and cannot hold each one's context in their head. Each session tracks its work only inside its own chat. The orchestrator gives every session a **task pool** kept outside the chat, and one TUI that lists every live session with its pool, its progress and whether it is waiting on the person.
+
+Three things are needed:
+
+1. Discover every Claude session running locally and list it, one entry per session.
+2. Opening an entry shows the pool that session must complete, for example *Create a course → Run audit → Re-check CI*.
+3. Each session writes its own pool and ticks a task only when it has actually done it, with evidence.
+
+Sessions can spawn **child sessions** in other terminals (a parent `beginner-courses` spawns `course-python`, `course-javascript`, `course-go`). Children are nested under the parent task that spawned them, share a brief written by the parent, and their progress and open questions roll up to the parent.
+
+Out of scope for v1 (see §9): pools derived from transcripts, a web view, resuming external sessions in herdr, sending prompts to sessions, cross-machine sessions.
+
+## 2. What already exists on the machine
+
+| Source | Gives | Role |
+| --- | --- | --- |
+| `~/.claude/sessions/<pid>.json` | `pid`, `sessionId`, `cwd`, `name`, `status` (busy/idle), `startedAt`, `updatedAt` for every running Claude process, herdr or not | Discovery |
+| `herdr agent list` (JSON) | `pane_id`, `agent_status`, `terminal_title`, `agent_session.value` = `sessionId` | herdr tag, pane focus, extra state |
+| `~/.claude/projects/*/<sessionId>.jsonl` | Full transcript | Not used in v1 |
+| TodoWrite / Task tools | Nothing: 0 calls across the 68 local transcripts | Not used |
+| Hooks | `SessionStart`, `UserPromptSubmit`, `Stop` | Registration, ⚑ clearing, staleness nudge |
+
+Nothing records which session spawned which, so the parent link has to be declared at spawn time.
+
+## 3. Decisions taken in the brainstorm
+
+| Question | Decision |
+| --- | --- |
+| Where the pool lives, who writes it | The session itself, through the `orch` CLI, into a shared store. A transcript-derived fallback may come later |
+| How "completed" is verified | A tick carries evidence (commit, PR, CI run, command + exit code, note). Without it the tick is shown as *claimed*. CI and PR evidence is rechecked live |
+| UI | A TUI (`orch tui`) run in its own herdr pane |
+| Sessions not started through herdr | Listed like the rest, tagged `external`; pool and evidence work the same, only pane focus is unavailable |
+| Parent/child link | Declared by the parent through `orch spawn-child`, which passes the link and brief to the child's environment; a TUI key links by hand as fallback |
+| Build approach | One plugin with one CLI that owns every write; skill, hooks and TUI are thin layers over it. Not hand-edited JSON, not an MCP server |
+
+## 4. Architecture
+
+```
+plugins/orchestrator/
+  bin/orch          CLI: every read and write goes through it
+  skills/orch/      teaches: draft the pool first, tick with evidence, spawn children via orch
+  hooks/            SessionStart → orch register ; UserPromptSubmit → orch answered ; Stop → orch nudge
+  src/              TypeScript: store, model, sources, CLI, TUI (Ink)
+```
+
+## 5. Data
+
+**Store:** `~/.claude/orchestrator/<sessionId>.json` (root overridable with `ORCH_HOME`). One file per session, written only by `orch`, through a temp file and an atomic rename.
+
+```ts
+type Pool = {
+  sessionId: string
+  title: string                                   // one line: what this session is for
+  cwd: string
+  parent?: { sessionId: string; taskId: string }  // set by spawn-child or the TUI link key
+  brief?: string                                  // absolute path of the brief this child must read
+  tasks: Task[]
+  createdAt: number
+  updatedAt: number
+}
+
+type Task = {
+  id: string                                      // 't1', 't2'… stable, never reused
+  text: string
+  status: 'pending' | 'in_progress' | 'done' | 'blocked'
+  blockedReason?: string
+  evidence?: Evidence
+  children?: string[]                             // child sessionIds spawned for this task
+  needsInput?: string                             // a question for the person
+}
+
+type Evidence =
+  | { kind: 'commit'; ref: string }               // sha
+  | { kind: 'pr';     ref: string }               // number or URL
+  | { kind: 'ci';     ref: string }               // run URL
+  | { kind: 'cmd';    ref: string; exit: number } // command orch ran itself
+  | { kind: 'note';   ref: string }               // free text; drawn as claimed
+```
+
+**Live state is not stored.** It is joined at read time from `~/.claude/sessions/*.json` (alive, busy/idle, cwd), `herdr agent list` (pane, state, herdr/external tag) and `gh` (CI and PR status, cached 60 s). When a session ends, its pool file stays and the session is shown as *ended*, so a parent's rollup survives a crashed child.
+
+**Rules, enforced by the CLI:**
+
+- `done` without evidence, or with `note` evidence, is accepted and drawn as *claimed*.
+- `cmd` evidence is produced by `orch` running the command; a non-zero exit refuses the tick.
+- A task with children counts as done only when every child pool has all tasks done.
+- A task's ⚑ shows on its own row and on every ancestor session's row.
+
+## 6. Session side
+
+**Session identity.** The SessionStart hook resolves the session id and makes it available to later `orch` calls as `CLAUDE_SESSION_ID`; without it, `orch` matches its parent PID chain against `~/.claude/sessions/*.json`.
+
+**CLI:**
+
+```
+orch plan "Create course" "Run audit" "Re-check CI"   # create, or replace the pending part of, the pool
+orch title "Beginner courses for all languages"
+orch task add "…"
+orch task start t2
+orch task block t2 "why"
+orch task done t2 --evidence commit:abc123 | pr:41 | ci:<run-url> | cmd:"npm test" | note:"…"
+orch ask t2 "Which difficulty curve for Go?"          # sets needsInput
+orch spawn-child t1 --name course-go --cwd .worktrees/course-go --brief docs/course-brief.md
+orch status                                           # this session's pool as text
+orch tui                                              # the viewer (§7)
+```
+
+`orch plan` keeps done and in-progress tasks and replaces only pending ones, so re-planning never loses evidence.
+
+**Skill `orch`.** Short; three habits:
+
+1. On a real task, run `orch plan` before starting work.
+2. Tick each step with evidence as soon as it is done, not in a batch at the end.
+3. When fanning out, write a brief and use `orch spawn-child`; never spawn by hand.
+
+**Hooks.** None of them ever blocks a turn; any error is appended to `$ORCH_HOME/orch.log` and swallowed.
+
+| Hook | Action |
+| --- | --- |
+| SessionStart | `orch register`: create the pool file if missing. If `ORCH_PARENT`, `ORCH_PARENT_TASK`, `ORCH_BRIEF` are set, record the parent link and brief, add this session to the parent task's `children`, and inject as context: *"Read <brief> first; your parent session is <title>."* |
+| UserPromptSubmit | `orch answered`: clear `needsInput` on this session's tasks, since the person just replied |
+| Stop | `orch nudge`: if the turn used Edit, Write or Bash and the pool is missing or was not touched this turn, add one line of context: *"Your orch pool is stale — update it."* |
+
+**`spawn-child`.** Reuses the `herdr-spawn-rc` approach: opens a new herdr tab in the target cwd and starts `claude` with `ORCH_PARENT`, `ORCH_PARENT_TASK`, `ORCH_BRIEF` set and an initial prompt naming the task. The parent task is set `in_progress`. The link becomes visible once the child's SessionStart hook registers. Outside herdr, `spawn-child` prints the env-prefixed command for the person to run.
+
+## 7. TUI (`orch tui`)
+
+**List view**: a tree of live and recently ended sessions.
+
+```
+ ORCHESTRATOR                                     7 live · 1 ⚑ · 2 ended
+ ▸ beginner-courses     ItAbyss          idle   herdr     2/4  ⚑1
+   ├ course-python      wt/course-python busy   herdr     3/5
+   ├ course-javascript  wt/course-js     busy   herdr     1/5
+   └ course-go          wt/course-go     ended  —         5/5 ✓
+   orchestrator         ClaudeSkills     busy   herdr     1/3
+   HEAD                 ItAbyss          idle   herdr     —  no pool
+   api-fix              strikerz         idle   external  0/2
+```
+
+- Children nest under their parent; ⚑ bubbles up to every ancestor.
+- Sessions without a pool are listed as *no pool*, not hidden.
+- Ended sessions drop off after 24 h unless they are a child of a live parent.
+
+**Pool view** (Enter):
+
+```
+beginner-courses — Beginner courses for all languages
+✓ t1 Write course brief             commit 9f3e2a1
+◐ t2 Create course per language     3 children: 1 ✓ 2 running
+⚑ t3 Pick audit rubric              "Strict or lenient for beginners?"
+· t4 Re-check CI                    ci: ✗ failing (live)
+```
+
+Evidence marks: ✓ proven, `~` claimed (no evidence or note only), ✗ a live CI/PR check disagrees with the tick.
+
+**Keys:** `↑↓`/`jk` move, `Enter` open, `Esc` back, `f` focus the session's herdr pane (external sessions show cwd and TTY instead), `l` link the selected session under a parent task, `r` refresh, `/` filter, `q` quit.
+
+**Refresh:** fs.watch on `$ORCH_HOME` and `~/.claude/sessions/`; `herdr agent list` every 3 s; `gh` every 60 s, only for CI and PR evidence.
+
+## 8. Failure handling
+
+| Case | Behaviour |
+| --- | --- |
+| Pool file unreadable | That row shows *unreadable pool*; the rest renders |
+| herdr not running | Every session tagged `external`; `f` disabled |
+| `gh` missing or offline | CI/PR evidence shown as *unverified*, not ✗ |
+| Child's parent pool gone | Child shown at top level as *orphan*; `l` relinks it |
+| Two sessions in one cwd | Always told apart by `sessionId`, never by path |
+| Concurrent writes (child registering into parent) | Atomic rename plus a per-file lock in `orch` |
+
+## 9. Out of scope for v1
+
+- Pools derived from transcripts for sessions that never wrote one.
+- A local web view (the store is plain JSON, so it can be added without redesign).
+- Resuming an exited external session inside herdr.
+- The orchestrator sending prompts or keys to sessions.
+- Sessions on other machines.
+
+## 10. Testing
+
+- **Unit:** the pool model and rules (evidence states, child rollup, ⚑ bubbling, `plan` keeping done tasks), and the join of registry, herdr and `gh` output, against fixtures recorded from real `~/.claude/sessions/*.json` and `herdr agent list`.
+- **CLI:** each command against a temp `ORCH_HOME`, including concurrent writes to one pool.
+- **TUI:** snapshot tests of the list and pool views with `ink-testing-library`.
+- **End-to-end smoke:** a fake parent runs `spawn-child` with herdr stubbed; the child's SessionStart hook links it, and the parent's rollup updates.
