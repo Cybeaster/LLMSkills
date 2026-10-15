@@ -918,6 +918,7 @@ import { join as join4 } from "node:path";
 var MAX_AGE_MS = 7 * DAY;
 var EVERY_MS = 60 * 60 * 1e3;
 var LOCK_WAIT_MS = 200;
+var MAX_PER_RUN = 100;
 var referencedIds = (ctx) => {
   const ids = /* @__PURE__ */ new Set();
   for (const e of listPools(ctx.orchHome)) {
@@ -939,13 +940,14 @@ async function pruneEmptyPools(ctx, keep) {
   const referenced = referencedIds(ctx);
   const removed = [];
   for (const { id, pool } of pools) {
+    if (removed.length >= MAX_PER_RUN) break;
     if (id === keep || live2.has(id) || referenced.has(id) || !stale(pool, now)) continue;
     try {
       await withLock(
         ctx.orchHome,
         id,
         () => {
-          if (!stale(readPool(ctx.orchHome, id), now) || alive(ctx, id) || referencedIds(ctx).has(id)) return;
+          if (!stale(readPool(ctx.orchHome, id), now) || alive(ctx, id)) return;
           unlinkSync(poolPath(ctx.orchHome, id));
           removed.push(id);
         },

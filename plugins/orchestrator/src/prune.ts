@@ -9,6 +9,7 @@ import { listPools, poolPath, readPool, withLock } from './store.js'
 const MAX_AGE_MS = 7 * DAY
 const EVERY_MS = 60 * 60 * 1000
 const LOCK_WAIT_MS = 200
+const MAX_PER_RUN = 100 // one hook never does unbounded work; the next hourly run carries on
 
 const referencedIds = (ctx: Ctx): Set<string> => {
   const ids = new Set<string>()
@@ -42,13 +43,15 @@ export async function pruneEmptyPools(ctx: Ctx, keep: string): Promise<string[]>
   const referenced = referencedIds(ctx)
   const removed: string[] = []
   for (const { id, pool } of pools) {
+    if (removed.length >= MAX_PER_RUN) break
     if (id === keep || live.has(id) || referenced.has(id) || !stale(pool, now)) continue
     try {
       await withLock(
         ctx.orchHome,
         id,
         () => {
-          if (!stale(readPool(ctx.orchHome, id), now) || alive(ctx, id) || referencedIds(ctx).has(id)) return
+          // no rescan for references: a link can only go under one of the pool's tasks, and then `stale` rejects it
+          if (!stale(readPool(ctx.orchHome, id), now) || alive(ctx, id)) return
           unlinkSync(poolPath(ctx.orchHome, id))
           removed.push(id)
         },

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { run } from '../src/cli.js'
@@ -113,6 +113,18 @@ describe('pruning empty pools at session start', () => {
     mkdirSync(`${poolPath(ctx.orchHome, 'busy')}.lock`)
     await start(ctx)
     expect(gone(ctx, 'busy')).toBe(false)
+  })
+
+  it('deletes at most 100 pools per run and carries on the next hour', async () => {
+    let now = NOW
+    const ctx = makeCtx({ now: () => now })
+    for (let i = 0; i < 300; i++) writePool(ctx.orchHome, empty(`e${i}`, NOW - 8 * D))
+    const left = () => readdirSync(ctx.orchHome).filter(n => /^e\d+\.json$/.test(n)).length
+    await start(ctx)
+    expect(left()).toBe(200)
+    now += 61 * 60_000
+    await start(ctx)
+    expect(left()).toBe(100)
   })
 
   it('prunes at most once an hour', async () => {
