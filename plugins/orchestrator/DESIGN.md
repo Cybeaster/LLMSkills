@@ -163,7 +163,6 @@ A Stop hook cannot add context without blocking the turn, so the staleness check
 - Sessions without a pool are listed as *no pool*, not hidden.
 - Ended sessions drop off after 24 h unless they are a child of a live parent.
 - A session blocked on a permission prompt or dialog shows state `waiting`.
-- A registry file counts as live only while its pid runs with the start time Claude recorded (`procStart`), as Claude Code itself checks.
 
 **Pool view** (Enter):
 
@@ -209,6 +208,7 @@ The text is prefixed `[orch reply to: "<question>"]` so the receiving session kn
 | Case | Behaviour |
 | --- | --- |
 | Pool file unreadable | That row shows *unreadable pool*; the rest renders |
+| Stale registry file (crash, recycled pid) | Live only while its pid runs with the start time Claude recorded (`procStart`), as Claude Code itself checks; otherwise *ended* |
 | herdr not running | Every session tagged `external`; `f` disabled |
 | `gh` missing or offline | CI/PR evidence shown as *unverified*, not ✗ |
 | Child's parent pool gone | Child shown at top level as *orphan*; `l` relinks it |
@@ -223,7 +223,7 @@ The text is prefixed `[orch reply to: "<question>"]` so the receiving session kn
 - Resuming an exited external session inside herdr.
 - Sending free-form prompts or keys to sessions; only answers to ⚑ go through `orch reply`.
 - Sessions on other machines.
-- Claude Code's Bash sandbox: it runs commands in their own pid namespace and limits writes, so `orch` called from inside it cannot see other sessions or write `$ORCH_HOME`.
+- Claude Code's Bash sandbox: it runs commands in their own pid namespace and limits writes, so `orch` called from inside it cannot see other sessions or write `$ORCH_HOME`. The README tells the user to add `orch *` to `sandbox.excludedCommands`.
 
 ## 11. Testing
 

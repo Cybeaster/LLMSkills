@@ -1534,6 +1534,7 @@ describe('readLiveSessions', () => {
       return true
     })
     expect(seen.get(101)).toBe('4242424')
+    expect(seen.has(103)).toBe(true)
     expect(seen.get(103)).toBeUndefined()
     // a string pid never reaches the liveness check
     expect(seen.has(108)).toBe(false)
@@ -2567,7 +2568,7 @@ export function makeCtx(over: Partial<TestCtx> = {}): TestCtx {
   return ctx
 }
 
-export function writeSession(ctx: Ctx, o: { pid: number; sessionId: string; cwd?: string; name?: string; status?: string; bridgeSessionId?: string }) {
+export function writeSession(ctx: Ctx, o: { pid: number; sessionId: string; cwd?: string; name?: string; status?: string; waitingFor?: string; bridgeSessionId?: string }) {
   writeFileSync(join(ctx.claudeHome, 'sessions', `${o.pid}.json`), JSON.stringify({ cwd: ctx.cwd, status: 'idle', kind: 'interactive', ...o }))
 }
 ```
@@ -3639,7 +3640,7 @@ describe('orch reply', () => {
     expect(readPool(ctx.orchHome, 's-ext')!.tasks[0].needsInput).toBeUndefined()
   })
 
-  it('refuses a session with no question, a blocked one and an ended one', async () => {
+  it('refuses a session with no question, a blocked one, a waiting one and an ended one', async () => {
     const ctx = makeCtx()
     writeSession(ctx, { pid: 1, sessionId: 's-quiet', name: 'quiet' })
     writePool(ctx.orchHome, plan(newPool('s-quiet', '/r', 1), ['a'], 2))
@@ -3649,6 +3650,11 @@ describe('orch reply', () => {
     const blocked = await run(['reply', 'blocked-one', 'x'], ctx)
     expect(blocked.stderr).toMatch(/permission prompt/)
     expect(readPool(ctx.orchHome, 's-blk')!.tasks[0].needsInput).toBe('Strict or lenient?')
+
+    writeSession(ctx, { pid: 40, sessionId: 's-dlg', name: 'dialog-one', status: 'waiting', waitingFor: 'dialog open' })
+    writePool(ctx.orchHome, askTask(plan(newPool('s-dlg', '/r', 1), ['a'], 2), 't1', 'q', 3))
+    expect((await run(['reply', 'dialog-one', 'x'], ctx)).stderr).toMatch(/waiting on a dialog \(dialog open\)/)
+    expect(readPool(ctx.orchHome, 's-dlg')!.tasks[0].needsInput).toBe('q')
 
     writePool(ctx.orchHome, askTask(plan(newPool('s-gone', '/r', 1), ['a'], ctx.now()), 't1', 'q', ctx.now()))
     expect((await run(['reply', 's-gone', 'x'], ctx)).stderr).toMatch(/has ended/)
@@ -3684,6 +3690,7 @@ export async function reply(ctx: Ctx, query: string, text: string | undefined, m
   if (!markOnly) {
     if (!text) throw new OrchError('missing reply text', 2)
     if (row.state === 'ended') throw new OrchError(`${row.name} has ended; its question stays open`)
+    if (row.state === 'waiting') throw new OrchError(`${row.name} is waiting on a dialog (${row.waitingFor}); answer that in the session first`)
     const message = `[orch reply to: "${task.needsInput}"] ${text}`
     if (!row.paneId) {
       // Not in herdr: /orch delivers it with SendMessage, then runs orch reply --mark-only.
@@ -4182,6 +4189,12 @@ Then start (or restart) sessions; each registers itself. `orch` is on PATH only 
 
 ```bash
 alias orch="$(ls -d ~/.claude/plugins/cache/claude-skills/orchestrator/*/ | tail -1)bin/orch"
+```
+
+If Claude Code's Bash sandbox is on, `orch` inside it cannot see other sessions or write its store: every session shows as ended and `orch plan` fails. Exclude it in your user settings (`~/.claude/settings.json`; project settings are ignored for this key):
+
+```json
+{ "sandbox": { "excludedCommands": ["orch *"] } }
 ```
 
 ## TUI keys

@@ -46,6 +46,7 @@ describe('readLiveSessions', () => {
       return true
     })
     expect(seen.get(101)).toBe('4242424')
+    expect(seen.has(103)).toBe(true)
     expect(seen.get(103)).toBeUndefined()
     // a string pid never reaches the liveness check
     expect(seen.has(108)).toBe(false)
