@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { checkKey, type Check } from '../src/evidence.js'
+import { header, flatten } from '../src/format.js'
 import { newPool, type Pool, type Task } from '../src/model.js'
 import { buildOverview, DAY, type OverviewInput, type Row } from '../src/overview.js'
 import type { HerdrAgent } from '../src/sources/herdr.js'
@@ -109,11 +110,39 @@ describe('buildOverview', () => {
     expect(rows[0].children[0]).toMatchObject({ sessionId: 'kept', state: 'ended', tag: '—' })
   })
 
-  it('survives a parent cycle and keeps every member', () => {
+  it('survives a parent cycle and shows every member exactly once', () => {
     const p = (id: string, parent: string) => ({ id, pool: pool(id, [{}], { parent: { sessionId: parent, taskId: 't1' } }) })
-    const rows = buildOverview(input({ pools: [p('A', 'B'), p('B', 'A'), p('S', 'S')], live: [live('A'), live('B'), live('S')] }))
+    // B and C are each other's parent; A and T hang off B; S is its own parent. A comes first in `ids`.
+    const rows = buildOverview(input({
+      pools: [p('A', 'B'), p('B', 'C'), p('C', 'B'), p('S', 'S'), p('T', 'B')],
+      live: [live('A'), live('B'), live('C'), live('S'), live('T')],
+    }))
     const count = (rs: Row[]): number => rs.reduce((n, r) => n + 1 + count(r.children), 0)
-    expect(count(rows)).toBe(3)
+    expect(count(rows)).toBe(5)
+    expect(flatten(rows).map(l => l.row.sessionId).sort()).toEqual(['A', 'B', 'C', 'S', 'T'])
+    expect(header(rows)).toMatch(/ 5 live /)
+  })
+
+  it('shows a long tail hanging off a cycle once, whatever order it is listed in', () => {
+    const p = (id: string, parent: string) => ({ id, pool: pool(id, [{}], { parent: { sessionId: parent, taskId: 't1' } }) })
+    // E -> D -> A -> B <-> C
+    const pools = [p('E', 'D'), p('D', 'A'), p('A', 'B'), p('B', 'C'), p('C', 'B')]
+    for (const order of [['E', 'D', 'A', 'B', 'C'], ['C', 'B', 'A', 'D', 'E'], ['D', 'C', 'E', 'A', 'B']]) {
+      const rows = buildOverview(input({ pools, live: order.map(id => live(id)) }))
+      expect(flatten(rows).map(l => l.row.sessionId).sort(), order.join()).toEqual(['A', 'B', 'C', 'D', 'E'])
+      expect(rows, order.join()).toHaveLength(1)
+    }
+  })
+
+  it('keeps ordinary roots as they are next to a cycle', () => {
+    const p = (id: string, parent?: string) => ({ id, pool: pool(id, [{}], parent ? { parent: { sessionId: parent, taskId: 't1' } } : {}) })
+    const rows = buildOverview(input({
+      pools: [p('R'), p('K', 'R'), p('X', 'Y'), p('Y', 'X')],
+      live: [live('Y'), live('K'), live('R'), live('X')],
+    }))
+    const r = rows.find(row => row.sessionId === 'R')!
+    expect(r.children.map(c => c.sessionId)).toEqual(['K'])
+    expect(flatten(rows).map(l => l.row.sessionId).sort()).toEqual(['K', 'R', 'X', 'Y'])
   })
 
   it('marks orphans and unreadable pools', () => {
@@ -135,5 +164,195 @@ describe('buildOverview', () => {
       live: [live('a'), live('b')],
     }))
     expect(rows.map(r => r.sessionId)).toEqual(['b', 'a', 'c'])
+  })
+
+  it('keeps a session name, title, question and task text on one line without escape codes', () => {
+    const evil = (s: string) => `${s}\n${s}\u001b]0;x\u0007${s}`
+    const [row] = buildOverview(input({
+      pools: [{ id: 'S', pool: pool('S', [
+        { text: 'fix\nthe\u001b]0;x\u0007bug', needsInput: 'which\ncurve\u001b]0;x\u0007?' },
+        { status: 'blocked', blockedReason: 'needs\nkey\u001b]0;x\u0007' },
+      ], { title: evil('t') }) }],
+      live: [live('S', { waitingFor: 'dialog\nopen\u001b]0;x\u0007' })],
+      agents: [agent('S', 'bad\nname\u001b]0;x\u0007')],
+    }))
+    expect(row.tasks[0].text).toBe('fix the ]0;x bug')
+    expect(row.tasks[0].detail).toBe('"which curve ]0;x ?"')
+    expect(row.tasks[1].detail).toBe('needs key ]0;x')
+    expect(row.name).toBe('bad name ]0;x')
+    expect(row.title).toBe('t t ]0;x t')
+    expect(row.waitingFor).toBe('dialog open ]0;x')
+    for (const text of [row.name, row.title, row.waitingFor!, ...row.tasks.flatMap(t => [t.text, t.detail])]) {
+      expect(text).not.toMatch(/[\u0000-\u001f\u007f]/)
+    }
+  })
+
+  describe('keeps what a session wrote on one line', () => {
+    const evil = 'a\nb\u001b]0;x\u0007'
+    const titled = { id: 'S', pool: pool('S', [{}], { title: evil }) }
+    const cases: [string, Partial<OverviewInput>, 'name' | 'title'][] = [
+      ['a herdr name', { live: [live('S')], agents: [agent('S', evil)] }, 'name'],
+      ['a session name', { live: [live('S', { name: evil })] }, 'name'],
+      ['a pool title used as the name', { pools: [titled], live: [live('S')] }, 'name'],
+      ['the start of the session id used as the name', { live: [live(`${evil}cdef`)] }, 'name'],
+      ['a pool title', { pools: [titled], live: [live('S')] }, 'title'],
+      ['a herdr title', { live: [live('S')], agents: [{ ...agent('S', 'n'), title: evil }] }, 'title'],
+    ]
+    it.each(cases)('%s', (_what, over, field) => {
+      const [row] = buildOverview(input(over))
+      expect(row[field]).toBe('a b ]0;x')
+    })
+  })
+
+  it('does not clip a question or a blocked reason', () => {
+    const long = 'q'.repeat(120)
+    const [row] = buildOverview(input({
+      pools: [{ id: 'S', pool: pool('S', [{ needsInput: long }, { status: 'blocked', blockedReason: long }]) }],
+      live: [live('S')],
+    }))
+    expect(row.tasks[0].detail).toBe(`"${long}"`)
+    expect(row.tasks[1].detail).toBe(long)
+  })
+
+  it('falls back to the next name when one is blank', () => {
+    const name = (a: string, s: string | undefined, title: string, id = 'abcdefghijkl') => {
+      const [row] = buildOverview(input({
+        pools: [{ id, pool: pool(id, [{}], { title }) }],
+        live: [live(id, { name: s })],
+        agents: [agent(id, a)],
+      }))
+      return row.name
+    }
+    expect(name('', 'api-fix', 'Courses')).toBe('api-fix')
+    expect(name('', '', 'Courses')).toBe('Courses')
+    expect(name('', '', '')).toBe('abcdefgh')
+    expect(name('  \n', undefined, 'Courses')).toBe('Courses')
+    expect(name('herdr-name', 'api-fix', 'Courses')).toBe('herdr-name')
+  })
+
+  it('is not complete, and does not finish its parent task, while a child pool is still empty', () => {
+    const rows = buildOverview(input({
+      pools: [
+        { id: 'P', pool: pool('P', [{ children: ['C'], status: 'done' }]) },
+        { id: 'C', pool: pool('C', [], { parent: { sessionId: 'P', taskId: 't1' } }) },
+      ],
+      live: [live('P'), live('C')],
+    }))
+    const [p] = rows
+    expect(p.tasks[0]).toMatchObject({ status: 'in_progress', detail: '1 children: 0 ✓ 1 running' })
+    expect(p).toMatchObject({ done: 0, total: 1, complete: false })
+    expect(p.children[0]).toMatchObject({ hasPool: false, total: 0, complete: false })
+  })
+
+  it('is complete only once every child is, not just some of them', () => {
+    const make = (second: 'done' | 'pending') => buildOverview(input({
+      pools: [
+        { id: 'P', pool: pool('P', [{ children: ['C1', 'C2'] }]) },
+        { id: 'C1', pool: pool('C1', [{ status: 'done', evidence: { kind: 'commit', ref: 'a' } }], { parent: { sessionId: 'P', taskId: 't1' } }) },
+        { id: 'C2', pool: pool('C2', [{ status: second, evidence: { kind: 'commit', ref: 'b' } }], { parent: { sessionId: 'P', taskId: 't1' } }) },
+      ],
+      live: [live('P'), live('C1'), live('C2')],
+    }))[0]
+    expect(make('pending')).toMatchObject({ complete: false, done: 0, total: 1 })
+    expect(make('pending').tasks[0]).toMatchObject({ status: 'pending', detail: '2 children: 1 ✓ 1 running' })
+    expect(make('done')).toMatchObject({ complete: true, done: 1, total: 1 })
+  })
+
+  it('judges completeness the same whatever order the sessions are listed in', () => {
+    // C's own task says done, but its child G is not: C is not complete, so P's task is not done.
+    // C has no parent link, so whether C is built before P depends on the order of `ids`.
+    const pools = [
+      { id: 'P', pool: pool('P', [{ children: ['C'], status: 'done' }]) },
+      { id: 'C', pool: pool('C', [{ children: ['G'], status: 'done' }]) },
+      { id: 'G', pool: pool('G', [{ status: 'pending' }]) },
+    ]
+    const a = buildOverview(input({ pools, live: [live('P'), live('C'), live('G')] }))
+    const b = buildOverview(input({ pools, live: [live('G'), live('C'), live('P')] }))
+    const c = buildOverview(input({ pools: [...pools].reverse(), live: [live('C'), live('P'), live('G')] }))
+    expect(b).toEqual(a)
+    expect(c).toEqual(a)
+    const p = a.find(r => r.sessionId === 'P')!
+    expect(p.tasks[0].status).toBe('in_progress')
+    expect(p).toMatchObject({ done: 0, complete: false })
+    expect(a.find(r => r.sessionId === 'C')).toMatchObject({ complete: false, done: 0 })
+  })
+
+  it('counts a chain of finished children as complete all the way up', () => {
+    const rows = buildOverview(input({
+      pools: [
+        { id: 'P', pool: pool('P', [{ children: ['C'] }]) },
+        { id: 'C', pool: pool('C', [{ children: ['G'] }], { parent: { sessionId: 'P', taskId: 't1' } }) },
+        { id: 'G', pool: pool('G', [{ status: 'done', evidence: { kind: 'commit', ref: 'abc' } }], { parent: { sessionId: 'C', taskId: 't1' } }) },
+      ],
+      live: [live('G'), live('C'), live('P')],
+    }))
+    const [p] = rows
+    expect(p).toMatchObject({ complete: true, done: 1, total: 1 })
+    expect(p.children[0]).toMatchObject({ complete: true })
+    expect(p.children[0].children[0]).toMatchObject({ complete: true })
+  })
+
+  it('never counts a parent cycle as complete', () => {
+    const rows = buildOverview(input({
+      pools: [
+        { id: 'A', pool: pool('A', [{ children: ['B'], status: 'done' }]) },
+        { id: 'B', pool: pool('B', [{ children: ['A'], status: 'done' }]) },
+      ],
+      live: [live('A'), live('B')],
+    }))
+    for (const { row } of flatten(rows)) expect(row.complete, row.sessionId).toBe(false)
+  })
+
+  it('lists ended sessions after live ones even when their names sort first', () => {
+    const rows = buildOverview(input({
+      pools: [
+        { id: 'a', pool: pool('a', [{}], { title: 'aaa' }) },
+        { id: 'z', pool: pool('z', [{}], { title: 'zzz' }) },
+        { id: 'm', pool: pool('m', [{}], { title: 'mmm' }) },
+      ],
+      live: [live('z'), live('m')],
+    }))
+    expect(rows.map(r => r.name)).toEqual(['mmm', 'zzz', 'aaa'])
+  })
+
+  it('sorts children by name', () => {
+    const child = (id: string, title: string) => ({ id, pool: pool(id, [{}], { title, parent: { sessionId: 'P', taskId: 't1' } }) })
+    const rows = buildOverview(input({
+      pools: [{ id: 'P', pool: pool('P', [{ children: ['Z', 'A', 'M'] }]) }, child('Z', 'zeta'), child('A', 'alpha'), child('M', 'mid')],
+      live: [live('P'), live('Z'), live('A'), live('M')],
+    }))
+    expect(rows[0].children.map(c => c.name)).toEqual(['alpha', 'mid', 'zeta'])
+  })
+
+  it('carries the herdr pane of a session, and none for an external one', () => {
+    const rows = buildOverview(input({
+      live: [live('H'), live('E')],
+      agents: [agent('H', 'in-herdr')],
+    }))
+    expect(rows.find(r => r.sessionId === 'H')).toMatchObject({ paneId: 'p-in-herdr', tag: 'herdr' })
+    expect(rows.find(r => r.sessionId === 'E')!.paneId).toBeUndefined()
+  })
+
+  it('does not call a child an orphan while its parent is live without a pool, or ended with one', () => {
+    const child = (id: string, parent: string) => ({ id, pool: pool(id, [{}], { parent: { sessionId: parent, taskId: 't1' } }) })
+    const rows = buildOverview(input({
+      pools: [child('K1', 'L'), child('K2', 'D'), { id: 'D', pool: pool('D', [{ children: ['K2'] }], { updatedAt: NOW - 1000 }) }],
+      live: [live('L'), live('K1'), live('K2')],
+    }))
+    const all = flatten(rows).map(l => l.row)
+    expect(all.find(r => r.sessionId === 'K1')!.orphan).toBe(false)
+    expect(all.find(r => r.sessionId === 'K2')!.orphan).toBe(false)
+    expect(all.find(r => r.sessionId === 'L')).toMatchObject({ orphan: false, hasPool: false })
+    expect(all.find(r => r.sessionId === 'K1')).toMatchObject({ hasPool: true })
+  })
+
+  it('reports hasPool only for a pool that has tasks', () => {
+    const rows = buildOverview(input({
+      pools: [{ id: 'E', pool: pool('E', []) }, { id: 'F', pool: pool('F', [{}]) }, { id: 'U', error: 'bad' }],
+      live: [live('E'), live('F'), live('U'), live('N')],
+    }))
+    const has = Object.fromEntries(rows.map(r => [r.sessionId, r.hasPool]))
+    expect(has).toEqual({ E: false, F: true, U: false, N: false })
+    expect(rows.find(r => r.sessionId === 'F')).toMatchObject({ orphan: false, total: 1, done: 0, complete: false })
   })
 })

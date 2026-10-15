@@ -15,11 +15,18 @@ export function flatten(rows: Row[]): Line[] {
   return out
 }
 
+// Only the start of a path can be the home directory, so /mnt/home/u/src/x is left alone.
 export function shortCwd(cwd: string, home = homedir()): string {
-  return cwd.replace(`${home}/src/`, '').replace(`${home}/`, '~/').replace('/.worktrees/', '/wt/')
+  const src = `${home}/src/`
+  const short = cwd === home ? '~' : cwd.startsWith(src) ? cwd.slice(src.length) : cwd.startsWith(`${home}/`) ? `~${cwd.slice(home.length)}` : cwd
+  return short.replace('/.worktrees/', '/wt/')
 }
 
-const pad = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s.padEnd(n))
+// Counts and cuts by code point: slicing UTF-16 units could leave half of an emoji.
+const pad = (s: string, n: number) => {
+  const chars = Array.from(s)
+  return chars.length > n ? `${chars.slice(0, n - 1).join('')}…` : s + ' '.repeat(n - chars.length)
+}
 
 export function listLine({ row, prefix }: Line): string {
   const progress = row.unreadable
@@ -48,7 +55,8 @@ export function renderList(rows: Row[]): string {
 }
 
 export function poolLines(row: Row): string[] {
-  const head = `${row.name}${row.title ? ` — ${row.title}` : ''}`
+  const head = row.title && row.title !== row.name ? `${row.name} — ${row.title}` : row.name
+  if (row.unreadable) return [head, `unreadable pool: ${row.unreadable}`]
   if (!row.tasks.length) return [head, '(no pool yet)']
   return [head, ...row.tasks.map(t => `${t.mark} ${t.id.padEnd(4)} ${pad(t.text, 34)} ${t.detail}`.trimEnd())]
 }

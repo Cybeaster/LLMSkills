@@ -13,7 +13,7 @@ import {
 } from 'node:fs'
 import { join } from 'node:path'
 import { OrchError } from './errors.js'
-import type { Pool } from './model.js'
+import type { Pool, Status, Task } from './model.js'
 
 export type PoolEntry = { id: string; pool?: Pool; error?: string }
 
@@ -25,9 +25,25 @@ export function poolPath(home: string, id: string): string {
   return join(home, `${id}.json`)
 }
 
+const STATUSES: readonly Status[] = ['pending', 'in_progress', 'done', 'blocked']
+
+// One malformed task (null, no text, a numeric id) would otherwise throw deep inside the overview and
+// take every view down, so a pool with such a task is an unreadable pool.
+function isTask(v: unknown): v is Task {
+  const t = v as Partial<Task> | null | undefined
+  return (
+    typeof t === 'object' &&
+    t !== null &&
+    typeof t.id === 'string' &&
+    typeof t.text === 'string' &&
+    STATUSES.includes(t.status as Status) &&
+    (t.children === undefined || (Array.isArray(t.children) && t.children.every(c => typeof c === 'string')))
+  )
+}
+
 function isPool(v: unknown): v is Pool {
   const p = v as Partial<Pool> | null | undefined
-  return typeof p?.sessionId === 'string' && Array.isArray(p.tasks)
+  return typeof p?.sessionId === 'string' && Array.isArray(p.tasks) && p.tasks.every(isTask)
 }
 
 // A pool file must hold the session its name says; a copy such as backup1.json would otherwise

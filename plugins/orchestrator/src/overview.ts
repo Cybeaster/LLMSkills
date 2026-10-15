@@ -1,4 +1,4 @@
-import { checkKey, describeEvidence, grade, type Check } from './evidence.js'
+import { checkKey, describeEvidence, grade, oneLine, type Check } from './evidence.js'
 import type { Status, Task } from './model.js'
 import type { PoolEntry } from './store.js'
 import type { HerdrAgent } from './sources/herdr.js'
@@ -6,7 +6,8 @@ import { sessionLink, type LiveSession } from './sources/sessions.js'
 
 export const DAY = 24 * 60 * 60 * 1000
 
-// Keeps a pool row on one line; the live verdict is appended after clipping so it always shows.
+// Clips evidence text only, to keep a pool row on one line; the live verdict is appended after clipping so it
+// always shows. A question or a blocked reason is never clipped: /orch needs the whole of it.
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
 
 export type Mark = '✓' | '~' | '✗' | '?' | '◐' | '·' | '!' | '⚑'
@@ -52,7 +53,7 @@ function viewTask(t: Task, cwd: string, checks: Map<string, Check>, childDone: (
   let detail = kids.length ? `${kids.length} children: ${kidsDone} ✓ ${kids.length - kidsDone} running` : ''
   if (t.needsInput) {
     mark = '⚑'
-    detail = `"${t.needsInput}"`
+    detail = `"${oneLine(t.needsInput)}"`
   } else if (status === 'done' && kids.length && !t.evidence) {
     mark = '✓'
   } else if (status === 'done') {
@@ -65,11 +66,11 @@ function viewTask(t: Task, cwd: string, checks: Map<string, Check>, childDone: (
     mark = '◐'
   } else if (status === 'blocked') {
     mark = '!'
-    detail = t.blockedReason ?? 'blocked'
+    detail = oneLine(t.blockedReason) || 'blocked'
   } else {
     mark = '·'
   }
-  return { id: t.id, text: t.text, status, mark, detail }
+  return { id: t.id, text: oneLine(t.text), status, mark, detail }
 }
 
 const byName = (a: Row, b: Row) => a.name.localeCompare(b.name)
@@ -97,12 +98,24 @@ export function buildOverview(input: OverviewInput): Row[] {
   }
 
   const built = new Map<string, Row>()
-  const childDone = (id: string) => {
-    const row = built.get(id)
-    if (row) return row.complete
-    const p = pools.get(id)?.pool
-    return !!p && p.tasks.length > 0 && p.tasks.every(t => t.status === 'done')
+
+  // A session is complete when its pool has tasks and every one is done. A task with children is done
+  // exactly when every child session is complete (viewTask applies the same rule), so this never
+  // depends on which rows happen to be built first. A session met again while it is being worked out
+  // sits on a cycle, which can never finish, and counts as not complete.
+  const memo = new Map<string, boolean>()
+  const completeWalk = (id: string, visiting: Set<string>): boolean => {
+    const known = memo.get(id)
+    if (known !== undefined) return known
+    const tasks = pools.get(id)?.pool?.tasks
+    if (!tasks?.length || visiting.has(id)) return false
+    visiting.add(id)
+    const ok = tasks.every(t => (t.children?.length ? t.children.every(c => completeWalk(c, visiting)) : t.status === 'done'))
+    visiting.delete(id)
+    memo.set(id, ok)
+    return ok
   }
+  const isComplete = (id: string) => completeWalk(id, new Set())
 
   const build = (id: string, path: Set<string>): Row => {
     const inner = new Set(path).add(id)
@@ -111,16 +124,16 @@ export function buildOverview(input: OverviewInput): Row[] {
     const pool = e?.pool
     const s = live.get(id)
     const a = agents.get(id)
-    const tasks = (pool?.tasks ?? []).map(t => viewTask(t, pool?.cwd ?? '', input.checks, childDone))
+    const tasks = (pool?.tasks ?? []).map(t => viewTask(t, pool?.cwd ?? '', input.checks, isComplete))
     const done = tasks.filter(t => t.status === 'done').length
     const parent = pool?.parent?.sessionId
     const row: Row = {
       sessionId: id,
-      name: a?.name ?? s?.name ?? (pool?.title || id.slice(0, 8)),
-      title: pool?.title || a?.title || '',
+      name: oneLine(a?.name) || oneLine(s?.name) || oneLine(pool?.title) || oneLine(id.slice(0, 8)),
+      title: oneLine(pool?.title) || oneLine(a?.title),
       cwd: pool?.cwd || s?.cwd || '',
       state: s ? (s.waitingFor ? 'waiting' : s.status) : 'ended',
-      waitingFor: s?.waitingFor,
+      waitingFor: s?.waitingFor ? oneLine(s.waitingFor) : undefined,
       tag: s ? (a ? 'herdr' : 'external') : '—',
       paneId: a?.paneId,
       link: sessionLink(s),
@@ -130,7 +143,7 @@ export function buildOverview(input: OverviewInput): Row[] {
       orphan: !!parent && !pools.has(parent) && !live.has(parent),
       done,
       total: tasks.length,
-      complete: tasks.length > 0 && done === tasks.length,
+      complete: isComplete(id),
       flags: (pool?.tasks.filter(t => t.needsInput).length ?? 0) + children.reduce((n, c) => n + c.flags, 0),
       tasks,
       children,
@@ -144,7 +157,13 @@ export function buildOverview(input: OverviewInput): Row[] {
     return !p || !ids.has(p)
   })
   const rows = top.map(id => build(id, new Set()))
-  // A parent cycle has no top: show its members at top level rather than lose them.
-  for (const id of ids) if (!built.has(id)) rows.push(build(id, new Set()))
+  // Whatever is still unbuilt hangs off a parent cycle, which has no top. Walk up from it to a member of
+  // the cycle and build from there, so each session shows once, under the cycle, rather than twice.
+  for (const id of ids) {
+    if (built.has(id)) continue
+    let root = id
+    for (const seen = new Set<string>(); !seen.has(root); root = parentOf(root) ?? root) seen.add(root)
+    rows.push(build(root, new Set()))
+  }
   return rows.sort(byPriority)
 }

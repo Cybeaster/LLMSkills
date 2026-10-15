@@ -259,6 +259,37 @@ describe('store', () => {
     expect(existsSync(join(h, 's1.json.lock'))).toBe(false)
   })
 
+  it.each([
+    ['a null task', [null]],
+    ['a task that is a string', ['t1']],
+    ['a task with no text', [{ id: 't1', status: 'pending' }]],
+    ['a numeric text', [{ id: 't1', text: 3, status: 'pending' }]],
+    ['a numeric id', [{ id: 1, text: 'x', status: 'pending' }]],
+    ['a task with no id', [{ text: 'x', status: 'pending' }]],
+    ['an unknown status', [{ id: 't1', text: 'x', status: 'weird' }]],
+    ['no status', [{ id: 't1', text: 'x' }]],
+    ['children that is a string', [{ id: 't1', text: 'x', status: 'pending', children: 'C1' }]],
+    ['children holding a number', [{ id: 't1', text: 'x', status: 'pending', children: ['C1', 2] }]],
+    ['a good task followed by a bad one', [{ id: 't1', text: 'x', status: 'done' }, null]],
+  ])('flags a pool with %s as unreadable instead of trusting it', (_name, tasks) => {
+    const h = home()
+    writeFileSync(join(h, 's1.json'), JSON.stringify({ ...newPool('s1', '/r', 1), tasks }))
+    expect(listPools(h)).toEqual([{ id: 's1', error: expect.stringMatching(/s1\.json is not a pool; fix or delete it$/) }])
+    expect(() => readPool(h, 's1')).toThrow(/is not a pool; fix or delete it/)
+  })
+
+  it('accepts every task shape the CLI writes', () => {
+    const h = home()
+    const tasks = [
+      { id: 't1', text: 'a', status: 'pending' },
+      { id: 't2', text: 'b', status: 'in_progress', children: ['C1', 'C2'], needsInput: 'q?' },
+      { id: 't3', text: 'c', status: 'done', evidence: { kind: 'commit', ref: 'abc1234' } },
+      { id: 't4', text: 'd', status: 'blocked', blockedReason: 'key' },
+    ]
+    writeFileSync(join(h, 's1.json'), JSON.stringify({ ...newPool('s1', '/r', 1), tasks }))
+    expect(listPools(h)).toEqual([{ id: 's1', pool: expect.objectContaining({ tasks }) }])
+  })
+
   it('writePool cleans up its temp file when the write fails', () => {
     const h = home()
     mkdirSync(poolPath(h, 's1'))

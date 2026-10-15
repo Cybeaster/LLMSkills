@@ -33,8 +33,12 @@ export function grade(ev: Evidence | undefined, check?: Check): Grade {
   return 'unverified'
 }
 
+// Text a session wrote, folded onto one line with control characters (ESC, BEL, newlines) gone, so it
+// cannot move the cursor or retitle the terminal when it is printed.
+export const oneLine = (s: unknown): string => String(s ?? '').replace(/[\s\p{Cc}]+/gu, ' ').trim()
+
 export function describeEvidence(ev: Evidence): string {
-  const ref = String(ev.ref ?? '').replace(/[\s\p{Cc}]+/gu, ' ').trim()
+  const ref = oneLine(ev.ref)
   switch (ev.kind) {
     case 'commit':
       return `commit ${ref.slice(0, 7)}`

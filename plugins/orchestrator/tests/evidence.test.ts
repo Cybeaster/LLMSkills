@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { OrchError } from '../src/errors.js'
-import { checkKey, describeEvidence, grade, parseEvidence } from '../src/evidence.js'
+import { checkKey, describeEvidence, grade, oneLine, parseEvidence } from '../src/evidence.js'
 import type { Evidence } from '../src/model.js'
 
 const thrown = (fn: () => unknown): unknown => {
@@ -95,6 +95,22 @@ describe('describeEvidence', () => {
 
   it('does not throw on a hand-edited pool entry without a ref', () => {
     expect(() => describeEvidence({ kind: 'commit' } as unknown as Evidence)).not.toThrow()
+  })
+})
+
+describe('oneLine', () => {
+  it('folds whitespace and control characters into single spaces', () => {
+    expect(oneLine('a\n b\t\tc')).toBe('a b c')
+    expect(oneLine('  x  ')).toBe('x')
+    expect(oneLine('a\u001b]0;t\u0007b')).toBe('a ]0;t b')
+    expect(oneLine('\u001b\u0007')).toBe('')
+  })
+
+  it('turns anything that is not text into text', () => {
+    expect(oneLine(undefined)).toBe('')
+    expect(oneLine(null)).toBe('')
+    expect(oneLine(42)).toBe('42')
+    expect(oneLine('')).toBe('')
   })
 })
 
