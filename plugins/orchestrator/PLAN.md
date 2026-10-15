@@ -5209,10 +5209,11 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
 `tests/link.test.ts`:
 
 ```ts
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { run } from '../src/cli.js'
+import { linkSessions } from '../src/link.js'
 import { newPool, plan } from '../src/model.js'
 import { readPool, writePool } from '../src/store.js'
 import { makeCtx, writeSession } from './helpers.js'
@@ -5377,6 +5378,34 @@ describe('orch link', () => {
       expect((await run(['link', 's-ab', 'Big Plan', 't1'], ctx)).stderr).toMatch(/no session matches/)
     })
   })
+
+  it('fails and leaves the child alone when the parent pool vanishes after the pre-check', async () => {
+    let gone = false
+    const ctx = makeCtx({
+      // the first clock read in linkSessions comes right after its check of the parent
+      now: () => {
+        if (!gone) {
+          gone = true
+          rmSync(join(ctx.orchHome, 's-par.json'))
+        }
+        return 5000
+      },
+    })
+    writePool(ctx.orchHome, plan(newPool('s-par', '/r', 1), ['a'], 2))
+    await expect(linkSessions(ctx, 's-kid', 's-par', 't1')).rejects.toThrow(/the parent has no pool; rerun orch link/)
+    expect(readPool(ctx.orchHome, 's-kid')).toBeUndefined()
+  })
+
+  it('does not fall back to herdr when the name is ambiguous', async () => {
+    const ctx = makeCtx()
+    writeSession(ctx, { pid: 1, sessionId: 's-a', name: 'dup' })
+    writeSession(ctx, { pid: 2, sessionId: 's-b', name: 'dup' })
+    writePool(ctx.orchHome, plan(newPool('s-par', '/r', 1), ['a'], 2))
+    ctx.herdr.agents.push({ name: 'dup', paneId: 'w1:p1', status: 'idle', sessionId: 's-h' })
+    const out = await run(['link', 'dup', 's-par', 't1'], ctx)
+    expect(out.stderr).toMatch(/matches several/)
+    expect(readPool(ctx.orchHome, 's-h')).toBeUndefined()
+  })
 })
 ```
 
@@ -5435,7 +5464,7 @@ describe('orch spawn-child', () => {
     parent(ctx)
     const out = await run(['spawn-child', 't2', '--name', 'go', '--cwd', '.', '--brief', 'brief.md'], ctx)
     expect(out.code).toBe(1)
-    expect(out.stderr).toMatch(/agent_not_ready.*trust this folder.*orch link go s-self t2/s)
+    expect(out.stderr).toMatch(/agent_not_ready.*trust this folder.*orch link go s-self t2.*herdr agent prompt w9:p1 /s)
 
     // any other failure still says how to link the child, without the trust hint
     ctx.herdr.startClaude = async () => {
@@ -5541,7 +5570,7 @@ describe('orch spawn-child', () => {
     }
     const out = await spawn(ctx)
     expect(out.stderr).toMatch(/orch link go s-self t2 --brief '[^']*brief\.md'/)
-    expect(out.stderr).toMatch(/herdr agent prompt go 'You are a child session of "Courses"/)
+    expect(out.stderr).toMatch(/herdr agent prompt w9:p1 'You are a child session of "Courses"/)
     expect(out.stderr).toMatch(/no id yet.*orch status --all/)
   })
 
@@ -5569,7 +5598,7 @@ describe('orch spawn-child', () => {
     writeFileSync(join(ctx.orchHome, 's-child.json'), '{broken')
     const out = await spawn(ctx)
     expect(out.code).toBe(1)
-    expect(out.stderr).toMatch(/linking failed.*orch link s-child s-self t2 --brief .*herdr agent prompt go /s)
+    expect(out.stderr).toMatch(/linking failed.*orch link 's-child' s-self t2 --brief .*herdr agent prompt go /s)
     expect(ctx.herdr.calls.some(c => c[0] === 'prompt')).toBe(false)
   })
 
@@ -5585,6 +5614,17 @@ describe('orch spawn-child', () => {
     expect(out.stderr).toMatch(/is linked under s-self t2.*herdr agent prompt go 'You are a child/s)
     expect(readPool(ctx.orchHome, 's-child')!.parent).toEqual({ sessionId: 's-self', taskId: 't2' })
     expect(readPool(ctx.orchHome, 's-self')!.tasks[1].children).toEqual(['s-child'])
+  })
+
+  it('strips control characters from the folder and brief paths it prints, still quoted', async () => {
+    const ctx = makeCtx()
+    parent(ctx)
+    const dir = 'a\x07b'
+    mkdirSync(join(ctx.cwd, dir))
+    writeFileSync(join(ctx.cwd, dir, 'brief.md'), 'x')
+    const out = await run(['spawn-child', 't2', '--name', 'go', '--cwd', dir, '--brief', `${dir}/brief.md`], ctx)
+    expect(out.stdout).not.toMatch(/[\x00-\x08\x0b-\x1f]/)
+    expect(out.stdout).toMatch(/cd '[^']*a b' && ORCH_PARENT=s-self ORCH_PARENT_TASK=t2 ORCH_BRIEF='[^']*a b\/brief\.md'/)
   })
 })
 ```
@@ -5795,14 +5835,14 @@ export async function spawnChild(ctx: Ctx, o: SpawnOptions): Promise<Out> {
 
   if (ctx.env.HERDR_ENV !== '1' || !ctx.env.HERDR_WORKSPACE_ID) {
     const name = agentName(o.name, [])
-    const cmd = `cd ${q(cwd)} && ORCH_PARENT=${parentId} ORCH_PARENT_TASK=${task.id} ORCH_BRIEF=${q(brief)} claude --remote-control=${q(name)} ${q(shown)}`
+    const cmd = `cd ${q(oneLine(cwd))} && ORCH_PARENT=${parentId} ORCH_PARENT_TASK=${task.id} ORCH_BRIEF=${q(oneLine(brief))} claude --remote-control=${q(name)} ${q(shown)}`
     return ok(`Not inside herdr. Start the child yourself:\n${cmd}\n`)
   }
 
   const name = agentName(o.name, (await ctx.herdr.list()).map(a => a.name))
   const { paneId } = await ctx.herdr.createTab({ workspace: ctx.env.HERDR_WORKSPACE_ID, cwd, label: name })
-  const linkCmd = (who: string) => `orch link ${who} ${parentId} ${task.id} --brief ${q(brief)}`
-  const promptCmd = `herdr agent prompt ${name} ${q(shown)}`
+  const linkCmd = (who: string) => `orch link ${who} ${parentId} ${task.id} --brief ${q(oneLine(brief))}`
+  const promptCmd = (target: string) => `herdr agent prompt ${target} ${q(shown)}`
   const noId = `If that says the session has no id yet, run orch status --all and link by its id.`
   try {
     await ctx.herdr.startClaude({ name, paneId, args: ['--remote-control', name] })
@@ -5813,7 +5853,7 @@ export async function spawnChild(ctx: Ctx, o: SpawnOptions): Promise<Out> {
     throw new OrchError(
       `${name} did not become ready in ${paneId} (${why(e)}). ` +
         (trust ? `If that pane asks "Do you trust this folder?", ${cwd} has never been opened in Claude: answer it there. ` : '') +
-        `Once it runs, link it: ${linkCmd(name)} ; then send its intro: ${promptCmd} . ${noId}`,
+        `Once it runs, link it: ${linkCmd(name)} ; then send its intro: ${promptCmd(paneId)} . ${noId}`,
     )
   }
   let childId: string | undefined
@@ -5826,18 +5866,18 @@ export async function spawnChild(ctx: Ctx, o: SpawnOptions): Promise<Out> {
   if (!childId)
     throw new OrchError(
       `started ${name} in ${paneId} but herdr did not report its session id within ${SESSION_ID_WAIT_MS / 1000}s. ` +
-        `Link it later: ${linkCmd(name)} ; then send its intro: ${promptCmd} . ${noId}`,
+        `Link it later: ${linkCmd(name)} ; then send its intro: ${promptCmd(name)} . ${noId}`,
     )
   // herdr cannot set the child's environment, so the parent writes the link before the intro goes out.
   try {
     await linkSessions(ctx, childId, parentId, task.id, { brief, byParent: true })
   } catch (e) {
-    throw new OrchError(`${name} runs in ${paneId} (session ${childId}) but linking failed: ${why(e)}. Link it: ${linkCmd(childId)} ; then send its intro: ${promptCmd}`)
+    throw new OrchError(`${name} runs in ${paneId} (session ${childId}) but linking failed: ${why(e)}. Link it: ${linkCmd(q(childId))} ; then send its intro: ${promptCmd(name)}`)
   }
   try {
     await ctx.herdr.prompt(name, intro)
   } catch (e) {
-    throw new OrchError(`${name} is linked under ${parentId} ${task.id}, but sending its intro failed (${why(e)}). Send it yourself: ${promptCmd}`)
+    throw new OrchError(`${name} is linked under ${parentId} ${task.id}, but sending its intro failed (${why(e)}). Send it yourself: ${promptCmd(name)}`)
   }
   return ok(`${JSON.stringify({ sessionId: childId, agent: name, paneId })}\n`)
 }
