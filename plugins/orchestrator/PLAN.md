@@ -4845,6 +4845,16 @@ describe('hook session-start', () => {
     expect(readPool(ctx.orchHome, 's-par')!.tasks[0].children).toBeUndefined()
   })
 
+  it('does not link under a task other than the one the child is already under', async () => {
+    const ctx = makeCtx()
+    writePool(ctx.orchHome, { ...plan(newPool('s-par', '/r', 1), ['one', 'two'], 2), title: 'Courses' })
+    writePool(ctx.orchHome, { ...newPool('s-kid', '/r', 1), parent: { sessionId: 's-par', taskId: 't1' } })
+    Object.assign(ctx.env, { ORCH_PARENT: 's-par', ORCH_PARENT_TASK: 't2', ORCH_BRIEF: '/r/brief.md' })
+    await hook(ctx, 'session-start', { session_id: 's-kid', cwd: '/r', source: 'startup' })
+    expect(readPool(ctx.orchHome, 's-kid')!.parent).toEqual({ sessionId: 's-par', taskId: 't1' })
+    expect(readPool(ctx.orchHome, 's-par')!.tasks[1].children).toBeUndefined()
+  })
+
   it('unsets ORCH_* in the env file so nested claude runs do not inherit them', async () => {
     const ctx = makeCtx()
     const envFile = join(ctx.cwd, 'env')
@@ -4958,7 +4968,7 @@ describe('hook prompt-submit', () => {
     writePool(ctx.orchHome, { ...plan(newPool('s1', '/r', 1), ['a'], 2), turnStartedAt: 5000 })
     const path = join(ctx.cwd, 'u.jsonl')
     const use = { content: [{ type: 'tool_use', name: 'Edit' }] }
-    writeFileSync(path, [{ type: 'api-request-blob', message: use }, { type: 'assistant', message: use }].map(o => JSON.stringify(o)).join('\n') + '\n')
+    writeFileSync(path, [{ type: 'api-request-blob', timestamp: new Date(6000).toISOString(), message: use }, { type: 'assistant', message: use }].map(o => JSON.stringify(o)).join('\n') + '\n')
     expect((await hook(ctx, 'prompt-submit', { session_id: 's1', transcript_path: path })).stdout).toBe('')
   })
 
