@@ -105,7 +105,7 @@ type Evidence =
 
 ## 6. Session side
 
-**Session identity.** The SessionStart hook writes `export CLAUDE_SESSION_ID=<id>` to `CLAUDE_ENV_FILE`, so every later Bash call carries it; without it, `orch` walks its parent PID chain (`/proc/<pid>/stat`) until it meets a pid listed in `~/.claude/sessions/*.json`.
+**Session identity.** Claude Code sets `CLAUDE_CODE_SESSION_ID` in every Bash and hook subprocess and keeps it current across `/clear`; `orch` uses it first. As fallbacks for older Claude Code: the SessionStart hook's `export CLAUDE_SESSION_ID=<id>` in `CLAUDE_ENV_FILE`, then `CLAUDE_PID` looked up in `~/.claude/sessions/*.json`, then a walk up the parent PID chain (`/proc/<pid>/stat`) until it meets a registered pid.
 
 **CLI:**
 
@@ -198,7 +198,7 @@ The TUI lives in a terminal pane and cannot be seen from a phone. Remote use goe
 
 | Target | Route |
 | --- | --- |
-| herdr pane | `herdr agent prompt <pane_id> "<text>"`; if the agent is working, `herdr agent wait` for idle up to 10 min first |
+| herdr pane | `herdr agent prompt <pane_id> "<text>"`; if the agent is working, `herdr agent wait` for idle up to 90 s first (`/orch` runs it through Bash, whose default timeout is 2 min); still busy: refused, the ⚑ stays open |
 | not in herdr | `orch reply` exits with code 3 and prints the session's name; `/orch` then sends the text with Claude's SendMessage to that session |
 
 The text is prefixed `[orch reply to: "<question>"]` so the receiving session knows which ⚑ it answers. `orch reply` refuses a session with no open ⚑; free-form prompting stays out of scope.

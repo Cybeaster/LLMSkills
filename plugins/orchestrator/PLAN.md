@@ -3453,17 +3453,20 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
 - Create: `plugins/orchestrator/src/cli.ts`
 - Modify: `plugins/orchestrator/src/main.ts` (replace the stub)
 - Create: `plugins/orchestrator/tests/helpers.ts`
-- Test: `plugins/orchestrator/tests/cli.test.ts`
+- Test: `plugins/orchestrator/tests/cli.test.ts`, `plugins/orchestrator/tests/exec.test.ts`, `plugins/orchestrator/tests/main.test.ts`, `plugins/orchestrator/tests/helpers.test.ts`
 
 - [ ] **Step 1: Write the test helpers**
 
 `tests/helpers.ts`:
 
 ```ts
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { Ctx } from '../src/ctx.js'
+import { afterEach } from 'vitest'
+import type { Ctx, ExecResult } from '../src/ctx.js'
+import type { Check } from '../src/evidence.js'
+import type { Evidence } from '../src/model.js'
 import type { Gh } from '../src/sources/gh.js'
 import type { Herdr, HerdrAgent } from '../src/sources/herdr.js'
 
@@ -3502,10 +3505,45 @@ export function fakeHerdr(agents: HerdrAgent[] = []): FakeHerdr {
   return h
 }
 
-export type TestCtx = Ctx & { stdin: string; herdr: FakeHerdr }
+export type FakeExec = Ctx['exec'] & { calls: [command: string, cwd: string][] }
+
+// Records [command, cwd] for every run; the reply decides what the command "printed".
+export function fakeExec(
+  reply: (command: string) => ExecResult = command => (command.includes('fail') ? { code: 1, out: 'boom\n' } : { code: 0, out: 'ok\n' }),
+): FakeExec {
+  const calls: FakeExec['calls'] = []
+  const exec = (async (command: string, cwd: string) => {
+    calls.push([command, cwd])
+    return reply(command)
+  }) as FakeExec
+  exec.calls = calls
+  return exec
+}
+
+export type FakeGh = Gh & { calls: [ev: Evidence, cwd: string][] }
+
+export function fakeGh(answer: Check = 'unknown'): FakeGh {
+  const calls: FakeGh['calls'] = []
+  return {
+    calls,
+    async check(ev, cwd) {
+      calls.push([ev, cwd])
+      return answer
+    },
+  }
+}
+
+export type TestCtx = Ctx & { stdin: string; herdr: FakeHerdr; exec: FakeExec }
+
+// Every makeCtx home is removed after the test that made it.
+const roots: string[] = []
+afterEach(() => {
+  for (const d of roots.splice(0)) rmSync(d, { recursive: true, force: true })
+})
 
 export function makeCtx(over: Partial<TestCtx> = {}): TestCtx {
   const root = mkdtempSync(join(tmpdir(), 'orch-'))
+  roots.push(root)
   const claudeHome = join(root, 'claude')
   mkdirSync(join(claudeHome, 'sessions'), { recursive: true })
   let t = 1_000_000
@@ -3521,7 +3559,7 @@ export function makeCtx(over: Partial<TestCtx> = {}): TestCtx {
     isAlive: () => true,
     stdin: '',
     readStdin: async () => ctx.stdin,
-    exec: async cmd => (cmd.includes('fail') ? { code: 1, out: 'boom\n' } : { code: 0, out: 'ok\n' }),
+    exec: fakeExec(),
     herdr: fakeHerdr(),
     gh: { check: async () => 'unknown' } satisfies Gh,
     ...over,
@@ -3531,6 +3569,26 @@ export function makeCtx(over: Partial<TestCtx> = {}): TestCtx {
 
 export function writeSession(ctx: Ctx, o: { pid: number; sessionId: string; cwd?: string; name?: string; status?: string; waitingFor?: string; bridgeSessionId?: string }) {
   writeFileSync(join(ctx.claudeHome, 'sessions', `${o.pid}.json`), JSON.stringify({ cwd: ctx.cwd, status: 'idle', kind: 'interactive', ...o }))
+}
+
+// A zombie still answers kill(pid, 0); only a process that is neither running nor waiting to be reaped is gone.
+export function pidGone(pid: number): boolean {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    return stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3) === 'Z'
+  } catch {
+    return true
+  }
+}
+
+export async function waitFor<T>(probe: () => T | undefined | false, what: string, timeoutMs = 3000): Promise<T> {
+  const end = Date.now() + timeoutMs
+  for (;;) {
+    const v = probe()
+    if (v) return v
+    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`)
+    await new Promise(r => setTimeout(r, 20))
+  }
 }
 ```
 
@@ -3542,8 +3600,9 @@ export function writeSession(ctx: Ctx, o: { pid: number; sessionId: string; cwd?
 import { describe, expect, it } from 'vitest'
 import { run } from '../src/cli.js'
 import { doneTask, linkChild, newPool, plan, setParent } from '../src/model.js'
+import { HerdrError } from '../src/sources/herdr.js'
 import { readPool, writePool } from '../src/store.js'
-import { makeCtx, writeSession } from './helpers.js'
+import { fakeExec, fakeGh, fakeHerdr, makeCtx, writeSession } from './helpers.js'
 
 describe('orch plan / task / ask / title', () => {
   it('counts finished children in the pool it prints', async () => {
@@ -3668,6 +3727,464 @@ describe('orch status', () => {
     expect((await run(['frob'], makeCtx())).code).toBe(2)
   })
 })
+
+const CI = 'ci:https://github.com/o/r/actions/runs/1'
+
+describe('orch help and free text', () => {
+  it('prints help for --help and -h without touching the pool', async () => {
+    const ctx = makeCtx()
+    await run(['plan', 'a', 'b', 'c'], ctx)
+    const before = readPool(ctx.orchHome, 's-self')
+    for (const argv of [['plan', '--help'], ['plan', '-h'], ['plan', 'x', '--help'], ['title', '-h'], ['task', 'add', '--help'], ['task', 'done', 't1', '-h'], ['ask', 't1', '--help'], ['status', '--help']]) {
+      const out = await run(argv, ctx)
+      expect(out, argv.join(' ')).toMatchObject({ code: 0, stderr: '' })
+      expect(out.stdout, argv.join(' ')).toMatch(/orch plan/)
+    }
+    expect(readPool(ctx.orchHome, 's-self')).toEqual(before)
+    expect(before!.tasks.map(t => t.text)).toEqual(['a', 'b', 'c'])
+  })
+
+  it('exits 2 on an unknown option instead of turning it into text', async () => {
+    const ctx = makeCtx()
+    await run(['plan', 'a'], ctx)
+    const before = readPool(ctx.orchHome, 's-self')
+    for (const argv of [['plan', '-x'], ['plan', 'b', '--nope'], ['title', '-z'], ['task', 'add', '--oops'], ['task', 'block', 't1', '-q'], ['ask', 't1', '-q']]) {
+      const out = await run(argv, ctx)
+      expect(out.code, argv.join(' ')).toBe(2)
+      expect(out.stderr, argv.join(' ')).toMatch(/^orch: /)
+    }
+    expect(readPool(ctx.orchHome, 's-self')).toEqual(before)
+  })
+
+  it('takes text that starts with a dash after --', async () => {
+    const ctx = makeCtx()
+    expect((await run(['plan', '--', '-x'], ctx)).code).toBe(0)
+    await run(['task', 'add', '--', '--help', 'me'], ctx)
+    await run(['title', '--', '-v2'], ctx)
+    const p = readPool(ctx.orchHome, 's-self')!
+    expect(p.tasks.map(t => t.text)).toEqual(['-x', '--help me'])
+    expect(p.title).toBe('-v2')
+  })
+
+  it('refuses a plan with no steps or a blank one, and changes nothing', async () => {
+    const ctx = makeCtx()
+    const none = await run(['plan'], ctx)
+    expect(none.code).toBe(2)
+    expect(readPool(ctx.orchHome, 's-self')).toBeUndefined()
+    expect((await run(['plan', '', '  '], ctx)).code).toBe(2)
+    expect((await run(['plan', 'real', ' '], ctx)).code).toBe(2)
+    expect(readPool(ctx.orchHome, 's-self')).toBeUndefined()
+    await run(['plan', '  padded  '], ctx)
+    expect(readPool(ctx.orchHome, 's-self')!.tasks.map(t => t.text)).toEqual(['padded'])
+    const before = readPool(ctx.orchHome, 's-self')
+    expect((await run(['plan'], ctx)).code).toBe(2)
+    expect(readPool(ctx.orchHome, 's-self')).toEqual(before)
+  })
+
+  it('names what is missing without dumping the help', async () => {
+    const out = await run(['task', 'add'], makeCtx())
+    expect(out.code).toBe(2)
+    expect(out.stderr).toBe('orch: missing task text (orch help lists the commands)\n')
+  })
+})
+
+describe('orch task done --evidence', () => {
+  it('treats an empty --evidence as a usage error and keeps the evidence it has', async () => {
+    const ctx = makeCtx()
+    await run(['plan', 'a'], ctx)
+    await run(['task', 'done', 't1', '--evidence', 'commit:abc1234'], ctx)
+    const out = await run(['task', 'done', 't1', '--evidence', ''], ctx)
+    expect(out.code).toBe(2)
+    expect(out.stderr).toMatch(/bad evidence/)
+    expect(readPool(ctx.orchHome, 's-self')!.tasks[0].evidence).toEqual({ kind: 'commit', ref: 'abc1234' })
+  })
+
+  it('runs cmd evidence in the session cwd, not the pool cwd, and says where', async () => {
+    const ctx = makeCtx()
+    writePool(ctx.orchHome, plan(newPool('s-self', '/elsewhere', 1), ['a', 'b'], 2))
+    const good = await run(['task', 'done', 't1', '--evidence', 'cmd:npm test'], ctx)
+    expect(ctx.exec.calls).toEqual([['npm test', ctx.cwd]])
+    expect(good.stdout).toBe(`t1 done (cmd npm test (exit 0) in ${ctx.cwd})\n`)
+    const bad = await run(['task', 'done', 't2', '--evidence', 'cmd:npm run fail'], ctx)
+    expect(ctx.exec.calls[1]).toEqual(['npm run fail', ctx.cwd])
+    expect(bad.stderr).toContain(`\`npm run fail\` exited 1 in ${ctx.cwd}, so t2 stays open`)
+  })
+
+  it('does not run the command for a task that is not there', async () => {
+    const ctx = makeCtx()
+    await run(['plan', 'a'], ctx)
+    const out = await run(['task', 'done', 't9', '--evidence', 'cmd:npm test'], ctx)
+    expect(out.code).toBe(1)
+    expect(out.stderr).toMatch(/no task t9/)
+    expect(ctx.exec.calls).toEqual([])
+  })
+
+  it('refuses a command that timed out and says how to prove long work', async () => {
+    const ctx = makeCtx({ exec: fakeExec(() => ({ code: 1, out: 'building…\n', signal: 'SIGTERM', timedOut: true })) })
+    await run(['plan', 'a'], ctx)
+    const out = await run(['task', 'done', 't1', '--evidence', 'cmd:make all'], ctx)
+    expect(out.code).toBe(1)
+    expect(out.stderr).toBe(`orch: refused: \`make all\` timed out after 110 s in ${ctx.cwd}, so t1 stays open; run long commands yourself and tick with commit:, ci: or note:\n`)
+    expect(readPool(ctx.orchHome, 's-self')!.tasks[0].status).toBe('pending')
+  })
+
+  it('names the signal that killed the command instead of calling it an exit', async () => {
+    const ctx = makeCtx({ exec: fakeExec(() => ({ code: 1, out: 'Segmentation fault\n', signal: 'SIGSEGV' })) })
+    await run(['plan', 'a'], ctx)
+    const out = await run(['task', 'done', 't1', '--evidence', 'cmd:./crash'], ctx)
+    expect(out.code).toBe(1)
+    expect(out.stderr).toContain(`\`./crash\` was killed by SIGSEGV in ${ctx.cwd}, so t1 stays open`)
+    expect(out.stderr).not.toMatch(/exited/)
+  })
+
+  it('shows a cleaned tail of a failing command: no control characters, 20 lines, about 4 KB', async () => {
+    const lines = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`).join('\n')
+    const dirty = makeCtx({ exec: fakeExec(() => ({ code: 1, out: `${lines}\nprogress 1\rprogress 2\r\n\x1b]0;evil\x07tab\there\x00\x7f\n` })) })
+    await run(['plan', 'a'], dirty)
+    const out = await run(['task', 'done', 't1', '--evidence', 'cmd:build'], dirty)
+    // eslint-disable-next-line no-control-regex
+    expect(out.stderr.replace(/\n/g, '').replace(/\t/g, '')).not.toMatch(/[\x00-\x1f\x7f]/)
+    expect(out.stderr).toContain('progress 1\nprogress 2\n')
+    expect(out.stderr).toContain(']0;evil')
+    expect(out.stderr).toContain('tab\there')
+    // 33 cleaned lines, so the last 20 start at line 14
+    expect(out.stderr).toContain('line 14\n')
+    expect(out.stderr).not.toMatch(/line 13\n/)
+    expect(out.stderr.trimEnd().split('\n').length).toBeLessThanOrEqual(22)
+
+    const huge = makeCtx({ exec: fakeExec(() => ({ code: 1, out: `${'x'.repeat(50_000)}END\n` })) })
+    await run(['plan', 'a'], huge)
+    const big = await run(['task', 'done', 't1', '--evidence', 'cmd:build'], huge)
+    expect(big.stderr.length).toBeLessThan(4096 + 300)
+    expect(big.stderr).toContain('xxxEND')
+  })
+})
+
+describe('who is calling', () => {
+  it('prefers CLAUDE_CODE_SESSION_ID over our own CLAUDE_SESSION_ID', async () => {
+    const ctx = makeCtx({ env: { CLAUDE_CODE_SESSION_ID: 's-code', CLAUDE_SESSION_ID: 's-hook' } })
+    await run(['plan', 'a'], ctx)
+    expect(readPool(ctx.orchHome, 's-code')).toBeDefined()
+    expect(readPool(ctx.orchHome, 's-hook')).toBeUndefined()
+  })
+
+  it('falls back to CLAUDE_SESSION_ID when Claude Code sets none', async () => {
+    const ctx = makeCtx({ env: { CLAUDE_SESSION_ID: 's-hook' } })
+    await run(['plan', 'a'], ctx)
+    expect(readPool(ctx.orchHome, 's-hook')).toBeDefined()
+  })
+
+  it('looks CLAUDE_PID up in the live registry without walking /proc', async () => {
+    const ctx = makeCtx({
+      env: { CLAUDE_PID: '77' },
+      ppidOf: () => {
+        throw new Error('walked the process tree')
+      },
+    })
+    writeSession(ctx, { pid: 76, sessionId: 's-76' })
+    writeSession(ctx, { pid: 77, sessionId: 's-77' })
+    writeSession(ctx, { pid: 78, sessionId: 's-78' })
+    await run(['plan', 'a'], ctx)
+    expect(readPool(ctx.orchHome, 's-77')).toBeDefined()
+    expect(readPool(ctx.orchHome, 's-76')).toBeUndefined()
+    expect(readPool(ctx.orchHome, 's-78')).toBeUndefined()
+  })
+
+  it('walks the process tree when CLAUDE_PID is not a registered session', async () => {
+    const parents = new Map([[4242, 77]])
+    const ctx = makeCtx({ env: { CLAUDE_PID: '999' }, ppidOf: pid => parents.get(pid) })
+    writeSession(ctx, { pid: 77, sessionId: 's-77' })
+    await run(['plan', 'a'], ctx)
+    expect(readPool(ctx.orchHome, 's-77')).toBeDefined()
+  })
+})
+
+describe('orch status and gh', () => {
+  it('asks gh nothing for status --all, as text or JSON', async () => {
+    const gh = fakeGh('fail')
+    const ctx = makeCtx({ gh })
+    writeSession(ctx, { pid: 1, sessionId: 's-self', name: 'me' })
+    await run(['plan', 'a'], ctx)
+    await run(['task', 'done', 't1', '--evidence', CI], ctx)
+    expect((await run(['status', '--all'], ctx)).code).toBe(0)
+    expect((await run(['status', '--all', '--json'], ctx)).code).toBe(0)
+    expect(gh.calls).toEqual([])
+  })
+
+  it('asks gh only about the pool it shows, even with another pool holding PR evidence', async () => {
+    const gh = fakeGh('pass')
+    const ctx = makeCtx({ gh })
+    await run(['plan', 'a'], ctx)
+    await run(['task', 'done', 't1', '--evidence', CI], ctx)
+    writePool(ctx.orchHome, doneTask(plan(newPool('s-other', '/o', 1), ['x'], 2), 't1', { kind: 'pr', ref: '7' }, 3))
+    await run(['status'], ctx)
+    expect(gh.calls.map(([ev]) => ev.kind)).toEqual(['ci'])
+    gh.calls.length = 0
+    await run(['status', 's-other', '--json'], ctx)
+    expect(gh.calls.map(([ev, cwd]) => [ev.kind, ev.ref, cwd])).toEqual([['pr', '7', '/o']])
+  })
+
+  it('fails fast outside a session, before herdr or gh is asked', async () => {
+    const herdr = fakeHerdr()
+    let listed = 0
+    herdr.list = async () => {
+      listed++
+      return []
+    }
+    const gh = fakeGh()
+    const out = await run(['status'], makeCtx({ env: {}, herdr, gh }))
+    expect(out.code).toBe(1)
+    expect(out.stderr).toMatch(/Claude Code session/)
+    expect(listed).toBe(0)
+    expect(gh.calls).toEqual([])
+  })
+
+  it('starts herdr and the gh checks together', async () => {
+    let ghStarted!: () => void
+    const started = new Promise<void>(r => (ghStarted = r))
+    const herdr = fakeHerdr()
+    // herdr answers only once a gh check is under way, so asking them one after the other would hang
+    herdr.list = async () => {
+      await started
+      return []
+    }
+    const gh = { check: async () => (ghStarted(), 'pass' as const) }
+    const ctx = makeCtx({ herdr, gh })
+    await run(['plan', 'a'], ctx)
+    await run(['task', 'done', 't1', '--evidence', CI], ctx)
+    expect((await run(['status'], ctx)).stdout).toMatch(/^✓ t1 /m)
+  }, 1500)
+
+  it('still lists sessions, as external, when herdr is down', async () => {
+    const herdr = fakeHerdr()
+    herdr.list = async () => {
+      throw new HerdrError('herdr is not running')
+    }
+    const ctx = makeCtx({ herdr })
+    writeSession(ctx, { pid: 1, sessionId: 's-self', name: 'me' })
+    writeSession(ctx, { pid: 2, sessionId: 's-other', name: 'other' })
+    const all = await run(['status', '--all', '--json'], ctx)
+    expect(all.code).toBe(0)
+    expect(JSON.parse(all.stdout).map((r: { tag: string }) => r.tag)).toEqual(['external', 'external'])
+    expect((await run(['status', '--all'], ctx)).stdout).toMatch(/external/)
+    expect((await run(['status', 's-other'], ctx)).stdout).toBe('other has no pool yet\n')
+  })
+})
+```
+
+`tests/exec.test.ts` (the real shell runner behind `cmd:` evidence):
+
+```ts
+import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
+import { CMD_TIMEOUT_MS, execShell, ppidOf } from '../src/ctx.js'
+import { pidGone, waitFor } from './helpers.js'
+
+const dirs: string[] = []
+afterEach(() => {
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
+})
+
+function tempDir(): string {
+  const d = realpathSync(mkdtempSync(join(tmpdir(), 'orch-exec-')))
+  dirs.push(d)
+  return d
+}
+
+describe('execShell', () => {
+  it('runs bash in the cwd and returns the exit code with stdout and stderr together', async () => {
+    const dir = tempDir()
+    const r = await execShell('pwd; echo e >&2; exit 3', dir)
+    expect(r.code).toBe(3)
+    expect(r.out).toContain(dir)
+    expect(r.out).toContain('e\n')
+    expect(r.signal).toBeUndefined()
+    expect(r.timedOut).toBeUndefined()
+  })
+
+  it('reports exit 0 for a command that works', async () => {
+    expect(await execShell('echo hi', tempDir())).toEqual({ code: 0, out: 'hi\n' })
+  })
+
+  it('keeps only the last 64 KB of the output', async () => {
+    const r = await execShell("head -c 40000 /dev/zero | tr '\\0' A; head -c 30000 /dev/zero | tr '\\0' B", tempDir())
+    expect(r.code).toBe(0)
+    expect(r.out).toHaveLength(64 * 1024)
+    expect(r.out.endsWith('B'.repeat(30_000))).toBe(true)
+    expect(r.out.startsWith('A'.repeat(64 * 1024 - 30_000))).toBe(true)
+  })
+
+  it('decodes multi-byte characters that arrive in pieces', async () => {
+    const r = await execShell("printf '\\xe2\\x9c'; sleep 0.1; printf '\\x93 done'", tempDir())
+    expect(r.out).toBe('✓ done')
+  })
+
+  it('refuses a missing directory at once with code 127', async () => {
+    const dir = join(tempDir(), 'gone')
+    expect(await execShell('echo never', dir)).toEqual({ code: 127, out: `directory ${dir} does not exist` })
+  })
+
+  it('times out after 110 s by default', () => {
+    expect(CMD_TIMEOUT_MS).toBe(110_000)
+  })
+
+  it('kills a command and its child group on timeout', async () => {
+    const started = Date.now()
+    const r = await execShell('sleep 30 & echo $!; wait', tempDir(), { timeoutMs: 300 })
+    expect(Date.now() - started).toBeLessThan(5000)
+    expect(r.timedOut).toBe(true)
+    expect(r.signal).toBe('SIGTERM')
+    expect(r.code).not.toBe(0)
+    const child = Number(r.out.trim().split('\n')[0])
+    expect(child).toBeGreaterThan(1)
+    await waitFor(() => pidGone(child), 'the background sleep to die')
+  })
+
+  it('escalates to SIGKILL when the command ignores SIGTERM', async () => {
+    const r = await execShell("trap '' TERM; echo ready; sleep 30", tempDir(), { timeoutMs: 400, graceMs: 200 })
+    expect(r.timedOut).toBe(true)
+    expect(r.signal).toBe('SIGKILL')
+    expect(r.out).toContain('ready')
+  })
+
+  it('does not hang on a background child that keeps the pipe open, and kills it', async () => {
+    const started = Date.now()
+    const r = await execShell('sleep 30 & echo $!', tempDir(), { closeWaitMs: 100 })
+    expect(Date.now() - started).toBeLessThan(5000)
+    expect(r.code).toBe(0)
+    expect(r.timedOut).toBeUndefined()
+    const child = Number(r.out.trim())
+    expect(child).toBeGreaterThan(1)
+    await waitFor(() => pidGone(child), 'the background sleep to die')
+  })
+
+  it('leaves no signal listeners behind', async () => {
+    const before = [process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')]
+    await execShell('true', tempDir())
+    await execShell('sleep 30', tempDir(), { timeoutMs: 100 })
+    expect([process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')]).toEqual(before)
+  })
+})
+
+describe('ppidOf', () => {
+  it.skipIf(!existsSync('/proc/self/stat'))('reads the parent of this very process from /proc', () => {
+    expect(ppidOf(process.pid)).toBe(process.ppid)
+  })
+
+  it('is undefined for a pid that does not exist', () => {
+    expect(ppidOf(2 ** 22 + 12345)).toBeUndefined()
+  })
+})
+```
+
+`tests/main.test.ts` (runs the built `bin/orch`, so build before testing):
+
+```ts
+import { spawn, spawnSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { afterEach, describe, expect, it } from 'vitest'
+import { describeFailure } from '../src/cli.js'
+import { pidGone, waitFor } from './helpers.js'
+
+// These run the built bin/orch, so `npm run build` has to come first (check:bundle keeps it current).
+const BIN = fileURLToPath(new URL('../bin/orch', import.meta.url))
+
+const dirs: string[] = []
+afterEach(() => {
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
+})
+
+function sandbox() {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'orch-main-')))
+  dirs.push(dir)
+  const env = { ...process.env, ORCH_HOME: join(dir, 'orch'), ORCH_CLAUDE_HOME: join(dir, 'claude'), CLAUDE_SESSION_ID: 's-main' }
+  return { dir, env }
+}
+
+describe('bin/orch', () => {
+  it('prints help and exits 0', () => {
+    const r = spawnSync(process.execPath, [BIN, '--help'], { encoding: 'utf8', env: sandbox().env })
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/orch plan/)
+  })
+
+  it('reports a failure that is not ours as one line, without a stack trace', () => {
+    const { dir, env } = sandbox()
+    const blocker = join(dir, 'file')
+    writeFileSync(blocker, 'not a directory')
+    const r = spawnSync(process.execPath, [BIN, 'plan', 'a'], { encoding: 'utf8', env: { ...env, ORCH_HOME: join(blocker, 'pools') } })
+    expect(r.status).toBe(1)
+    expect(r.stdout).toBe('')
+    expect(r.stderr).toMatch(/^orch: .*(ENOTDIR|EEXIST)/)
+    expect(r.stderr.trimEnd().split('\n')).toHaveLength(1)
+    expect(r.stderr).not.toMatch(/\n\s+at |Node\.js v|node:internal/)
+  })
+
+  it('kills the command and its group when orch is terminated mid-command', async () => {
+    const { dir, env } = sandbox()
+    expect(spawnSync(process.execPath, [BIN, 'plan', 'a'], { env }).status).toBe(0)
+    const pidFile = join(dir, 'pid')
+    const child = spawn(process.execPath, [BIN, 'task', 'done', 't1', '--evidence', `cmd:echo $$ > ${pidFile}; exec sleep 30`], { env, cwd: dir })
+    let stderr = ''
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', d => (stderr += d))
+    const closed = new Promise<number | null>(resolve => child.on('close', resolve))
+    let pid = 0
+    try {
+      pid = await waitFor(() => Number((() => { try { return readFileSync(pidFile, 'utf8') } catch { return '' } })().trim()) || undefined, 'the command to start')
+      child.kill('SIGTERM')
+      expect(await closed).toBe(1)
+      expect(stderr).toMatch(/killed by SIGTERM/)
+      await waitFor(() => pidGone(pid), 'the command to die')
+    } finally {
+      if (pid && !pidGone(pid)) process.kill(pid, 'SIGKILL')
+      child.kill('SIGKILL')
+    }
+  })
+})
+
+describe('describeFailure', () => {
+  it('is the message alone for an ordinary error', () => {
+    expect(describeFailure(new Error('boom'))).toBe('orch: boom\n')
+    expect(describeFailure('plain')).toBe('orch: plain\n')
+  })
+
+  it('points at the sandbox when a write is denied', () => {
+    for (const code of ['EACCES', 'EPERM', 'EROFS']) {
+      const text = describeFailure(Object.assign(new Error(`${code}: denied, mkdir '/home/u/.claude/orchestrator'`), { code }))
+      expect(text).toContain(`orch: ${code}: denied`)
+      expect(text).toContain('if Claude Code\'s Bash sandbox is on, add "orch *" to sandbox.excludedCommands in ~/.claude/settings.json')
+    }
+    expect(describeFailure(Object.assign(new Error('missing'), { code: 'ENOENT' }))).not.toMatch(/sandbox/)
+  })
+})
+```
+
+`tests/helpers.test.ts`:
+
+```ts
+import { existsSync } from 'node:fs'
+import { describe, expect, it } from 'vitest'
+import { makeCtx } from './helpers.js'
+
+describe('makeCtx', () => {
+  let home = ''
+
+  it('makes a home that exists while the test runs', () => {
+    home = makeCtx().cwd
+    expect(existsSync(home)).toBe(true)
+  })
+
+  it('has removed the home of the test before it', () => {
+    expect(home).not.toBe('')
+    expect(existsSync(home)).toBe(false)
+  })
+})
 ```
 
 - [ ] **Step 3: Run them to see them fail**
@@ -3680,15 +4197,21 @@ Expected: FAIL, cannot find `../src/ctx.js` / `../src/cli.js`.
 `src/ctx.ts`:
 
 ```ts
-import { spawn } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { spawn, type ChildProcessByStdio } from 'node:child_process'
+import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import type { Readable } from 'node:stream'
 import { cliGh, type Gh } from './sources/gh.js'
 import { cliHerdr, type Herdr } from './sources/herdr.js'
 import { pidAlive } from './sources/sessions.js'
 
-export type ExecResult = { code: number; out: string }
+// signal: the command was killed by it (code is then 1). timedOut: orch killed it at CMD_TIMEOUT_MS.
+export type ExecResult = { code: number; out: string; signal?: string; timedOut?: boolean }
+
+// Under the Bash tool's 2-minute default, so orch answers before the tool gives up on it.
+export const CMD_TIMEOUT_MS = 110_000
+const OUT_KEEP = 64 * 1024
 
 // Every side effect a command needs. Tests pass a fake (tests/helpers.ts).
 export type Ctx = {
@@ -3717,14 +4240,77 @@ export function ppidOf(pid: number): number | undefined {
   }
 }
 
-export function execShell(command: string, cwd: string): Promise<ExecResult> {
+export type ExecOptions = { timeoutMs?: number; graceMs?: number; closeWaitMs?: number }
+
+// Runs `bash -c` in its own process group, so a timeout or a signal to orch takes the whole tree down.
+// Keeps the last 64 KB of stdout and stderr together. Resolves when the shell exits; a background child
+// that still holds the pipes gets closeWaitMs to let go, then the group is killed.
+export function execShell(command: string, cwd: string, opts: ExecOptions = {}): Promise<ExecResult> {
+  const { timeoutMs = CMD_TIMEOUT_MS, graceMs = 2_000, closeWaitMs = 1_000 } = opts
+  if (!existsSync(cwd)) return Promise.resolve({ code: 127, out: `directory ${cwd} does not exist` })
   return new Promise(resolve => {
-    const child = spawn('bash', ['-c', command], { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
     let out = ''
-    child.stdout.on('data', d => (out += d))
-    child.stderr.on('data', d => (out += d))
-    child.on('error', e => resolve({ code: 127, out: String(e) }))
-    child.on('close', code => resolve({ code: code ?? 1, out }))
+    let pid: number | undefined
+    let timedOut = false
+    let terminating = false
+    let settled = false
+    let killTimer: NodeJS.Timeout | undefined
+    const killGroup = (sig: NodeJS.Signals) => {
+      try {
+        if (pid) process.kill(-pid, sig)
+      } catch {
+        // already gone
+      }
+    }
+    // SIGTERM first; SIGKILL after the grace period, at once if asked again
+    const terminate = () => {
+      if (terminating) return killGroup('SIGKILL')
+      terminating = true
+      killGroup('SIGTERM')
+      killTimer = setTimeout(() => killGroup('SIGKILL'), graceMs)
+    }
+    const deadline = setTimeout(() => {
+      timedOut = true
+      terminate()
+    }, timeoutMs)
+    const settle = (r: ExecResult) => {
+      if (settled) return
+      settled = true
+      clearTimeout(deadline)
+      clearTimeout(killTimer)
+      process.off('SIGINT', terminate)
+      process.off('SIGTERM', terminate)
+      killGroup('SIGKILL')
+      resolve({ ...r, out, ...(timedOut ? { timedOut } : {}) })
+    }
+    // listening before the shell exists, so a signal can never arrive while nobody would forward it
+    process.on('SIGINT', terminate)
+    process.on('SIGTERM', terminate)
+
+    let child: ChildProcessByStdio<null, Readable, Readable>
+    try {
+      child = spawn('bash', ['-c', command], { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    } catch (e) {
+      out = String(e)
+      return settle({ code: 127, out })
+    }
+    pid = child.pid
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    const keep = (d: string) => (out = (out + d).slice(-OUT_KEEP))
+    child.stdout.on('data', keep)
+    child.stderr.on('data', keep)
+    child.on('error', e => {
+      out = String(e)
+      settle({ code: 127, out })
+    })
+    let exited: ExecResult | undefined
+    child.on('exit', (code, signal) => {
+      exited = { code: code ?? 1, out, ...(signal ? { signal } : {}) }
+      setTimeout(() => settle(exited!), closeWaitMs).unref()
+    })
+    // close comes after exit, once the pipes are drained
+    child.on('close', () => exited && settle(exited))
   })
 }
 
@@ -3748,7 +4334,7 @@ export function realCtx(): Ctx {
     ppidOf,
     isAlive: pidAlive,
     readStdin,
-    exec: execShell,
+    exec: (command, cwd) => execShell(command, cwd),
     herdr: cliHerdr(),
     gh: cliGh(),
   }
@@ -3762,11 +4348,21 @@ import type { Ctx } from './ctx.js'
 import { OrchError } from './errors.js'
 import { readLiveSessions } from './sources/sessions.js'
 
-// CLAUDE_SESSION_ID comes from the SessionStart hook (CLAUDE_ENV_FILE). Without it, walk up the
-// process tree until a pid is one of the registered Claude processes.
+// Which session is calling, from the most to the least direct source:
+//   CLAUDE_CODE_SESSION_ID  set by Claude Code in every Bash and hook subprocess, and kept current across /clear;
+//   CLAUDE_SESSION_ID       our SessionStart hook's export (CLAUDE_ENV_FILE), for a Claude Code that sets no CLAUDE_CODE_ one;
+//   CLAUDE_PID              the Claude process's pid, looked up in ~/.claude/sessions;
+//   the process tree        walked up from orch until a pid is one of the registered Claude processes.
 export function resolveSelf(ctx: Ctx): string {
-  if (ctx.env.CLAUDE_SESSION_ID) return ctx.env.CLAUDE_SESSION_ID
-  const byPid = new Map(readLiveSessions(ctx.claudeHome, ctx.isAlive).map(s => [s.pid, s.sessionId]))
+  const fromEnv = ctx.env.CLAUDE_CODE_SESSION_ID || ctx.env.CLAUDE_SESSION_ID
+  if (fromEnv) return fromEnv
+  const live = readLiveSessions(ctx.claudeHome, ctx.isAlive)
+  const claudePid = Number(ctx.env.CLAUDE_PID)
+  if (ctx.env.CLAUDE_PID && Number.isInteger(claudePid)) {
+    const s = live.find(x => x.pid === claudePid)
+    if (s) return s.sessionId
+  }
+  const byPid = new Map(live.map(s => [s.pid, s.sessionId]))
   let pid: number | undefined = ctx.pid
   for (let i = 0; i < 32 && pid && pid > 1; i++) {
     const id = byPid.get(pid)
@@ -3794,18 +4390,28 @@ import { buildOverview, type Row } from './overview.js'
 import { listPools } from './store.js'
 import { readLiveSessions } from './sources/sessions.js'
 
-export async function collect(ctx: Ctx): Promise<Row[]> {
+// Whose CI and PR evidence gh is asked about: nobody's (the default), every live session's pool,
+// or exactly these sessions' pools. gh is slow, so a caller asks only for the pools it shows.
+export type CollectOpts = { checks?: 'none' | 'live' | ReadonlySet<string> }
+
+export async function collect(ctx: Ctx, opts: CollectOpts = {}): Promise<Row[]> {
+  const which = opts.checks ?? 'none'
   const pools = listPools(ctx.orchHome)
   const live = readLiveSessions(ctx.claudeHome, ctx.isAlive)
-  const agents = await ctx.herdr.list().catch(() => null)
+  const liveIds = new Set(live.map(s => s.sessionId))
+  const wanted = (id: string) => (which === 'none' ? false : which === 'live' ? liveIds.has(id) : which.has(id))
   const checks = new Map<string, Check>()
-  await Promise.all(
-    pools.flatMap(e =>
-      (e.pool?.tasks ?? [])
-        .filter(t => t.status === 'done' && (t.evidence?.kind === 'ci' || t.evidence?.kind === 'pr'))
-        .map(async t => checks.set(checkKey(t.evidence!, e.pool!.cwd ?? ''), await ctx.gh.check(t.evidence!, e.pool!.cwd))),
-    ),
-  )
+  // herdr and every check run at once; a herdr that is down only costs the herdr tag
+  const [agents] = await Promise.all([
+    (async () => ctx.herdr.list())().catch(() => null),
+    ...pools
+      .filter(e => wanted(e.id))
+      .flatMap(e =>
+        (e.pool?.tasks ?? [])
+          .filter(t => t.status === 'done' && (t.evidence?.kind === 'ci' || t.evidence?.kind === 'pr'))
+          .map(async t => checks.set(checkKey(t.evidence!, e.pool!.cwd ?? ''), await ctx.gh.check(t.evidence!, e.pool!.cwd))),
+      ),
+  ])
   return buildOverview({ pools, live, agents, checks, now: ctx.now() })
 }
 ```
@@ -3825,7 +4431,7 @@ export const ok = (stdout = ''): Out => ({ code: 0, stdout, stderr: '' })
 ```ts
 import { parseArgs } from 'node:util'
 import { collect } from './collect.js'
-import type { Ctx } from './ctx.js'
+import { CMD_TIMEOUT_MS, type Ctx } from './ctx.js'
 import { OrchError } from './errors.js'
 import { describeEvidence, parseEvidence } from './evidence.js'
 import { flatten, renderList, renderPool } from './format.js'
@@ -3853,9 +4459,13 @@ const HELP = `orch — task pools for Claude Code sessions
 `
 
 const need = (v: string | undefined, what: string): string => {
-  if (!v) throw new OrchError(`missing ${what}\n\n${HELP}`, 2)
+  if (!v) throw new OrchError(`missing ${what} (orch help lists the commands)`, 2)
   return v
 }
+
+// The words of a free-text command. An option-looking word (-x) is an error rather than task text;
+// a word that starts with a dash goes after `--`.
+const words = (args: string[]): string[] => parseArgs({ args, allowPositionals: true }).positionals
 
 function mutateSelf(ctx: Ctx, f: (p: Pool) => Pool): Promise<Pool> {
   const id = resolveSelf(ctx)
@@ -3870,15 +4480,30 @@ function poolText(ctx: Ctx, p: Pool): string {
 }
 
 async function cmdPlan(ctx: Ctx, args: string[]): Promise<Out> {
-  if (!args.length) throw new OrchError('orch plan needs at least one step', 2)
-  const p = await mutateSelf(ctx, p => plan(p, args, ctx.now()))
+  const steps = words(args).map(s => s.trim())
+  if (!steps.length) throw new OrchError('orch plan needs at least one step', 2)
+  if (steps.some(s => !s)) throw new OrchError('orch plan steps cannot be blank', 2)
+  const p = await mutateSelf(ctx, p => plan(p, steps, ctx.now()))
   return ok(poolText(ctx, p))
 }
 
 async function cmdTitle(ctx: Ctx, args: string[]): Promise<Out> {
-  const title = need(args.join(' ').trim() || undefined, 'title')
+  const title = need(words(args).join(' ').trim() || undefined, 'title')
   await mutateSelf(ctx, p => setTitle(p, title, ctx.now()))
   return ok(`title: ${title}\n`)
+}
+
+// What a failing command printed, safe to show: no control characters but newline and tab (\r becomes a
+// line break), the last 20 lines, about 4 KB.
+function tailOf(out: string): string {
+  const clean = out
+    .replace(/\r\n?/g, '\n')
+    .replace(/\p{Cc}/gu, c => (c === '\n' || c === '\t' ? c : ''))
+    .trimEnd()
+    .split('\n')
+    .slice(-20)
+    .join('\n')
+  return clean.length > 4096 ? `…${clean.slice(-4096)}` : clean
 }
 
 async function cmdDone(ctx: Ctx, args: string[]): Promise<Out> {
@@ -3886,15 +4511,19 @@ async function cmdDone(ctx: Ctx, args: string[]): Promise<Out> {
   const id = need(positionals[0], 'task id')
   if (positionals.length > 1) throw new OrchError(`orch task done takes one task id, got "${positionals.join(' ')}"; quote the evidence, e.g. --evidence "note:looked fine"`, 2)
   let evidence: Evidence | undefined
-  if (values.evidence) {
+  if (values.evidence !== undefined) {
     const e = parseEvidence(values.evidence)
     if (e.kind === 'cmd') {
       const self = readPool(ctx.orchHome, resolveSelf(ctx))
       if (!self?.tasks.some(t => t.id === id)) throw new OrchError(`no task ${id} in this pool`)
-      const r = await ctx.exec(e.ref, self.cwd || ctx.cwd)
-      if (r.code !== 0) {
-        const tail = r.out.trimEnd().split('\n').slice(-20).join('\n')
-        throw new OrchError(`refused: \`${e.ref}\` exited ${r.code}, so ${id} stays open\n${tail}`)
+      // where the session is (the Bash tool's current directory), which is not always where its pool began
+      const r = await ctx.exec(e.ref, ctx.cwd)
+      if (r.timedOut) {
+        throw new OrchError(`refused: \`${e.ref}\` timed out after ${CMD_TIMEOUT_MS / 1000} s in ${ctx.cwd}, so ${id} stays open; run long commands yourself and tick with commit:, ci: or note:`)
+      }
+      if (r.signal || r.code !== 0) {
+        const how = r.signal ? `was killed by ${r.signal}` : `exited ${r.code}`
+        throw new OrchError(`refused: \`${e.ref}\` ${how} in ${ctx.cwd}, so ${id} stays open\n${tailOf(r.out)}`)
       }
       evidence = { kind: 'cmd', ref: e.ref, exit: 0 }
     } else {
@@ -3902,7 +4531,8 @@ async function cmdDone(ctx: Ctx, args: string[]): Promise<Out> {
     }
   }
   await mutateSelf(ctx, p => doneTask(p, id, evidence, ctx.now()))
-  return ok(evidence ? `${id} done (${describeEvidence(evidence)})\n` : `${id} done, but only claimed: add --evidence to prove it\n`)
+  const where = evidence?.kind === 'cmd' ? ` in ${ctx.cwd}` : ''
+  return ok(evidence ? `${id} done (${describeEvidence(evidence)}${where})\n` : `${id} done, but only claimed: add --evidence to prove it\n`)
 }
 
 async function cmdTask(ctx: Ctx, args: string[]): Promise<Out> {
@@ -3910,18 +4540,19 @@ async function cmdTask(ctx: Ctx, args: string[]): Promise<Out> {
   const now = ctx.now()
   switch (sub) {
     case 'add': {
-      const text = need(rest.join(' ').trim() || undefined, 'task text')
+      const text = need(words(rest).join(' ').trim() || undefined, 'task text')
       const p = await mutateSelf(ctx, p => addTask(p, text, now))
       return ok(`added ${p.tasks.at(-1)!.id}\n`)
     }
     case 'start': {
-      const id = need(rest[0], 'task id')
+      const id = need(words(rest)[0], 'task id')
       await mutateSelf(ctx, p => startTask(p, id, now))
       return ok(`${id} in progress\n`)
     }
     case 'block': {
-      const id = need(rest[0], 'task id')
-      const why = need(rest.slice(1).join(' ').trim() || undefined, 'reason')
+      const [id, ...reason] = words(rest)
+      need(id, 'task id')
+      const why = need(reason.join(' ').trim() || undefined, 'reason')
       await mutateSelf(ctx, p => blockTask(p, id, why, now))
       return ok(`${id} blocked: ${why}\n`)
     }
@@ -3933,18 +4564,24 @@ async function cmdTask(ctx: Ctx, args: string[]): Promise<Out> {
 }
 
 async function cmdAsk(ctx: Ctx, args: string[]): Promise<Out> {
-  const id = need(args[0], 'task id')
-  const question = need(args.slice(1).join(' ').trim() || undefined, 'question')
+  const [id, ...rest] = words(args)
+  need(id, 'task id')
+  const question = need(rest.join(' ').trim() || undefined, 'question')
   await mutateSelf(ctx, p => askTask(p, id, question, ctx.now()))
   return ok(`⚑ ${id}: ${question}\nNow send the person a push notification naming this session and the question.\n`)
 }
 
 async function cmdStatus(ctx: Ctx, args: string[]): Promise<Out> {
   const { values, positionals } = parseArgs({ args, options: { all: { type: 'boolean' }, json: { type: 'boolean' } }, allowPositionals: true })
-  const rows = await collect(ctx)
-  // --all --json drops task lists and indentation so /orch's Bash output stays small; /orch then asks for one session by id
-  if (values.all) return ok(values.json ? `${JSON.stringify(rows, (k, v) => (k === 'tasks' ? undefined : v))}\n` : renderList(rows))
+  // --all --json drops task lists and indentation so /orch's Bash output stays small; /orch then asks for one session by id.
+  // The overview asks gh nothing: it would wait on one call per finished task of every session.
+  if (values.all) {
+    const rows = await collect(ctx)
+    return ok(values.json ? `${JSON.stringify(rows, (k, v) => (k === 'tasks' ? undefined : v))}\n` : renderList(rows))
+  }
+  // the id first, so outside a session this fails before herdr or gh is asked; gh only about the pool shown
   const id = positionals[0] ?? resolveSelf(ctx)
+  const rows = await collect(ctx, { checks: new Set([id]) })
   const row = flatten(rows).map(l => l.row).find(r => r.sessionId === id)
   if (positionals[0] && !row) throw new OrchError(`no session ${id}`)
   if (values.json) return ok(`${JSON.stringify(row ?? null)}\n`)
@@ -3952,8 +4589,19 @@ async function cmdStatus(ctx: Ctx, args: string[]): Promise<Out> {
   return ok(row && positionals[0] ? `${row.name} has no pool yet\n` : 'no pool yet: run orch plan "step" "step" …\n')
 }
 
+// How main prints a failure that run did not turn into an Out: the message alone, never a stack trace.
+export function describeFailure(e: unknown): string {
+  const message = e instanceof Error ? e.message : String(e)
+  const code = (e as NodeJS.ErrnoException | undefined)?.code
+  const sandbox = code === 'EACCES' || code === 'EPERM' || code === 'EROFS'
+  return `orch: ${message}\n${sandbox ? `if Claude Code's Bash sandbox is on, add "orch *" to sandbox.excludedCommands in ~/.claude/settings.json\n` : ''}`
+}
+
 export async function run(argv: string[], ctx: Ctx): Promise<Out> {
   const [cmd, ...rest] = argv
+  // --help or -h anywhere before a `--` is a request for help, never task text
+  const flags = rest.includes('--') ? rest.slice(0, rest.indexOf('--')) : rest
+  if (flags.includes('--help') || flags.includes('-h')) return ok(HELP)
   try {
     switch (cmd) {
       case 'plan':
@@ -3985,23 +4633,28 @@ export async function run(argv: string[], ctx: Ctx): Promise<Out> {
 `src/main.ts` (replace the stub):
 
 ```ts
-import { run } from './cli.js'
+import { describeFailure, run } from './cli.js'
 import { realCtx } from './ctx.js'
 
-const out = await run(process.argv.slice(2), realCtx())
-process.stdout.write(out.stdout)
-process.stderr.write(out.stderr)
-process.exitCode = out.code
+try {
+  const out = await run(process.argv.slice(2), realCtx())
+  process.stdout.write(out.stdout)
+  process.stderr.write(out.stderr)
+  process.exitCode = out.code
+} catch (e) {
+  process.stderr.write(describeFailure(e))
+  process.exitCode = 1
+}
 ```
 
 - [ ] **Step 6: Run them to see them pass**
 
-Run: `npm test && npm run typecheck`
+Run: `npm run build && npm test && npm run typecheck` (`tests/main.test.ts` runs the built `bin/orch`)
 Expected: every suite passes; no type errors.
 
 - [ ] **Step 7: Build and try it by hand**
 
-Run: `npm run build && ORCH_HOME=$(mktemp -d) CLAUDE_SESSION_ID=demo ./bin/orch plan "Create course" "Run audit"`
+Run: `npm run build && ORCH_HOME=$(mktemp -d) CLAUDE_CODE_SESSION_ID=demo ./bin/orch plan "Create course" "Run audit"`
 Expected: `demo` then `· t1   Create course` and `· t2   Run audit`.
 
 - [ ] **Step 8: Commit**
@@ -4661,6 +5314,17 @@ describe('orch reply', () => {
     expect(readPool(ctx.orchHome, 's-go')!.tasks[0].needsInput).toBeUndefined()
   })
 
+  it('gives up on a busy session after the wait and keeps the question open', async () => {
+    const ctx = makeCtx()
+    asking(ctx, 's-go', 'course-go', true)
+    ctx.herdr.waitIdle = async () => {
+      throw new HerdrError('herdr agent wait failed: timed out after 100000ms')
+    }
+    const out = await run(['reply', 'course-go', 'strict'], ctx)
+    expect(out.stderr).toMatch(/still busy after 90 s/)
+    expect(readPool(ctx.orchHome, 's-go')!.tasks[0].needsInput).toBe('Strict or lenient?')
+  })
+
   it('keeps the question open when herdr refuses the prompt', async () => {
     const ctx = makeCtx()
     asking(ctx, 's-go', 'course-go', true)
@@ -4749,7 +5413,14 @@ export async function reply(ctx: Ctx, query: string, text: string | undefined, m
       return { code: EXIT_SENDMESSAGE, stdout: `${JSON.stringify({ route: 'sendmessage', to: row.name, text: message })}\n`, stderr: '' }
     }
     const blocked = new OrchError(`${row.name} is waiting on a permission prompt; answer that in its pane first`)
-    if ((await ctx.herdr.waitIdle(row.paneId, 10 * 60_000)) === 'blocked') throw blocked
+    // /orch runs this through Bash (2-minute default timeout), so wait at most 90 s for the session to rest
+    let state: string
+    try {
+      state = await ctx.herdr.waitIdle(row.paneId, 90_000)
+    } catch {
+      throw new OrchError(`${row.name} is still busy after 90 s; its question stays open, try again later`)
+    }
+    if (state === 'blocked') throw blocked
     try {
       await ctx.herdr.prompt(row.paneId, message)
     } catch (e) {
@@ -5111,7 +5782,7 @@ import { App, type Actions } from './App.js'
 
 export async function startTui(ctx: Ctx): Promise<void> {
   const actions: Actions = {
-    load: () => collect(ctx),
+    load: () => collect(ctx, { checks: 'live' }),
     async focus(row: Row) {
       if (!row.paneId) return `not in herdr: ${row.cwd}${row.pid ? ` (pid ${row.pid})` : ''}`
       await ctx.herdr.focus(row.paneId)
@@ -5122,7 +5793,7 @@ export async function startTui(ctx: Ctx): Promise<void> {
       return `${child.name} is now under ${parent.name} ${taskId}`
     },
   }
-  const app = render(<App initial={await collect(ctx)} actions={actions} />)
+  const app = render(<App initial={await collect(ctx, { checks: 'live' })} actions={actions} />)
   await app.waitUntilExit()
 }
 ```
@@ -5130,19 +5801,24 @@ export async function startTui(ctx: Ctx): Promise<void> {
 `src/main.ts` (route `tui` to the separate bundle so hooks never load Ink):
 
 ```ts
-import { run } from './cli.js'
+import { describeFailure, run } from './cli.js'
 import { realCtx } from './ctx.js'
 
 const argv = process.argv.slice(2)
-if (argv[0] === 'tui') {
-  const tui = new URL('../lib/orch-tui.mjs', import.meta.url).href
-  const { startTui } = await import(tui)
-  await startTui(realCtx())
-} else {
-  const out = await run(argv, realCtx())
-  process.stdout.write(out.stdout)
-  process.stderr.write(out.stderr)
-  process.exitCode = out.code
+try {
+  if (argv[0] === 'tui') {
+    const tui = new URL('../lib/orch-tui.mjs', import.meta.url).href
+    const { startTui } = await import(tui)
+    await startTui(realCtx())
+  } else {
+    const out = await run(argv, realCtx())
+    process.stdout.write(out.stdout)
+    process.stderr.write(out.stderr)
+    process.exitCode = out.code
+  }
+} catch (e) {
+  process.stderr.write(describeFailure(e))
+  process.exitCode = 1
 }
 ```
 
@@ -5209,7 +5885,7 @@ The person runs many Claude sessions at once and follows them through one overvi
 2. **Tick with evidence, as you go.** When a step is done, tick it right away, not in a batch at the end:
    - `orch task done t2 --evidence commit:<sha>`
    - `orch task done t3 --evidence pr:<number>` or `ci:<run-url>` (orch rechecks these live)
-   - `orch task done t1 --evidence cmd:"npm test"` (orch runs it; a failing command is refused)
+   - `orch task done t1 --evidence cmd:"npm test"` (orch runs it in your current directory and refuses a failing one; it stops a command after 110 s, so never use watch modes or servers here, and run longer suites yourself and tick with `commit:`, `ci:` or `note:`)
    - `note:<text>` or no evidence is shown as *claimed*, not done.
    Use `orch task start <id>` when you begin a step and `orch task block <id> "why"` when stuck.
 3. **Fan out through orch.** To hand parts to other sessions, write a brief file first (spec, conventions, what to report back), then for each part: `orch spawn-child <taskId> --name <short-name> --cwd <dir> --brief <file>`. Never open child sessions by hand; they would not show under your task.
