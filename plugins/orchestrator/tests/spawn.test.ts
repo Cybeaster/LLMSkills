@@ -1,4 +1,4 @@
-import { writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { run } from '../src/cli.js'
@@ -37,7 +37,7 @@ describe('orch spawn-child', () => {
     const ctx = makeCtx()
     parent(ctx)
     const out = await run(['spawn-child', 't2', '--name', 'go', '--cwd', '.', '--brief', 'brief.md'], ctx)
-    expect(out.stdout).toMatch(/ORCH_PARENT=s-self ORCH_PARENT_TASK=t2 ORCH_BRIEF='.*brief\.md' claude --remote-control 'go'/)
+    expect(out.stdout).toMatch(/ORCH_PARENT=s-self ORCH_PARENT_TASK=t2 ORCH_BRIEF='.*brief\.md' claude --remote-control='go'/)
     expect(ctx.herdr.calls).toEqual([])
   })
 
@@ -66,5 +66,139 @@ describe('orch spawn-child', () => {
     parent(ctx)
     expect((await run(['spawn-child', 't2', '--name', 'go', '--cwd', '.', '--brief', 'nope.md'], ctx)).stderr).toMatch(/write the brief first/)
     expect((await run(['spawn-child', 't9', '--name', 'go', '--cwd', '.', '--brief', 'brief.md'], ctx)).stderr).toMatch(/no task t9/)
+  })
+
+  const inHerdr = (ctx: TestCtx) => Object.assign(ctx.env, { HERDR_ENV: '1', HERDR_WORKSPACE_ID: 'w1' })
+  const spawn = (ctx: TestCtx, ...extra: string[]) => run(['spawn-child', 't2', '--name', 'go', '--cwd', '.', '--brief', 'brief.md', ...extra], ctx)
+
+  it('never lets a name become a claude flag', async () => {
+    const ctx = makeCtx()
+    parent(ctx)
+    const out = await run(['spawn-child', 't2', '--name=-p', '--cwd', '.', '--brief', 'brief.md'], ctx)
+    expect(out.stdout).not.toMatch(/--remote-control '-p'/)
+    expect(out.stdout).toMatch(/--remote-control='p' /)
+    const flag = await run(['spawn-child', 't2', '--name=--dangerously-skip-permissions', '--cwd', '.', '--brief', 'brief.md'], ctx)
+    expect(flag.stdout).toMatch(/--remote-control='dangerously-skip-permissions' /)
+  })
+
+  it('names the herdr agent the same way: lower case, no leading non-letter', async () => {
+    const ctx = makeCtx()
+    inHerdr(ctx)
+    parent(ctx)
+    const out = await run(['spawn-child', 't2', '--name', '12Go Now', '--cwd', '.', '--brief', 'brief.md'], ctx)
+    expect(JSON.parse(out.stdout).agent).toBe('go-now')
+  })
+
+  it('quotes a quote in a path', async () => {
+    const ctx = makeCtx()
+    parent(ctx)
+    mkdirSync(join(ctx.cwd, "it's"))
+    writeFileSync(join(ctx.cwd, "it's", 'brief.md'), 'x')
+    const out = await run(['spawn-child', 't2', '--name', 'go', '--cwd', "it's", '--brief', "it's/brief.md"], ctx)
+    expect(out.stdout).toContain(`cd '${ctx.cwd}/it'\\''s' && `)
+    expect(out.stdout).toContain(`ORCH_BRIEF='${ctx.cwd}/it'\\''s/brief.md'`)
+  })
+
+  it('strips control characters from what it prints', async () => {
+    const ctx = makeCtx()
+    writePool(ctx.orchHome, { ...plan(newPool('s-self', ctx.cwd, 1), ['do\x1b[31m this\nnow'], 2), title: 'Ti\x07tle' })
+    writeFileSync(join(ctx.cwd, 'brief.md'), 'x')
+    const out = await run(['spawn-child', 't1', '--name', 'go', '--cwd', '.', '--brief', 'brief.md', '--prompt', 'a\nb\x1bc'], ctx)
+    expect(out.stdout).not.toMatch(/[\x00-\x08\x0b-\x1f]/)
+    expect(out.stdout).toMatch(/Ti tle.*do \[31m this now/s)
+  })
+
+  it('appends --prompt to the intro', async () => {
+    const ctx = makeCtx()
+    inHerdr(ctx)
+    parent(ctx)
+    await spawn(ctx, '--prompt', 'Start with the tests.')
+    expect(ctx.herdr.calls[2][2]).toMatch(/with evidence\.\n\nStart with the tests\.$/)
+  })
+
+  it('prints the command when HERDR_ENV is set but there is no workspace', async () => {
+    const ctx = makeCtx()
+    ctx.env.HERDR_ENV = '1'
+    parent(ctx)
+    const out = await spawn(ctx)
+    expect(out.stdout).toMatch(/Not inside herdr/)
+    expect(ctx.herdr.calls).toEqual([])
+  })
+
+  it('checks the folder and the brief are what they should be', async () => {
+    const ctx = makeCtx()
+    parent(ctx)
+    mkdirSync(join(ctx.cwd, 'adir'))
+    const r = (...a: string[]) => run(['spawn-child', 't2', '--name', 'go', ...a], ctx)
+    expect((await r('--cwd', 'missing', '--brief', 'brief.md')).stderr).toMatch(/cwd does not exist/)
+    expect((await r('--cwd', 'brief.md', '--brief', 'brief.md')).stderr).toMatch(/cwd is not a directory/)
+    expect((await r('--cwd', '.', '--brief', 'adir')).stderr).toMatch(/brief is not a file/)
+  })
+
+  it('does not show the trust hint for another herdr error code', async () => {
+    const ctx = makeCtx()
+    inHerdr(ctx)
+    parent(ctx)
+    ctx.herdr.startClaude = async () => {
+      throw new HerdrError('herdr agent start failed: blocked', 'agent_blocked')
+    }
+    const out = await spawn(ctx)
+    expect(out.stderr).not.toMatch(/trust this folder/)
+    expect(out.stderr).toMatch(/orch link go s-self t2 --brief '.*brief\.md'/)
+  })
+
+  it('gives a recovery that links with the brief and sends the intro, after a failed start', async () => {
+    const ctx = makeCtx()
+    inHerdr(ctx)
+    parent(ctx)
+    ctx.herdr.startClaude = async () => {
+      throw new OrchError('boom')
+    }
+    const out = await spawn(ctx)
+    expect(out.stderr).toMatch(/orch link go s-self t2 --brief '[^']*brief\.md'/)
+    expect(out.stderr).toMatch(/herdr agent prompt go 'You are a child session of "Courses"/)
+    expect(out.stderr).toMatch(/no id yet.*orch status --all/)
+  })
+
+  it('stops waiting for the session id after a deadline, not a count', async () => {
+    let t = 0
+    const ctx = makeCtx({ now: () => t, sleep: async ms => void (t += ms) })
+    inHerdr(ctx)
+    parent(ctx)
+    ctx.herdr.startClaude = async o => void ctx.herdr.agents.push({ name: o.name, paneId: o.paneId, status: 'idle' })
+    let polls = 0
+    ctx.herdr.sessionIdOf = async () => (polls++, undefined)
+    const out = await spawn(ctx)
+    expect(out.code).toBe(1)
+    expect(polls).toBeGreaterThanOrEqual(100)
+    expect(polls).toBeLessThanOrEqual(125)
+    expect(out.stderr).toMatch(/did not report its session id within 60s/)
+    expect(out.stderr).toMatch(/orch link go s-self t2 --brief .*herdr agent prompt go '/s)
+    expect(out.stderr).toMatch(/orch status --all/)
+  })
+
+  it('tells how to finish by hand when the link fails, naming the session id', async () => {
+    const ctx = makeCtx()
+    inHerdr(ctx)
+    parent(ctx)
+    writeFileSync(join(ctx.orchHome, 's-child.json'), '{broken')
+    const out = await spawn(ctx)
+    expect(out.code).toBe(1)
+    expect(out.stderr).toMatch(/linking failed.*orch link s-child s-self t2 --brief .*herdr agent prompt go /s)
+    expect(ctx.herdr.calls.some(c => c[0] === 'prompt')).toBe(false)
+  })
+
+  it('has linked before the intro goes out: a failed prompt leaves the link and prints the prompt command', async () => {
+    const ctx = makeCtx()
+    inHerdr(ctx)
+    parent(ctx)
+    ctx.herdr.prompt = async () => {
+      throw new OrchError('herdr agent prompt failed')
+    }
+    const out = await spawn(ctx)
+    expect(out.code).toBe(1)
+    expect(out.stderr).toMatch(/is linked under s-self t2.*herdr agent prompt go 'You are a child/s)
+    expect(readPool(ctx.orchHome, 's-child')!.parent).toEqual({ sessionId: 's-self', taskId: 't2' })
+    expect(readPool(ctx.orchHome, 's-self')!.tasks[1].children).toEqual(['s-child'])
   })
 })

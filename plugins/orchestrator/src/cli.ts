@@ -8,11 +8,12 @@ import { runHook } from './hooks.js'
 import { linkSessions } from './link.js'
 import { addTask, askTask, blockTask, doneTask, newPool, plan, setTitle, startTask, type Evidence, type Pool } from './model.js'
 import { ok, type Out } from './out.js'
+import { briefFile } from './paths.js'
 import { buildOverview } from './overview.js'
 import { resolveSelf, trySelf } from './self.js'
 import { spawnChild } from './spawn.js'
 import { listPools, readPool, update } from './store.js'
-import { resolveTarget } from './targets.js'
+import { resolveSession } from './targets.js'
 
 const HELP = `orch — task pools for Claude Code sessions
 
@@ -25,7 +26,8 @@ const HELP = `orch — task pools for Claude Code sessions
   orch ask <id> "question"               flag a question for the person (⚑)
   orch status [<session-id>] [--json]    this (or that) session's pool
   orch status --all [--json]             every session
-  orch link <child> <parent> <taskId>    attach a session under a parent task
+  orch link <child> <parent> <taskId> [--brief <file>]
+                                         attach a session under a parent task
   orch spawn-child <taskId> --name <n> --cwd <dir> --brief <file> [--prompt <text>]
   orch reply <session> "text" [--mark-only]
   orch tui
@@ -180,11 +182,13 @@ export function describeFailure(e: unknown): string {
 }
 
 async function cmdLink(ctx: Ctx, args: string[]): Promise<Out> {
-  const [child, parent, taskId] = [need(args[0], 'child session'), need(args[1], 'parent session'), need(args[2], 'parent task id')]
+  const { values, positionals } = parseArgs({ args, options: { brief: { type: 'string' } }, allowPositionals: true })
+  const [child, parent, taskId] = [need(positionals[0], 'child session'), need(positionals[1], 'parent session'), need(positionals[2], 'parent task id')]
+  const brief = values.brief === undefined ? undefined : briefFile(ctx, values.brief)
   const rows = await collect(ctx)
-  const c = resolveTarget(rows, child)
-  const p = resolveTarget(rows, parent)
-  await linkSessions(ctx, c.sessionId, p.sessionId, taskId, { byParent: trySelf(ctx) === p.sessionId })
+  const c = await resolveSession(ctx, rows, child, { herdr: true })
+  const p = await resolveSession(ctx, rows, parent)
+  await linkSessions(ctx, c.sessionId, p.sessionId, taskId, { brief, byParent: trySelf(ctx) === p.sessionId })
   return ok(`${c.name} is now under ${p.name} ${taskId}\n`)
 }
 
