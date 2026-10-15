@@ -5197,6 +5197,7 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
 ### Task 10: Link and spawn-child
 
 **Files:**
+- Create: `plugins/orchestrator/src/paths.ts`
 - Create: `plugins/orchestrator/src/targets.ts`
 - Create: `plugins/orchestrator/src/link.ts`
 - Create: `plugins/orchestrator/src/spawn.ts`
@@ -5208,7 +5209,7 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
 `tests/link.test.ts`:
 
 ```ts
-import { writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { run } from '../src/cli.js'
@@ -5268,13 +5269,121 @@ describe('orch link', () => {
     expect((await run(['link', 's-par', 's-par', 't1'], ctx)).stderr).toMatch(/own parent/)
     expect((await run(['link', 'dup', 's-par', 't1'], ctx)).stderr).toMatch(/matches several/)
   })
+
+  it('moves a child between two tasks of the same parent', async () => {
+    const ctx = makeCtx()
+    writeSession(ctx, { pid: 90, sessionId: 's-kid', name: 'kid' })
+    writePool(ctx.orchHome, plan(newPool('s-par', '/r', 1), ['a', 'b'], 2))
+    await run(['link', 's-kid', 's-par', 't1'], ctx)
+    await run(['link', 's-kid', 's-par', 't2'], ctx)
+    const par = readPool(ctx.orchHome, 's-par')!
+    expect(par.tasks[0].children).toBeUndefined()
+    expect(par.tasks[1].children).toEqual(['s-kid'])
+    expect(readPool(ctx.orchHome, 's-kid')!.parent).toEqual({ sessionId: 's-par', taskId: 't2' })
+  })
+
+  it('does not count a link by someone else as the parent writing', async () => {
+    const ctx = makeCtx({ env: { CLAUDE_SESSION_ID: 's-other' } })
+    writeSession(ctx, { pid: 90, sessionId: 's-kid', name: 'kid' })
+    writePool(ctx.orchHome, plan(newPool('s-par', '/r', 1), ['a'], 2))
+    const before = readPool(ctx.orchHome, 's-par')!.touchedAt
+    expect((await run(['link', 's-kid', 's-par', 't1'], ctx)).code).toBe(0)
+    expect(readPool(ctx.orchHome, 's-par')!.touchedAt).toBe(before)
+  })
+
+  it('links the new parent first and survives a corrupt old parent, leaving it untouched', async () => {
+    const ctx = makeCtx()
+    writeSession(ctx, { pid: 90, sessionId: 's-kid', name: 'kid' })
+    writePool(ctx.orchHome, plan(newPool('s-old', '/r', 1), ['x'], 2))
+    writePool(ctx.orchHome, plan(newPool('s-par', '/r', 1), ['a'], 2))
+    await run(['link', 's-kid', 's-old', 't1'], ctx)
+    writeFileSync(join(ctx.orchHome, 's-old.json'), '{broken')
+    const out = await run(['link', 's-kid', 's-par', 't1'], ctx)
+    expect(out.code).toBe(0)
+    expect(readFileSync(join(ctx.orchHome, 's-old.json'), 'utf8')).toBe('{broken')
+    expect(readPool(ctx.orchHome, 's-par')!.tasks[0].children).toEqual(['s-kid'])
+    expect(readPool(ctx.orchHome, 's-kid')!.parent).toEqual({ sessionId: 's-par', taskId: 't1' })
+    expect(readFileSync(join(ctx.orchHome, 'orch.log'), 'utf8')).toMatch(/could not unlink s-kid from s-old/)
+  })
+
+  it('says to rerun when the child cannot be written, after the parent already lists it', async () => {
+    const ctx = makeCtx()
+    writeSession(ctx, { pid: 90, sessionId: 's-kid', name: 'kid' })
+    writePool(ctx.orchHome, plan(newPool('s-par', '/r', 1), ['a'], 2))
+    writeFileSync(join(ctx.orchHome, 's-kid.json'), '{broken')
+    const out = await run(['link', 's-kid', 's-par', 't1'], ctx)
+    expect(out.code).toBe(1)
+    expect(out.stderr).toMatch(/; rerun orch link/)
+    expect(readPool(ctx.orchHome, 's-par')!.tasks[0].children).toEqual(['s-kid'])
+  })
+
+  it('records --brief as an absolute path and checks it is a file', async () => {
+    const ctx = makeCtx()
+    writeSession(ctx, { pid: 90, sessionId: 's-kid', name: 'kid' })
+    writeSession(ctx, { pid: 91, sessionId: 's-k2', name: 'k2' })
+    writePool(ctx.orchHome, plan(newPool('s-par', '/r', 1), ['a'], 2))
+    writeFileSync(join(ctx.cwd, 'b.md'), 'x')
+    mkdirSync(join(ctx.cwd, 'adir'))
+    expect((await run(['link', 's-kid', 's-par', 't1', '--brief', 'b.md'], ctx)).code).toBe(0)
+    expect(readPool(ctx.orchHome, 's-kid')!.brief).toBe(join(ctx.cwd, 'b.md'))
+    expect((await run(['link', 's-k2', 's-par', 't1', '--brief', 'nope.md'], ctx)).stderr).toMatch(/brief not found/)
+    expect((await run(['link', 's-k2', 's-par', 't1', '--brief', 'adir'], ctx)).stderr).toMatch(/brief is not a file/)
+  })
+
+  describe('finding the child', () => {
+    it('falls back to a herdr agent by name and uses its session id', async () => {
+      const ctx = makeCtx()
+      writePool(ctx.orchHome, plan(newPool('s-par', '/r', 1), ['a'], 2))
+      ctx.herdr.agents.push({ name: 'go-2', paneId: 'w1:p1', status: 'idle', sessionId: 's-from-herdr' })
+      expect((await run(['link', 'go-2', 's-par', 't1'], ctx)).code).toBe(0)
+      expect(readPool(ctx.orchHome, 's-from-herdr')!.parent).toEqual({ sessionId: 's-par', taskId: 't1' })
+    })
+
+    it('refuses a herdr agent that has no session id yet', async () => {
+      const ctx = makeCtx()
+      writePool(ctx.orchHome, plan(newPool('s-par', '/r', 1), ['a'], 2))
+      ctx.herdr.agents.push({ name: 'go-2', paneId: 'w1:p1', status: 'idle' })
+      expect((await run(['link', 'go-2', 's-par', 't1'], ctx)).stderr).toMatch(/no id yet.*orch status --all/)
+    })
+
+    it('resolves an exact session id that has a pool but no overview row', async () => {
+      const DAY = 24 * 60 * 60 * 1000
+      const ctx = makeCtx({ now: () => 10 * DAY })
+      writePool(ctx.orchHome, { ...plan(newPool('s-par', '/r', 1), ['a'], 2), updatedAt: 1 })
+      writePool(ctx.orchHome, { ...newPool('s-kid', '/r', 1), updatedAt: 1 })
+      // neither pool is recent, so neither is in the overview
+      expect((await run(['link', 's-kid', 's-par', 't1'], ctx)).code).toBe(0)
+      expect(readPool(ctx.orchHome, 's-kid')!.parent?.sessionId).toBe('s-par')
+    })
+
+    it('prefers a live session over an ended one with the same name', async () => {
+      const ctx = makeCtx()
+      writeSession(ctx, { pid: 1, sessionId: 's-live', name: 'dup' })
+      writePool(ctx.orchHome, { ...plan(newPool('s-dead', '/r', 1), ['x'], 2), title: 'dup' })
+      writePool(ctx.orchHome, plan(newPool('s-par', '/r', 1), ['a'], 2))
+      expect((await run(['link', 'dup', 's-par', 't1'], ctx)).code).toBe(0)
+      expect(readPool(ctx.orchHome, 's-live')!.parent?.sessionId).toBe('s-par')
+      expect(readPool(ctx.orchHome, 's-dead')!.parent).toBeUndefined()
+    })
+
+    it('matches by session id prefix and by title', async () => {
+      const ctx = makeCtx()
+      writeSession(ctx, { pid: 1, sessionId: 's-abcdef123', name: 'kid' })
+      writeSession(ctx, { pid: 2, sessionId: 's-par', name: 'p' })
+      writePool(ctx.orchHome, { ...plan(newPool('s-par', '/r', 1), ['a'], 2), title: 'Big Plan' })
+      expect((await run(['link', 's-abcde', 'Big Plan', 't1'], ctx)).code).toBe(0)
+      expect(readPool(ctx.orchHome, 's-abcdef123')!.parent?.sessionId).toBe('s-par')
+      // a short query is never a prefix
+      expect((await run(['link', 's-ab', 'Big Plan', 't1'], ctx)).stderr).toMatch(/no session matches/)
+    })
+  })
 })
 ```
 
 `tests/spawn.test.ts`:
 
 ```ts
-import { writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { run } from '../src/cli.js'
@@ -5313,7 +5422,7 @@ describe('orch spawn-child', () => {
     const ctx = makeCtx()
     parent(ctx)
     const out = await run(['spawn-child', 't2', '--name', 'go', '--cwd', '.', '--brief', 'brief.md'], ctx)
-    expect(out.stdout).toMatch(/ORCH_PARENT=s-self ORCH_PARENT_TASK=t2 ORCH_BRIEF='.*brief\.md' claude --remote-control 'go'/)
+    expect(out.stdout).toMatch(/ORCH_PARENT=s-self ORCH_PARENT_TASK=t2 ORCH_BRIEF='.*brief\.md' claude --remote-control='go'/)
     expect(ctx.herdr.calls).toEqual([])
   })
 
@@ -5343,6 +5452,140 @@ describe('orch spawn-child', () => {
     expect((await run(['spawn-child', 't2', '--name', 'go', '--cwd', '.', '--brief', 'nope.md'], ctx)).stderr).toMatch(/write the brief first/)
     expect((await run(['spawn-child', 't9', '--name', 'go', '--cwd', '.', '--brief', 'brief.md'], ctx)).stderr).toMatch(/no task t9/)
   })
+
+  const inHerdr = (ctx: TestCtx) => Object.assign(ctx.env, { HERDR_ENV: '1', HERDR_WORKSPACE_ID: 'w1' })
+  const spawn = (ctx: TestCtx, ...extra: string[]) => run(['spawn-child', 't2', '--name', 'go', '--cwd', '.', '--brief', 'brief.md', ...extra], ctx)
+
+  it('never lets a name become a claude flag', async () => {
+    const ctx = makeCtx()
+    parent(ctx)
+    const out = await run(['spawn-child', 't2', '--name=-p', '--cwd', '.', '--brief', 'brief.md'], ctx)
+    expect(out.stdout).not.toMatch(/--remote-control '-p'/)
+    expect(out.stdout).toMatch(/--remote-control='p' /)
+    const flag = await run(['spawn-child', 't2', '--name=--dangerously-skip-permissions', '--cwd', '.', '--brief', 'brief.md'], ctx)
+    expect(flag.stdout).toMatch(/--remote-control='dangerously-skip-permissions' /)
+  })
+
+  it('names the herdr agent the same way: lower case, no leading non-letter', async () => {
+    const ctx = makeCtx()
+    inHerdr(ctx)
+    parent(ctx)
+    const out = await run(['spawn-child', 't2', '--name', '12Go Now', '--cwd', '.', '--brief', 'brief.md'], ctx)
+    expect(JSON.parse(out.stdout).agent).toBe('go-now')
+  })
+
+  it('quotes a quote in a path', async () => {
+    const ctx = makeCtx()
+    parent(ctx)
+    mkdirSync(join(ctx.cwd, "it's"))
+    writeFileSync(join(ctx.cwd, "it's", 'brief.md'), 'x')
+    const out = await run(['spawn-child', 't2', '--name', 'go', '--cwd', "it's", '--brief', "it's/brief.md"], ctx)
+    expect(out.stdout).toContain(`cd '${ctx.cwd}/it'\\''s' && `)
+    expect(out.stdout).toContain(`ORCH_BRIEF='${ctx.cwd}/it'\\''s/brief.md'`)
+  })
+
+  it('strips control characters from what it prints', async () => {
+    const ctx = makeCtx()
+    writePool(ctx.orchHome, { ...plan(newPool('s-self', ctx.cwd, 1), ['do\x1b[31m this\nnow'], 2), title: 'Ti\x07tle' })
+    writeFileSync(join(ctx.cwd, 'brief.md'), 'x')
+    const out = await run(['spawn-child', 't1', '--name', 'go', '--cwd', '.', '--brief', 'brief.md', '--prompt', 'a\nb\x1bc'], ctx)
+    expect(out.stdout).not.toMatch(/[\x00-\x08\x0b-\x1f]/)
+    expect(out.stdout).toMatch(/Ti tle.*do \[31m this now/s)
+  })
+
+  it('appends --prompt to the intro', async () => {
+    const ctx = makeCtx()
+    inHerdr(ctx)
+    parent(ctx)
+    await spawn(ctx, '--prompt', 'Start with the tests.')
+    expect(ctx.herdr.calls[2][2]).toMatch(/with evidence\.\n\nStart with the tests\.$/)
+  })
+
+  it('prints the command when HERDR_ENV is set but there is no workspace', async () => {
+    const ctx = makeCtx()
+    ctx.env.HERDR_ENV = '1'
+    parent(ctx)
+    const out = await spawn(ctx)
+    expect(out.stdout).toMatch(/Not inside herdr/)
+    expect(ctx.herdr.calls).toEqual([])
+  })
+
+  it('checks the folder and the brief are what they should be', async () => {
+    const ctx = makeCtx()
+    parent(ctx)
+    mkdirSync(join(ctx.cwd, 'adir'))
+    const r = (...a: string[]) => run(['spawn-child', 't2', '--name', 'go', ...a], ctx)
+    expect((await r('--cwd', 'missing', '--brief', 'brief.md')).stderr).toMatch(/cwd does not exist/)
+    expect((await r('--cwd', 'brief.md', '--brief', 'brief.md')).stderr).toMatch(/cwd is not a directory/)
+    expect((await r('--cwd', '.', '--brief', 'adir')).stderr).toMatch(/brief is not a file/)
+  })
+
+  it('does not show the trust hint for another herdr error code', async () => {
+    const ctx = makeCtx()
+    inHerdr(ctx)
+    parent(ctx)
+    ctx.herdr.startClaude = async () => {
+      throw new HerdrError('herdr agent start failed: blocked', 'agent_blocked')
+    }
+    const out = await spawn(ctx)
+    expect(out.stderr).not.toMatch(/trust this folder/)
+    expect(out.stderr).toMatch(/orch link go s-self t2 --brief '.*brief\.md'/)
+  })
+
+  it('gives a recovery that links with the brief and sends the intro, after a failed start', async () => {
+    const ctx = makeCtx()
+    inHerdr(ctx)
+    parent(ctx)
+    ctx.herdr.startClaude = async () => {
+      throw new OrchError('boom')
+    }
+    const out = await spawn(ctx)
+    expect(out.stderr).toMatch(/orch link go s-self t2 --brief '[^']*brief\.md'/)
+    expect(out.stderr).toMatch(/herdr agent prompt go 'You are a child session of "Courses"/)
+    expect(out.stderr).toMatch(/no id yet.*orch status --all/)
+  })
+
+  it('stops waiting for the session id after a deadline, not a count', async () => {
+    let t = 0
+    const ctx = makeCtx({ now: () => t, sleep: async ms => void (t += ms) })
+    inHerdr(ctx)
+    parent(ctx)
+    ctx.herdr.startClaude = async o => void ctx.herdr.agents.push({ name: o.name, paneId: o.paneId, status: 'idle' })
+    let polls = 0
+    ctx.herdr.sessionIdOf = async () => (polls++, undefined)
+    const out = await spawn(ctx)
+    expect(out.code).toBe(1)
+    expect(polls).toBeGreaterThanOrEqual(100)
+    expect(polls).toBeLessThanOrEqual(125)
+    expect(out.stderr).toMatch(/did not report its session id within 60s/)
+    expect(out.stderr).toMatch(/orch link go s-self t2 --brief .*herdr agent prompt go '/s)
+    expect(out.stderr).toMatch(/orch status --all/)
+  })
+
+  it('tells how to finish by hand when the link fails, naming the session id', async () => {
+    const ctx = makeCtx()
+    inHerdr(ctx)
+    parent(ctx)
+    writeFileSync(join(ctx.orchHome, 's-child.json'), '{broken')
+    const out = await spawn(ctx)
+    expect(out.code).toBe(1)
+    expect(out.stderr).toMatch(/linking failed.*orch link s-child s-self t2 --brief .*herdr agent prompt go /s)
+    expect(ctx.herdr.calls.some(c => c[0] === 'prompt')).toBe(false)
+  })
+
+  it('has linked before the intro goes out: a failed prompt leaves the link and prints the prompt command', async () => {
+    const ctx = makeCtx()
+    inHerdr(ctx)
+    parent(ctx)
+    ctx.herdr.prompt = async () => {
+      throw new OrchError('herdr agent prompt failed')
+    }
+    const out = await spawn(ctx)
+    expect(out.code).toBe(1)
+    expect(out.stderr).toMatch(/is linked under s-self t2.*herdr agent prompt go 'You are a child/s)
+    expect(readPool(ctx.orchHome, 's-child')!.parent).toEqual({ sessionId: 's-self', taskId: 't2' })
+    expect(readPool(ctx.orchHome, 's-self')!.tasks[1].children).toEqual(['s-child'])
+  })
 })
 ```
 
@@ -5353,20 +5596,96 @@ Expected: FAIL, `unknown command link` / `unknown command spawn-child`.
 
 - [ ] **Step 3: Implement**
 
+`src/paths.ts`:
+
+```ts
+import { statSync } from 'node:fs'
+import { resolve } from 'node:path'
+import type { Ctx } from './ctx.js'
+import { OrchError } from './errors.js'
+
+function kind(path: string): 'file' | 'dir' | 'other' | undefined {
+  try {
+    const s = statSync(path)
+    return s.isFile() ? 'file' : s.isDirectory() ? 'dir' : 'other'
+  } catch {
+    return undefined
+  }
+}
+
+// An absolute path to an existing regular file, relative to the caller's cwd.
+export function briefFile(ctx: Ctx, p: string): string {
+  const abs = resolve(ctx.cwd, p)
+  const k = kind(abs)
+  if (!k) throw new OrchError(`brief not found: ${abs}: write the brief first`)
+  if (k !== 'file') throw new OrchError(`brief is not a file: ${abs}`)
+  return abs
+}
+
+export function workDir(ctx: Ctx, p: string): string {
+  const abs = resolve(ctx.cwd, p)
+  const k = kind(abs)
+  if (!k) throw new OrchError(`cwd does not exist: ${abs}`)
+  if (k !== 'dir') throw new OrchError(`cwd is not a directory: ${abs}`)
+  return abs
+}
+```
+
 `src/targets.ts`:
 
 ```ts
+import type { Ctx } from './ctx.js'
 import { OrchError } from './errors.js'
 import { flatten } from './format.js'
 import type { Row } from './overview.js'
+import { readPool } from './store.js'
+
+export class NoMatch extends OrchError {}
+
+const live = (r: Row) => r.state !== 'ended'
+
+// Several matches are narrowed to the live ones before they count as ambiguous.
+const narrow = (rows: Row[]): Row[] => {
+  const l = rows.filter(live)
+  return rows.length > 1 && l.length ? l : rows
+}
 
 export function resolveTarget(rows: Row[], query: string): Row {
   const all = flatten(rows).map(l => l.row)
-  const exact = all.filter(r => r.sessionId === query || r.name === query)
-  const matches = exact.length ? exact : all.filter(r => (query.length >= 6 && r.sessionId.startsWith(query)) || r.title === query)
+  const exact = narrow(all.filter(r => r.sessionId === query || r.name === query))
+  const matches = exact.length ? exact : narrow(all.filter(r => (query.length >= 6 && r.sessionId.startsWith(query)) || r.title === query))
   if (matches.length === 1) return matches[0]
-  if (!matches.length) throw new OrchError(`no session matches "${query}"`)
+  if (!matches.length) throw new NoMatch(`no session matches "${query}"`)
   throw new OrchError(`"${query}" matches several sessions: ${matches.map(r => `${r.name} (${r.sessionId.slice(0, 8)})`).join(', ')}`)
+}
+
+export type Resolved = { sessionId: string; name: string }
+
+// resolveTarget, plus: a session id that has a pool on disk but no overview row, and (child only)
+// a herdr agent by name, whose session id herdr may or may not report yet.
+export async function resolveSession(ctx: Ctx, rows: Row[], query: string, opts: { herdr?: boolean } = {}): Promise<Resolved> {
+  try {
+    const r = resolveTarget(rows, query)
+    return { sessionId: r.sessionId, name: r.name }
+  } catch (e) {
+    if (!(e instanceof NoMatch)) throw e
+    let pool
+    try {
+      pool = readPool(ctx.orchHome, query)
+    } catch {
+      // not a usable id or an unreadable pool: not a match
+    }
+    if (pool) return { sessionId: query, name: pool.title || query }
+    if (opts.herdr) {
+      const agent = await ctx.herdr.list().then(
+        l => l.find(a => a.name === query),
+        () => undefined,
+      )
+      if (agent?.sessionId) return { sessionId: agent.sessionId, name: query }
+      if (agent) throw new OrchError(`that session has no id yet; run orch status --all and link by its id`)
+    }
+    throw e
+  }
 }
 ```
 
@@ -5376,13 +5695,15 @@ export function resolveTarget(rows: Row[], query: string): Row {
 import type { Ctx } from './ctx.js'
 import { OrchError } from './errors.js'
 import { linkChild, newPool, setParent, unlinkChild } from './model.js'
-import { readPool, update, updateIfExists } from './store.js'
+import { log, readPool, update, updateIfExists } from './store.js'
 import { readLiveSessions } from './sources/sessions.js'
 
 export type LinkOptions = {
   brief?: string
   byParent?: boolean // the parent session itself is linking (spawn-child, its own orch link): an own write
 }
+
+const why = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
 export async function linkSessions(ctx: Ctx, childId: string, parentId: string, taskId: string, opts: LinkOptions = {}): Promise<void> {
   if (childId === parentId) throw new OrchError('a session cannot be its own parent')
@@ -5399,24 +5720,43 @@ export async function linkSessions(ctx: Ctx, childId: string, parentId: string, 
     if (id === childId) throw new OrchError('that parent sits below this session; linking it would make a cycle')
   if (!readPool(ctx.orchHome, parentId)?.tasks.some(t => t.id === taskId)) throw new OrchError(`the parent has no task ${taskId}`)
   const now = ctx.now()
-  const previous = readPool(ctx.orchHome, childId)?.parent
+  let previous
+  try {
+    previous = readPool(ctx.orchHome, childId)?.parent
+  } catch {
+    // an unreadable child pool fails the write below, with the message to rerun
+  }
   const cwd = readLiveSessions(ctx.claudeHome, ctx.isAlive).find(s => s.sessionId === childId)?.cwd ?? ''
-  await update(ctx.orchHome, childId, p => setParent(p ?? newPool(childId, cwd, now), { sessionId: parentId, taskId }, opts.brief, now))
-  if (previous && (previous.sessionId !== parentId || previous.taskId !== taskId))
-    await updateIfExists(ctx.orchHome, previous.sessionId, p => unlinkChild(p, previous.taskId, childId, now))
-  await updateIfExists(ctx.orchHome, parentId, p => linkChild(p, taskId, childId, now, opts.byParent))
+
+  // Order matters for a crash or a failure half way: the new parent lists the child first (that also
+  // re-checks the task under the lock), then the child points at it, and only then is the old parent let go.
+  // A failure before the last step leaves a state that rerunning the same link repairs.
+  try {
+    const linked = await updateIfExists(ctx.orchHome, parentId, p => linkChild(p, taskId, childId, now, opts.byParent))
+    if (!linked) throw new OrchError(`the parent has no pool`)
+    await update(ctx.orchHome, childId, p => setParent(p ?? newPool(childId, cwd, now), { sessionId: parentId, taskId }, opts.brief, now))
+  } catch (e) {
+    throw new OrchError(`${why(e)}; rerun orch link`)
+  }
+  if (previous && (previous.sessionId !== parentId || previous.taskId !== taskId)) {
+    try {
+      await updateIfExists(ctx.orchHome, previous.sessionId, p => unlinkChild(p, previous.taskId, childId, now))
+    } catch (e) {
+      log(ctx.orchHome, `link: could not unlink ${childId} from ${previous.sessionId} ${previous.taskId}: ${why(e)}`)
+    }
+  }
 }
 ```
 
 `src/spawn.ts`:
 
 ```ts
-import { existsSync } from 'node:fs'
-import { resolve } from 'node:path'
 import type { Ctx } from './ctx.js'
 import { OrchError } from './errors.js'
+import { oneLine } from './evidence.js'
 import { linkSessions } from './link.js'
 import { ok, type Out } from './out.js'
+import { briefFile, workDir } from './paths.js'
 import { resolveSelf } from './self.js'
 import { HerdrError } from './sources/herdr.js'
 import { readPool } from './store.js'
@@ -5425,35 +5765,45 @@ export type SpawnOptions = { taskId: string; name: string; cwd: string; brief: s
 
 const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
 
-function agentName(base: string, taken: (string | undefined)[]): string {
+// Long enough for a slow start, short enough that a hung herdr does not hold the session for minutes.
+export const SESSION_ID_WAIT_MS = 60_000
+const POLL_MS = 500
+
+export function agentName(base: string, taken: (string | undefined)[]): string {
   const b = base.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^[^a-z]+/, '').slice(0, 28) || 'child'
   let name = b
   for (let i = 2; taken.includes(name); i++) name = `${b}-${i}`
   return name
 }
 
+const why = (e: unknown) => (e instanceof Error ? e.message : String(e))
+
 export async function spawnChild(ctx: Ctx, o: SpawnOptions): Promise<Out> {
   const parentId = resolveSelf(ctx)
   const parent = readPool(ctx.orchHome, parentId)
   const task = parent?.tasks.find(t => t.id === o.taskId)
   if (!parent || !task) throw new OrchError(`no task ${o.taskId} in this pool: run orch plan first`)
-  const cwd = resolve(ctx.cwd, o.cwd)
-  const brief = resolve(ctx.cwd, o.brief)
-  if (!existsSync(cwd)) throw new OrchError(`cwd does not exist: ${cwd}`)
-  if (!existsSync(brief)) throw new OrchError(`brief not found: ${brief}: write the brief first`)
+  const cwd = workDir(ctx, o.cwd)
+  const brief = briefFile(ctx, o.brief)
 
   const intro =
-    `You are a child session of "${parent.title || parentId}", working on its task ${task.id}: "${task.text}". ` +
+    `You are a child session of "${oneLine(parent.title) || parentId}", working on its task ${task.id}: "${oneLine(task.text)}". ` +
     `Read ${brief} first, then run \`orch plan\` for your part and tick each task with evidence.` +
     (o.prompt ? `\n\n${o.prompt}` : '')
+  // what is printed for a person to paste: never carries a control character
+  const shown = oneLine(intro)
 
   if (ctx.env.HERDR_ENV !== '1' || !ctx.env.HERDR_WORKSPACE_ID) {
-    const cmd = `cd ${q(cwd)} && ORCH_PARENT=${parentId} ORCH_PARENT_TASK=${task.id} ORCH_BRIEF=${q(brief)} claude --remote-control ${q(o.name)} ${q(intro)}`
+    const name = agentName(o.name, [])
+    const cmd = `cd ${q(cwd)} && ORCH_PARENT=${parentId} ORCH_PARENT_TASK=${task.id} ORCH_BRIEF=${q(brief)} claude --remote-control=${q(name)} ${q(shown)}`
     return ok(`Not inside herdr. Start the child yourself:\n${cmd}\n`)
   }
 
   const name = agentName(o.name, (await ctx.herdr.list()).map(a => a.name))
   const { paneId } = await ctx.herdr.createTab({ workspace: ctx.env.HERDR_WORKSPACE_ID, cwd, label: name })
+  const linkCmd = (who: string) => `orch link ${who} ${parentId} ${task.id} --brief ${q(brief)}`
+  const promptCmd = `herdr agent prompt ${name} ${q(shown)}`
+  const noId = `If that says the session has no id yet, run orch status --all and link by its id.`
   try {
     await ctx.herdr.startClaude({ name, paneId, args: ['--remote-control', name] })
   } catch (e) {
@@ -5461,20 +5811,34 @@ export async function spawnChild(ctx: Ctx, o: SpawnOptions): Promise<Out> {
     // "Do you trust this folder?" and herdr reports agent_not_ready.
     const trust = e instanceof HerdrError && e.herdrCode === 'agent_not_ready'
     throw new OrchError(
-      `${name} did not become ready in ${paneId} (${e instanceof Error ? e.message : String(e)}). ` +
-        (trust ? `If that pane asks "Do you trust this folder?", ${cwd} has never been opened in Claude: answer it there, then run: ` : 'Once it runs, link it: ') +
-        `orch link ${name} ${parentId} ${task.id}`,
+      `${name} did not become ready in ${paneId} (${why(e)}). ` +
+        (trust ? `If that pane asks "Do you trust this folder?", ${cwd} has never been opened in Claude: answer it there. ` : '') +
+        `Once it runs, link it: ${linkCmd(name)} ; then send its intro: ${promptCmd} . ${noId}`,
     )
   }
   let childId: string | undefined
-  for (let i = 0; i < 60 && !childId; i++) {
+  const deadline = ctx.now() + SESSION_ID_WAIT_MS
+  for (;;) {
     childId = await ctx.herdr.sessionIdOf(name)
-    if (!childId) await ctx.sleep(500)
+    if (childId || ctx.now() >= deadline) break
+    await ctx.sleep(POLL_MS)
   }
-  if (!childId) throw new OrchError(`started ${name} in ${paneId} but could not read its session id; link it later: orch link ${name} ${parentId} ${task.id}`)
+  if (!childId)
+    throw new OrchError(
+      `started ${name} in ${paneId} but herdr did not report its session id within ${SESSION_ID_WAIT_MS / 1000}s. ` +
+        `Link it later: ${linkCmd(name)} ; then send its intro: ${promptCmd} . ${noId}`,
+    )
   // herdr cannot set the child's environment, so the parent writes the link before the intro goes out.
-  await linkSessions(ctx, childId, parentId, task.id, { brief, byParent: true })
-  await ctx.herdr.prompt(name, intro)
+  try {
+    await linkSessions(ctx, childId, parentId, task.id, { brief, byParent: true })
+  } catch (e) {
+    throw new OrchError(`${name} runs in ${paneId} (session ${childId}) but linking failed: ${why(e)}. Link it: ${linkCmd(childId)} ; then send its intro: ${promptCmd}`)
+  }
+  try {
+    await ctx.herdr.prompt(name, intro)
+  } catch (e) {
+    throw new OrchError(`${name} is linked under ${parentId} ${task.id}, but sending its intro failed (${why(e)}). Send it yourself: ${promptCmd}`)
+  }
   return ok(`${JSON.stringify({ sessionId: childId, agent: name, paneId })}\n`)
 }
 ```
@@ -5483,21 +5847,30 @@ In `src/cli.ts`, add imports:
 
 ```ts
 import { linkSessions } from './link.js'
+import { briefFile } from './paths.js'
 import { spawnChild } from './spawn.js'
-import { resolveTarget } from './targets.js'
+import { resolveSession } from './targets.js'
 ```
 
-and change the existing `import { resolveSelf } from './self.js'` line to `import { resolveSelf, trySelf } from './self.js'`.
+and change the existing `import { resolveSelf } from './self.js'` line to `import { resolveSelf, trySelf } from './self.js'`, and in `HELP` replace the `orch link` line with:
+
+```
+  orch link <child> <parent> <taskId> [--brief <file>]
+                                         attach a session under a parent task
+```
+
 
 add these two command functions above `run`:
 
 ```ts
 async function cmdLink(ctx: Ctx, args: string[]): Promise<Out> {
-  const [child, parent, taskId] = [need(args[0], 'child session'), need(args[1], 'parent session'), need(args[2], 'parent task id')]
+  const { values, positionals } = parseArgs({ args, options: { brief: { type: 'string' } }, allowPositionals: true })
+  const [child, parent, taskId] = [need(positionals[0], 'child session'), need(positionals[1], 'parent session'), need(positionals[2], 'parent task id')]
+  const brief = values.brief === undefined ? undefined : briefFile(ctx, values.brief)
   const rows = await collect(ctx)
-  const c = resolveTarget(rows, child)
-  const p = resolveTarget(rows, parent)
-  await linkSessions(ctx, c.sessionId, p.sessionId, taskId, { byParent: trySelf(ctx) === p.sessionId })
+  const c = await resolveSession(ctx, rows, child, { herdr: true })
+  const p = await resolveSession(ctx, rows, parent)
+  await linkSessions(ctx, c.sessionId, p.sessionId, taskId, { brief, byParent: trySelf(ctx) === p.sessionId })
   return ok(`${c.name} is now under ${p.name} ${taskId}\n`)
 }
 
