@@ -9,7 +9,7 @@
     "build": "node build.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "check:bundle": "node build.mjs && git diff --exit-code -- bin lib && git ls-files --error-unmatch bin/orch lib/orch-tui.mjs && test -z \"$(git status --porcelain -- bin lib)\""
+    "check:bundle": "node build.mjs && git diff --exit-code -- bin lib && git ls-files --error-unmatch bin/orch lib/orch-tui.mjs && test -z \"$(git status --porcelain -- bin lib)\" && (! [ -x /usr/bin/node ] || /usr/bin/node bin/orch help >/dev/null)"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
@@ -18,7 +18,6 @@
     "ink": "^6.0.0",
     "ink-testing-library": "^4.0.0",
     "react": "^19.1.0",
-    "string-width": "^8.3.0",
     "typescript": "^5.9.0",
     "vitest": "^3.2.0"
   }

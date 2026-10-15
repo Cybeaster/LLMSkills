@@ -435,7 +435,56 @@ describe('filter', () => {
   })
 })
 
+describe('modified keys and the highlight after a link', () => {
+  it('keeps ctrl- and meta-modified characters out of the filter', async () => {
+    const { app } = mount(world())
+    await press(app, '/', '\x01', '\x1bx', 'z')
+    expect(last(app)).toContain('filter: z')
+    expect(last(app)).not.toMatch(/filter: [^z\n]*[ax]/)
+  })
+
+  it('selects the child again after linking it from the picker', async () => {
+    const { app, actions } = mount(world())
+    await press(app, 'j', 'j', 'l', '\r', 'j', '\r')
+    expect(actions.link).toHaveBeenCalled()
+    expect(last(app)).toMatch(/▸ Orchestrator/)
+  })
+})
+
 describe('small terminals', () => {
+  it.each([8, 10, 12])('no screen reaches %i lines, in the list, a picker or a pool', async rows => {
+    const ids = Array.from({ length: 14 }, (_, i) => `E${i + 1}`)
+    const data = world(ids)
+    const { app } = mount(data, { focus: vi.fn(async () => 'a message') }, { rows })
+    const check = () => expect(last(app).split('\n').length).toBeLessThan(rows)
+    check()
+    await press(app, 'f')
+    check()
+    for (let i = 0; i < 16; i++) await press(app, 'j')
+    check()
+    await press(app, 'l')
+    check()
+    for (let i = 0; i < 16; i++) await press(app, 'j')
+    check()
+    await press(app, keys.esc)
+    await press(app, '\r')
+    check()
+    const long = buildOverview({
+      pools: [{ id: 'B', pool: pool('B', 'Many', Array.from({ length: 30 }, () => ({}))) }],
+      live: [{ pid: 1, sessionId: 'B', cwd: '/src/B', status: 'idle' }],
+      agents: [],
+      checks: new Map(),
+      now: 1000,
+    })
+    const second = mount(long, { focus: vi.fn(async () => 'a message') }, { rows })
+    await press(second.app, '\r', 'f')
+    expect(last(second.app).split('\n').length).toBeLessThan(rows)
+    for (let i = 0; i < 40; i++) await press(second.app, 'j')
+    expect(last(second.app).split('\n').length).toBeLessThan(rows)
+    expect(last(second.app)).toContain('Many step 30')
+  }, 30000)
+
+
   const many = () => world(Array.from({ length: 8 }, (_, i) => `E${i + 1}`))
 
   it('shows a window of rows that fits and scrolls with the cursor', async () => {

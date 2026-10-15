@@ -95,11 +95,21 @@ export function App({
   const excluded = mode.kind === 'pick-parent' ? subtreeIds(all.find(r => r.sessionId === mode.child.sessionId) ?? mode.child) : new Set<string>()
   const parents = mode.kind === 'pick-parent' ? all.filter(r => !excluded.has(r.sessionId) && r.hasPool) : []
   const tasks = mode.kind === 'pick-task' ? mode.parent.tasks : []
-  const ids = mode.kind === 'list' ? lines.map(l => l.row.sessionId) : mode.kind === 'pick-parent' ? parents.map(r => r.sessionId) : tasks.map(t => t.id)
+  const selectedRow = mode.kind === 'list' ? undefined : mode.kind === 'pool' ? all.find(r => r.sessionId === mode.id) : undefined
+  // the pool view scrolls under its heading line, one body line per step
+  const body = selectedRow ? poolLines(selectedRow).slice(1) : []
+  const ids =
+    mode.kind === 'list'
+      ? lines.map(l => l.row.sessionId)
+      : mode.kind === 'pick-parent'
+        ? parents.map(r => r.sessionId)
+        : mode.kind === 'pool'
+          ? body.map((_, i) => String(i))
+          : tasks.map(t => t.id)
   const size = ids.length
   const found = selectedId === undefined ? -1 : ids.indexOf(selectedId)
   const at = found >= 0 ? found : Math.min(cursor, Math.max(0, size - 1))
-  const selected = mode.kind === 'list' ? lines[at]?.row : mode.kind === 'pool' ? all.find(r => r.sessionId === mode.id) : undefined
+  const selected = mode.kind === 'list' ? lines[at]?.row : selectedRow
 
   const select = (i: number) => {
     const n = Math.max(0, Math.min(i, size - 1))
@@ -117,9 +127,10 @@ export function App({
     exit()
   }
 
-  // The window of rows that fits under the header and above the message and footer, kept where it was
-  // until the cursor leaves it.
-  const room = Math.max(3, height - 3)
+  // The window of rows that fits between the header and the message and footer lines (and a picker's title or
+  // a pool's heading), kept where it was until the cursor leaves it. One line stays free so Ink never fills the screen.
+  const picking = mode.kind === 'pick-parent' || mode.kind === 'pick-task' || mode.kind === 'pool'
+  const room = Math.max(3, height - 4 - (picking ? 1 : 0))
   const top = useRef(0)
   top.current = Math.max(0, Math.min(top.current, size - room))
   if (at < top.current) top.current = at
@@ -195,11 +206,18 @@ export function App({
         ))}
       {mode.kind === 'pool' &&
         (selected ? (
-          poolLines(selected).map((s, i) => (
-            <Text key={i} bold={i === 0} wrap="truncate-end">
-              {s}
+          <>
+            <Text bold wrap="truncate-end">
+              {poolLines(selected)[0]}
             </Text>
-          ))
+            {body.map((s, i) =>
+              visible(i) ? (
+                <Text key={i} wrap="truncate-end">
+                  {s}
+                </Text>
+              ) : null,
+            )}
+          </>
         ) : (
           <Text dimColor>this session is gone</Text>
         ))}

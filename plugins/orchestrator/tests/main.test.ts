@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -26,7 +26,23 @@ function sandbox() {
   return { dir, env }
 }
 
+// The CLI and the hooks run on whatever node the machine has; only the TUI bundle needs 20.
+const OLD_NODE = '/usr/bin/node'
+const oldNode = (() => {
+  if (!existsSync(OLD_NODE)) return false
+  const v = spawnSync(OLD_NODE, ['-p', 'process.versions.node.split(".")[0]'], { encoding: 'utf8' })
+  return v.status === 0 && Number(v.stdout) < 20
+})()
+
 describe('bin/orch', () => {
+  it.skipIf(!oldNode)('loads and runs on a Node older than 20', () => {
+    const { env } = sandbox()
+    const r = spawnSync(OLD_NODE, [BIN, 'help'], { encoding: 'utf8', env })
+    expect(r.stderr).toBe('')
+    expect(r.status).toBe(0)
+    expect(r.stdout).toContain('orch plan')
+  })
+
   it('prints help for tui --help without starting the TUI', () => {
     const { env } = sandbox()
     const r = spawnSync(process.execPath, [BIN, 'tui', '--help'], { encoding: 'utf8', env, timeout: 5000 })

@@ -15338,11 +15338,11 @@ function wrapAssembly(lib) {
     return lib.MeasureCallback.implement({
       measure: function() {
         const {
-          width,
+          width: width2,
           height
         } = measureFunction(...arguments);
         return {
-          width: width ?? NaN,
+          width: width2 ?? NaN,
           height: height ?? NaN
         };
       }
@@ -15379,10 +15379,10 @@ function wrapAssembly(lib) {
     this.free();
   });
   patch(lib.Node.prototype, "calculateLayout", function(original) {
-    let width = arguments.length > 1 && arguments[1] !== void 0 ? arguments[1] : NaN;
+    let width2 = arguments.length > 1 && arguments[1] !== void 0 ? arguments[1] : NaN;
     let height = arguments.length > 2 && arguments[2] !== void 0 ? arguments[2] : NaN;
     let direction = arguments.length > 3 && arguments[3] !== void 0 ? arguments[3] : Direction.LTR;
-    return original.call(this, width, height, direction);
+    return original.call(this, width2, height, direction);
   });
   return {
     Config: lib.Config,
@@ -15518,7 +15518,7 @@ function stringWidth(string, options = {}) {
   if (string.length === 0) {
     return 0;
   }
-  let width = 0;
+  let width2 = 0;
   const eastAsianWidthOptions = { ambiguousAsWide: !ambiguousIsNarrow };
   for (const { segment: character } of segmenter.segment(string)) {
     const codePoint = character.codePointAt(0);
@@ -15541,12 +15541,12 @@ function stringWidth(string, options = {}) {
       continue;
     }
     if ((0, import_emoji_regex.default)().test(character)) {
-      width += 2;
+      width2 += 2;
       continue;
     }
-    width += eastAsianWidth(codePoint, eastAsianWidthOptions);
+    width2 += eastAsianWidth(codePoint, eastAsianWidthOptions);
   }
-  return width;
+  return width2;
 }
 
 // node_modules/ansi-styles/index.js
@@ -16053,26 +16053,26 @@ function hangulClusterWidth(visibleSegment, eastAsianWidthOptions) {
   if (codePoints.length === 0) {
     return void 0;
   }
-  let width = 0;
+  let width2 = 0;
   for (let index = 0; index < codePoints.length; index++) {
     const codePoint = codePoints[index];
     if (!isHangulJamo(codePoint)) {
-      if (width === 0) {
+      if (width2 === 0) {
         return void 0;
       }
       for (let remaining = index; remaining < codePoints.length; remaining++) {
-        width += eastAsianWidth(codePoints[remaining], eastAsianWidthOptions);
+        width2 += eastAsianWidth(codePoints[remaining], eastAsianWidthOptions);
       }
-      return width;
+      return width2;
     }
     if (isHangulLeadingJamo(codePoint) && isHangulVowelJamo(codePoints[index + 1])) {
-      width += 2;
+      width2 += 2;
       index += isHangulTrailingJamo(codePoints[index + 2]) ? 2 : 1;
       continue;
     }
-    width += eastAsianWidth(codePoint, eastAsianWidthOptions);
+    width2 += eastAsianWidth(codePoint, eastAsianWidthOptions);
   }
-  return width;
+  return width2;
 }
 function trailingWidth(visibleSegment, eastAsianWidthOptions) {
   let extra = 0;
@@ -16106,7 +16106,7 @@ function stringWidth2(input, options = {}) {
   if (/^[\u0020-\u007E]*$/.test(string)) {
     return string.length;
   }
-  let width = 0;
+  let width2 = 0;
   const eastAsianWidthOptions = { ambiguousAsWide: !ambiguousIsNarrow };
   for (const { segment } of segmenter2.segment(string)) {
     const visibleSegment = baseVisible(segment);
@@ -16114,19 +16114,19 @@ function stringWidth2(input, options = {}) {
       continue;
     }
     if (rgiEmojiRegex.test(segment) || isDoubleWidthNonRgiEmojiSequence(segment)) {
-      width += 2;
+      width2 += 2;
       continue;
     }
     const hangulWidth = hangulClusterWidth(visibleSegment, eastAsianWidthOptions);
     if (hangulWidth !== void 0) {
-      width += hangulWidth;
+      width2 += hangulWidth;
       continue;
     }
     const codePoint = visibleSegment.codePointAt(0);
-    width += eastAsianWidth(codePoint, eastAsianWidthOptions);
-    width += trailingWidth(visibleSegment, eastAsianWidthOptions);
+    width2 += eastAsianWidth(codePoint, eastAsianWidthOptions);
+    width2 += trailingWidth(visibleSegment, eastAsianWidthOptions);
   }
-  return width;
+  return width2;
 }
 
 // node_modules/widest-line/index.js
@@ -16151,9 +16151,9 @@ var measureText = (text) => {
   if (cachedDimensions) {
     return cachedDimensions;
   }
-  const width = widestLine(text);
+  const width2 = widestLine(text);
   const height = text.split("\n").length;
-  const dimensions = { width, height };
+  const dimensions = { width: width2, height };
   cache.set(text, dimensions);
   return dimensions;
 };
@@ -17569,17 +17569,17 @@ var createTextNode = (text) => {
   setTextNodeValue(node, text);
   return node;
 };
-var measureTextNode = function(node, width) {
+var measureTextNode = function(node, width2) {
   const text = node.nodeName === "#text" ? node.nodeValue : squash_text_nodes_default(node);
   const dimensions = measure_text_default(text);
-  if (dimensions.width <= width) {
+  if (dimensions.width <= width2) {
     return dimensions;
   }
-  if (dimensions.width >= 1 && width > 0 && width < 1) {
+  if (dimensions.width >= 1 && width2 > 0 && width2 < 1) {
     return dimensions;
   }
   const textWrap = node.style?.textWrap ?? "wrap";
-  const wrappedText = wrap_text_default(text, width, textWrap);
+  const wrappedText = wrap_text_default(text, width2, textWrap);
   return measure_text_default(wrappedText);
 };
 var findClosestYogaNode = (node) => {
@@ -18664,7 +18664,7 @@ var colorize_default = colorize;
 // node_modules/ink/build/render-border.js
 var renderBorder = (x, y, node, output) => {
   if (node.style.borderStyle) {
-    const width = node.yogaNode.getComputedWidth();
+    const width2 = node.yogaNode.getComputedWidth();
     const height = node.yogaNode.getComputedHeight();
     const box = typeof node.style.borderStyle === "string" ? import_cli_boxes.default[node.style.borderStyle] : node.style.borderStyle;
     const topBorderColor = node.style.borderTopColor ?? node.style.borderColor;
@@ -18679,7 +18679,7 @@ var renderBorder = (x, y, node, output) => {
     const showBottomBorder = node.style.borderBottom !== false;
     const showLeftBorder = node.style.borderLeft !== false;
     const showRightBorder = node.style.borderRight !== false;
-    const contentWidth = width - (showLeftBorder ? 1 : 0) - (showRightBorder ? 1 : 0);
+    const contentWidth = width2 - (showLeftBorder ? 1 : 0) - (showRightBorder ? 1 : 0);
     let topBorder = showTopBorder ? colorize_default((showLeftBorder ? box.topLeft : "") + box.top.repeat(contentWidth) + (showRightBorder ? box.topRight : ""), topBorderColor, "foreground") : void 0;
     if (showTopBorder && dimTopBorderColor) {
       topBorder = source_default.dim(topBorder);
@@ -18711,7 +18711,7 @@ var renderBorder = (x, y, node, output) => {
       output.write(x, y + offsetY, leftBorder, { transformers: [] });
     }
     if (showRightBorder) {
-      output.write(x + width - 1, y + offsetY, rightBorder, {
+      output.write(x + width2 - 1, y + offsetY, rightBorder, {
         transformers: []
       });
     }
@@ -18727,13 +18727,13 @@ var renderBackground = (x, y, node, output) => {
   if (!node.style.backgroundColor) {
     return;
   }
-  const width = node.yogaNode.getComputedWidth();
+  const width2 = node.yogaNode.getComputedWidth();
   const height = node.yogaNode.getComputedHeight();
   const leftBorderWidth = node.style.borderStyle && node.style.borderLeft !== false ? 1 : 0;
   const rightBorderWidth = node.style.borderStyle && node.style.borderRight !== false ? 1 : 0;
   const topBorderHeight = node.style.borderStyle && node.style.borderTop !== false ? 1 : 0;
   const bottomBorderHeight = node.style.borderStyle && node.style.borderBottom !== false ? 1 : 0;
-  const contentWidth = width - leftBorderWidth - rightBorderWidth;
+  const contentWidth = width2 - leftBorderWidth - rightBorderWidth;
   const contentHeight = height - topBorderHeight - bottomBorderHeight;
   if (!(contentWidth > 0 && contentHeight > 0)) {
     return;
@@ -19146,8 +19146,8 @@ var Output = class {
   operations = [];
   caches = new OutputCaches();
   constructor(options) {
-    const { width, height } = options;
-    this.width = width;
+    const { width: width2, height } = options;
+    this.width = width2;
     this.height = height;
   }
   write(x, y, text, options) {
@@ -19205,8 +19205,8 @@ var Output = class {
           const clipHorizontally = typeof clip2?.x1 === "number" && typeof clip2?.x2 === "number";
           const clipVertically = typeof clip2?.y1 === "number" && typeof clip2?.y2 === "number";
           if (clipHorizontally) {
-            const width = this.caches.getWidestLine(text);
-            if (x + width < clip2.x1 || x > clip2.x2) {
+            const width2 = this.caches.getWidestLine(text);
+            if (x + width2 < clip2.x1 || x > clip2.x2) {
               continue;
             }
           }
@@ -19219,8 +19219,8 @@ var Output = class {
           if (clipHorizontally) {
             lines = lines.map((line) => {
               const from = x < clip2.x1 ? clip2.x1 - x : 0;
-              const width = this.caches.getStringWidth(line);
-              const to = x + width > clip2.x2 ? clip2.x2 - x : width;
+              const width2 = this.caches.getStringWidth(line);
+              const to = x + width2 > clip2.x2 ? clip2.x2 - x : width2;
               return sliceAnsi(line, from, to);
             });
             if (x < clip2.x1) {
@@ -21680,12 +21680,35 @@ var checkKey = (ev, cwd2) => `${cwd2}\0${ev.kind}:${ev.ref}`;
 
 // src/width.ts
 var graphemes = new Intl.Segmenter(void 0, { granularity: "grapheme" });
+var INVISIBLE = /^[\p{Mn}\p{Me}\p{Cf}]+$/u;
+var PICTOGRAPH = new RegExp("\\p{Extended_Pictographic}", "u");
+var WIDE = [
+  [4352, 4447],
+  [11904, 42191],
+  [44032, 55203],
+  [63744, 64255],
+  [65072, 65103],
+  [65280, 65376],
+  [65504, 65510],
+  [131072, 262141]
+];
+function graphemeWidth(g) {
+  if (INVISIBLE.test(g)) return 0;
+  if (PICTOGRAPH.test(g) || g.includes("\uFE0F")) return 2;
+  const cp = g.codePointAt(0);
+  return WIDE.some(([lo, hi]) => cp >= lo && cp <= hi) ? 2 : 1;
+}
+function width(s) {
+  let n = 0;
+  for (const { segment } of graphemes.segment(s)) n += graphemeWidth(segment);
+  return n;
+}
 function clip(s, n) {
-  if (stringWidth2(s) <= n) return s;
+  if (width(s) <= n) return s;
   let out = "";
   let used = 0;
   for (const { segment } of graphemes.segment(s)) {
-    const w = stringWidth2(segment);
+    const w = graphemeWidth(segment);
     if (used + w > n - 1) break;
     out += segment;
     used += w;
@@ -21694,7 +21717,7 @@ function clip(s, n) {
 }
 function pad(s, n) {
   const c = clip(s, n);
-  return c + " ".repeat(Math.max(0, n - stringWidth2(c)));
+  return c + " ".repeat(Math.max(0, n - width(c)));
 }
 
 // src/sources/sessions.ts
@@ -22234,11 +22257,13 @@ function App2({
   const excluded = mode.kind === "pick-parent" ? subtreeIds(all.find((r) => r.sessionId === mode.child.sessionId) ?? mode.child) : /* @__PURE__ */ new Set();
   const parents = mode.kind === "pick-parent" ? all.filter((r) => !excluded.has(r.sessionId) && r.hasPool) : [];
   const tasks = mode.kind === "pick-task" ? mode.parent.tasks : [];
-  const ids = mode.kind === "list" ? lines.map((l) => l.row.sessionId) : mode.kind === "pick-parent" ? parents.map((r) => r.sessionId) : tasks.map((t) => t.id);
+  const selectedRow = mode.kind === "list" ? void 0 : mode.kind === "pool" ? all.find((r) => r.sessionId === mode.id) : void 0;
+  const body = selectedRow ? poolLines(selectedRow).slice(1) : [];
+  const ids = mode.kind === "list" ? lines.map((l) => l.row.sessionId) : mode.kind === "pick-parent" ? parents.map((r) => r.sessionId) : mode.kind === "pool" ? body.map((_, i) => String(i)) : tasks.map((t) => t.id);
   const size = ids.length;
   const found = selectedId === void 0 ? -1 : ids.indexOf(selectedId);
   const at = found >= 0 ? found : Math.min(cursor, Math.max(0, size - 1));
-  const selected = mode.kind === "list" ? lines[at]?.row : mode.kind === "pool" ? all.find((r) => r.sessionId === mode.id) : void 0;
+  const selected = mode.kind === "list" ? lines[at]?.row : selectedRow;
   const select = (i) => {
     const n = Math.max(0, Math.min(i, size - 1));
     setCursor(n);
@@ -22254,7 +22279,8 @@ function App2({
     onQuit?.(code);
     exit();
   };
-  const room = Math.max(3, height - 3);
+  const picking = mode.kind === "pick-parent" || mode.kind === "pick-task" || mode.kind === "pool";
+  const room = Math.max(3, height - 4 - (picking ? 1 : 0));
   const top = (0, import_react29.useRef)(0);
   top.current = Math.max(0, Math.min(top.current, size - room));
   if (at < top.current) top.current = at;
@@ -22316,7 +22342,12 @@ function App2({
     mode.kind === "list" && (lines.length ? lines.map(
       (l, i) => visible(i) ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { inverse: i === at, wrap: "truncate-end", children: `${pointer(i)} ${listLine(l)}` }, l.row.sessionId) : null
     ) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { dimColor: true, children: loaded ? "no sessions" : "loading\u2026" })),
-    mode.kind === "pool" && (selected ? poolLines(selected).map((s, i) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { bold: i === 0, wrap: "truncate-end", children: s }, i)) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { dimColor: true, children: "this session is gone" })),
+    mode.kind === "pool" && (selected ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { bold: true, wrap: "truncate-end", children: poolLines(selected)[0] }),
+      body.map(
+        (s, i) => visible(i) ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { wrap: "truncate-end", children: s }, i) : null
+      )
+    ] }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { dimColor: true, children: "this session is gone" })),
     mode.kind === "pick-parent" && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
       /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { children: `Attach ${mode.child.name} under which session?` }),
       parents.length ? parents.map(

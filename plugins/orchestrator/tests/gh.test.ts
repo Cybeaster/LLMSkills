@@ -319,6 +319,16 @@ describe('cliGh limits and caching', () => {
     }
   })
 
+  it('asks again about a failed run, which can be re-run under the same id', async () => {
+    let t = 0
+    const failed = fakeRun(done('failure'))
+    const gh = cliGh(failed.run, () => t)
+    expect(await gh.check(ci('1'), repoA)).toBe('fail')
+    t += 61_000
+    await gh.check(ci('1'), repoA)
+    expect(failed.calls).toHaveLength(2)
+  })
+
   it('asks again about an open PR once its answer expires', async () => {
     let t = 0
     const open = fakeRun({ state: 'OPEN', statusCheckRollup: [] })

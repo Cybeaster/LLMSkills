@@ -24,7 +24,7 @@ const runGh: GhRun = (args, cwd) =>
 const FAILED = ['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE']
 const PASSED = ['SUCCESS', 'NEUTRAL', 'SKIPPED']
 
-// final: the state cannot change any more (a finished run, a merged or closed PR), so it is never asked again
+// final: the state cannot change any more (a passed run, a merged or closed PR), so it is never asked again
 type Answer = { value: Check; final: boolean }
 const MAX_GH = 4
 const ANSWER_TTL_MS = 60_000
@@ -38,7 +38,8 @@ async function ciCheck(run: GhRun, ref: string, cwd: string): Promise<Answer> {
   const o = JSON.parse(r.stdout)
   if (o.status !== 'completed') return { value: 'pending', final: false }
   const c = String(o.conclusion ?? '').toUpperCase()
-  return PASSED.includes(c) ? { value: 'pass', final: true } : FAILED.includes(c) ? { value: 'fail', final: true } : { value: 'unknown', final: false }
+  // only a pass is final: a failed run can be re-run under the same id
+  return PASSED.includes(c) ? { value: 'pass', final: true } : FAILED.includes(c) ? { value: 'fail', final: false } : { value: 'unknown', final: false }
 }
 
 async function prCheck(run: GhRun, ref: string, cwd: string): Promise<Answer> {

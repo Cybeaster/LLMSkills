@@ -1,7 +1,7 @@
-import stringWidth from 'string-width'
 import { describe, expect, it } from 'vitest'
 import { flatten, header, listLine, poolLines, renderList, shortCwd } from '../src/format.js'
 import type { Row } from '../src/overview.js'
+import { width as stringWidth } from '../src/width.js'
 
 const row = (o: Partial<Row>): Row => ({
   sessionId: 's', name: 's', title: '', cwd: '/home/u/src/ItAbyss', state: 'idle', tag: 'herdr',
