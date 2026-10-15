@@ -25,7 +25,7 @@ Out of scope for v1 (see §10): pools derived from transcripts, a web view, resu
 
 | Source | Gives | Role |
 | --- | --- | --- |
-| `~/.claude/sessions/<pid>.json` | `pid`, `sessionId`, `cwd`, `name`, `status` (busy/idle), `startedAt`, `updatedAt` for every running Claude process, herdr or not | Discovery |
+| `~/.claude/sessions/<pid>.json` | `pid`, `sessionId`, `cwd`, `name`, `status` (`busy`, `idle`, `shell` = idle with a background shell, `waiting` + `waitingFor` while a permission prompt or dialog is open), `procStart` (to spot a recycled pid), `bridgeSessionId` (Remote Control, else `null`), `spare` (a pre-started process, not a session yet) for every running Claude process, herdr or not | Discovery |
 | `herdr agent list` (JSON) | `pane_id`, `agent_status`, `terminal_title`, `agent_session.value` = `sessionId` | herdr tag, pane focus, extra state |
 | `~/.claude/projects/*/<sessionId>.jsonl` | Full transcript | Not used in v1 |
 | TodoWrite / Task tools | Nothing: 0 calls across the 68 local transcripts | Not used |
@@ -162,6 +162,8 @@ A Stop hook cannot add context without blocking the turn, so the staleness check
 - Children nest under their parent; ⚑ bubbles up to every ancestor.
 - Sessions without a pool are listed as *no pool*, not hidden.
 - Ended sessions drop off after 24 h unless they are a child of a live parent.
+- A session blocked on a permission prompt or dialog shows state `waiting`.
+- A registry file counts as live only while its pid runs with the start time Claude recorded (`procStart`), as Claude Code itself checks.
 
 **Pool view** (Enter):
 
@@ -221,6 +223,7 @@ The text is prefixed `[orch reply to: "<question>"]` so the receiving session kn
 - Resuming an exited external session inside herdr.
 - Sending free-form prompts or keys to sessions; only answers to ⚑ go through `orch reply`.
 - Sessions on other machines.
+- Claude Code's Bash sandbox: it runs commands in their own pid namespace and limits writes, so `orch` called from inside it cannot see other sessions or write `$ORCH_HOME`.
 
 ## 11. Testing
 
