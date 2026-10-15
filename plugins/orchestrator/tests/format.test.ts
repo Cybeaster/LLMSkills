@@ -1,3 +1,4 @@
+import stringWidth from 'string-width'
 import { describe, expect, it } from 'vitest'
 import { flatten, header, listLine, poolLines, renderList, shortCwd } from '../src/format.js'
 import type { Row } from '../src/overview.js'
@@ -60,13 +61,13 @@ describe('format', () => {
     expect(line).not.toContain('n'.repeat(24))
   })
 
-  it('clips by code point, so an emoji is never cut in half', () => {
+  it('clips by display width, so an emoji is never cut in half', () => {
     const lone = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/
     const line = listLine({ prefix: '', row: row({ name: `${'n'.repeat(22)}😀tail` }) })
-    expect(line.startsWith(`${'n'.repeat(22)}😀… `)).toBe(true)
+    expect(line.startsWith(`${'n'.repeat(22)}… `)).toBe(true)
     expect(lone.test(line)).toBe(false)
     const short = listLine({ prefix: '', row: row({ name: '😀'.repeat(3) }) })
-    expect(short.startsWith(`😀😀😀${' '.repeat(21)} `)).toBe(true)
+    expect(short.startsWith(`😀😀😀${' '.repeat(18)} `)).toBe(true)
     const text = poolLines(row({ name: 'p', tasks: [{ id: 't1', text: `${'w'.repeat(33)}😀😀`, status: 'pending', mark: '·', detail: '' }] }))[1]
     expect(text).toBe(`· t1   ${'w'.repeat(33)}…`)
     expect(lone.test(text)).toBe(false)
@@ -92,5 +93,19 @@ describe('format', () => {
   it('leaves the title off the pool head when it repeats the name', () => {
     expect(poolLines(row({ name: 'beginner-courses', title: 'beginner-courses' }))[0]).toBe('beginner-courses')
     expect(poolLines(row({ name: 'a', title: 'b' }))[0]).toBe('a — b')
+  })
+})
+
+describe('display width', () => {
+  const cols = (line: string) => stringWidth(line.slice(0, line.indexOf('idle')))
+  it('keeps the columns aligned for CJK and emoji names', () => {
+    const widths = ['plain', '日本語セッション', '🚀 rocket', 'a'.repeat(40)].map(name => cols(listLine({ prefix: '', row: row({ name }) })))
+    expect(new Set(widths).size).toBe(1)
+  })
+
+  it('never cuts a wide character in half', () => {
+    const line = listLine({ prefix: '', row: row({ name: '日本語日本語日本語日本語日本語日本語' }) })
+    expect(line).toContain('…')
+    expect(stringWidth(line.slice(0, line.indexOf('idle')))).toBe(24 + 1 + 22 + 1)
   })
 })

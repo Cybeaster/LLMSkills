@@ -38,4 +38,4 @@ chmodSync('bin/orch', 0o755)
 const nodeGuard =
   "\nif (+process.versions.node.split('.')[0] < 20) { process.stderr.write('orch tui: needs Node 20 or newer, got ' + process.version + ' at ' + process.execPath + '\\n'); process.exit(1); }"
 mkdirSync('lib', { recursive: true })
-await build({ ...common, banner: { js: banner.js + nodeGuard }, entryPoints: ['src/tui/main.tsx'], outfile: 'lib/orch-tui.mjs' })
+await build({ ...common, define: { 'process.env.NODE_ENV': '"production"' }, banner: { js: banner.js + nodeGuard }, entryPoints: ['src/tui/main.tsx'], outfile: 'lib/orch-tui.mjs' })

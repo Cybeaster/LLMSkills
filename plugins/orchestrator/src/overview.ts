@@ -2,17 +2,13 @@ import { checkKey, describeEvidence, grade, oneLine, type Check } from './eviden
 import type { Status, Task } from './model.js'
 import type { PoolEntry } from './store.js'
 import type { HerdrAgent } from './sources/herdr.js'
+import { clip } from './width.js'
 import { sessionLink, type LiveSession } from './sources/sessions.js'
 
 export const DAY = 24 * 60 * 60 * 1000
 
-// Clips evidence text only, to keep a pool row on one line; the live verdict is appended after clipping so it
-// always shows. A question or a blocked reason is never clipped: /orch needs the whole of it. It cuts by
-// code point, so an emoji at the cut is never split.
-const clip = (s: string, n: number) => {
-  const chars = Array.from(s)
-  return chars.length > n ? `${chars.slice(0, n - 1).join('')}…` : s
-}
+// Evidence text is clipped (by display width) to keep a pool row on one line; the live verdict is appended
+// after clipping so it always shows. A question or a blocked reason is never clipped: /orch needs the whole of it.
 
 export type Mark = '✓' | '~' | '✗' | '?' | '◐' | '·' | '!' | '⚑'
 export type TaskView = { id: string; text: string; status: Status; mark: Mark; detail: string }
@@ -77,7 +73,7 @@ function viewTask(t: Task, cwd: string, checks: Map<string, Check>, childDone: (
   return { id: t.id, text: oneLine(t.text), status, mark, detail }
 }
 
-const byName = (a: Row, b: Row) => a.name.localeCompare(b.name)
+const byName = (a: Row, b: Row) => a.name.localeCompare(b.name, undefined, { numeric: true })
 const byPriority = (a: Row, b: Row) =>
   b.flags - a.flags || Number(a.state === 'ended') - Number(b.state === 'ended') || byName(a, b)
 

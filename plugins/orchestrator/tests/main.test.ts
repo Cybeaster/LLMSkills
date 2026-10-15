@@ -27,6 +27,13 @@ function sandbox() {
 }
 
 describe('bin/orch', () => {
+  it('prints help for tui --help without starting the TUI', () => {
+    const { env } = sandbox()
+    const r = spawnSync(process.execPath, [BIN, 'tui', '--help'], { encoding: 'utf8', env, timeout: 5000 })
+    expect(r.status).toBe(0)
+    expect(r.stdout).toContain('orch tui')
+  })
+
   it('prints help and exits 0', () => {
     const r = spawnSync(process.execPath, [BIN, '--help'], { encoding: 'utf8', env: sandbox().env })
     expect(r.status).toBe(0)

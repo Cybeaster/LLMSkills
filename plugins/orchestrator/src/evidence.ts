@@ -33,9 +33,21 @@ export function grade(ev: Evidence | undefined, check?: Check): Grade {
   return 'unverified'
 }
 
-// Text a session wrote, folded onto one line with control characters (ESC, BEL, newlines) gone, so it
-// cannot move the cursor or retitle the terminal when it is printed.
-export const oneLine = (s: unknown): string => String(s ?? '').replace(/[\s\p{Cc}]+/gu, ' ').trim()
+// Text a session wrote, folded onto one line with control characters (ESC, BEL, newlines) and invisible
+// format characters (zero-width and bidi overrides such as U+202E) gone, so it cannot move the cursor,
+// retitle the terminal or reorder what is printed.
+export const oneLine = (s: unknown): string =>
+  String(s ?? '')
+    .replace(/\p{Cf}/gu, '')
+    .replace(/[\s\p{Cc}]+/gu, ' ')
+    .trim()
+
+// Whole terminal escape sequences gone: CSI (colours, cursor moves) and OSC (titles, links).
+export const stripEscapes = (s: string): string =>
+  s.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+
+// Anything that may be printed on a status line: escape sequences stripped whole, then one line.
+export const safeLine = (s: unknown): string => oneLine(stripEscapes(String(s ?? '')))
 
 export function describeEvidence(ev: Evidence): string {
   const ref = oneLine(ev.ref)

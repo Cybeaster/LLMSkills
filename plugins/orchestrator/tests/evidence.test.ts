@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { OrchError } from '../src/errors.js'
-import { checkKey, describeEvidence, grade, oneLine, parseEvidence } from '../src/evidence.js'
+import { checkKey, describeEvidence, grade, oneLine, parseEvidence, safeLine, stripEscapes } from '../src/evidence.js'
 import type { Evidence } from '../src/model.js'
 
 const thrown = (fn: () => unknown): unknown => {
@@ -120,5 +120,22 @@ describe('checkKey', () => {
     expect(checkKey(pr, '/a')).toBe('/a\0pr:41')
     expect(checkKey(pr, '/a')).not.toBe(checkKey(pr, '/b'))
     expect(checkKey(pr, '/a')).not.toBe(checkKey({ kind: 'ci', ref: '41' }, '/a'))
+  })
+})
+
+describe('stripEscapes and safeLine', () => {
+  it('removes whole CSI and OSC sequences', () => {
+    expect(stripEscapes('a\x1b[31mred\x1b[0m b')).toBe('ared b')
+    expect(stripEscapes('x\x1b]0;PWNED\x07y')).toBe('xy')
+    expect(stripEscapes('x\x1b]8;;http://e\x1b\\link\x1b]8;;\x1b\\y')).toBe('xlinky')
+  })
+
+  it('folds what is left onto one line', () => {
+    expect(safeLine('a\x1b]0;PWNED\x07b\nc')).toBe('ab c')
+    expect(safeLine(new Error('x').message)).toBe('x')
+  })
+
+  it('drops invisible format characters such as the bidi override', () => {
+    expect(oneLine('a‮b​c')).toBe('abc')
   })
 })

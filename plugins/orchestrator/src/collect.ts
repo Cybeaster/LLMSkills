@@ -6,7 +6,9 @@ import { readLiveSessions } from './sources/sessions.js'
 
 // Whose CI and PR evidence gh is asked about: nobody's (the default), every live session's pool,
 // or exactly these sessions' pools. gh is slow, so a caller asks only for the pools it shows.
-export type CollectOpts = { checks?: 'none' | 'live' | ReadonlySet<string> }
+// stale: a display that polls takes the last known verdict at once and lets gh refresh in the background;
+// without it each check waits for gh.
+export type CollectOpts = { checks?: 'none' | 'live' | ReadonlySet<string>; stale?: boolean }
 
 export async function collect(ctx: Ctx, opts: CollectOpts = {}): Promise<Row[]> {
   const which = opts.checks ?? 'none'
@@ -23,7 +25,7 @@ export async function collect(ctx: Ctx, opts: CollectOpts = {}): Promise<Row[]> 
       .flatMap(e =>
         (e.pool?.tasks ?? [])
           .filter(t => t.status === 'done' && (t.evidence?.kind === 'ci' || t.evidence?.kind === 'pr'))
-          .map(async t => checks.set(checkKey(t.evidence!, e.pool!.cwd ?? ''), await ctx.gh.check(t.evidence!, e.pool!.cwd))),
+          .map(async t => checks.set(checkKey(t.evidence!, e.pool!.cwd ?? ''), await ctx.gh.check(t.evidence!, e.pool!.cwd, { stale: opts.stale }))),
       ),
   ])
   return buildOverview({ pools, live, agents, checks, now: ctx.now() })

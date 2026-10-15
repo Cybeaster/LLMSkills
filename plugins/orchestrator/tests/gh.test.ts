@@ -111,9 +111,11 @@ describe('cliGh', () => {
 
 describe('cliGh cache', () => {
   const passed = done('success')
+  // a run still going: a finished one is final and never expires
+  const running = { status: 'in_progress', conclusion: '' }
 
   it('caches answers for 60 s per repo', async () => {
-    const { run, calls } = fakeRun(passed)
+    const { run, calls } = fakeRun(running)
     let now = 0
     const gh = cliGh(run, () => now)
     const ev = ci('1')
@@ -148,13 +150,16 @@ describe('cliGh cache', () => {
   })
 
   it('keeps a pass for 60 s, not the 15 s an unknown gets', async () => {
-    const { run, calls } = fakeRun(passed)
+    const { run, calls } = fakeRun({ state: 'OPEN', statusCheckRollup: [{ conclusion: 'SUCCESS' }] })
     let now = 0
     const gh = cliGh(run, () => now)
-    await gh.check(ci('1'), repoA)
+    expect(await gh.check(pr('1'), repoA)).toBe('pass')
     now = 20_000
-    await gh.check(ci('1'), repoA)
+    await gh.check(pr('1'), repoA)
     expect(calls).toHaveLength(1)
+    now = 61_000
+    await gh.check(pr('1'), repoA)
+    expect(calls).toHaveLength(2)
   })
 
   it('runs gh once for two checks of the same key at the same time', async () => {
@@ -202,7 +207,7 @@ describe('cliGh cache', () => {
         first = false
         await gate
       }
-      return { code: 0, stdout: JSON.stringify(passed) }
+      return { code: 0, stdout: JSON.stringify(running) }
     }
     let now = 0
     const gh = cliGh(run, () => now)
@@ -256,5 +261,126 @@ describe('cliGh when the cwd is gone', () => {
     expect(await gh.check(ci('77'), cwd)).toBe('unknown')
     expect(await gh.check(pr('41'), cwd)).toBe('unknown')
     expect(calls).toHaveLength(0)
+  })
+})
+
+// A gh whose answers the test releases by hand, to see how many run at once.
+function gated() {
+  let active = 0
+  let peak = 0
+  const calls: string[][] = []
+  const release: (() => void)[] = []
+  const run: GhRun = args =>
+    new Promise(resolve => {
+      calls.push(args)
+      active++
+      peak = Math.max(peak, active)
+      release.push(() => {
+        active--
+        resolve({ code: 0, stdout: JSON.stringify(done('success')) })
+      })
+    })
+  return { run, calls, release, peak: () => peak }
+}
+const tick = () => new Promise(r => setTimeout(r, 10))
+
+describe('cliGh limits and caching', () => {
+  it('runs at most 4 gh processes at once', async () => {
+    const g = gated()
+    const gh = cliGh(g.run)
+    const all = Array.from({ length: 9 }, (_, i) => gh.check(ci(String(100 + i)), repoA))
+    await tick()
+    expect(g.calls).toHaveLength(4)
+    while (g.release.length) {
+      g.release.shift()!()
+      await tick()
+    }
+    expect(await Promise.all(all)).toEqual(Array(9).fill('pass'))
+    expect(g.calls).toHaveLength(9)
+    expect(g.peak()).toBe(4)
+  })
+
+  it('never asks again about a finished CI run or a merged or closed PR', async () => {
+    let t = 0
+    const finished = fakeRun(done('success'))
+    const gh = cliGh(finished.run, () => t)
+    await gh.check(ci('1'), repoA)
+    t += 3_600_000
+    expect(await gh.check(ci('1'), repoA)).toBe('pass')
+    expect(finished.calls).toHaveLength(1)
+
+    for (const state of ['MERGED', 'CLOSED']) {
+      const f = fakeRun({ state, statusCheckRollup: [] })
+      const g = cliGh(f.run, () => t)
+      await g.check(pr('5'), repoA)
+      t += 3_600_000
+      await g.check(pr('5'), repoA)
+      expect(f.calls).toHaveLength(1)
+    }
+  })
+
+  it('asks again about an open PR once its answer expires', async () => {
+    let t = 0
+    const open = fakeRun({ state: 'OPEN', statusCheckRollup: [] })
+    const gh = cliGh(open.run, () => t)
+    await gh.check(pr('5'), repoA)
+    t += 61_000
+    await gh.check(pr('5'), repoA)
+    expect(open.calls).toHaveLength(2)
+  })
+
+  describe('stale mode (the TUI)', () => {
+    it('answers unknown at once for a new key and fills it in the background', async () => {
+      const g = gated()
+      const gh = cliGh(g.run)
+      expect(await gh.check(ci('1'), repoA, { stale: true })).toBe('unknown')
+      await tick()
+      expect(g.calls).toHaveLength(1)
+      g.release[0]()
+      await tick()
+      expect(await gh.check(ci('1'), repoA, { stale: true })).toBe('pass')
+    })
+
+    it('returns the last answer while an expired one refreshes', async () => {
+      let t = 0
+      const answers = [{ state: 'OPEN', statusCheckRollup: [{ conclusion: 'SUCCESS' }] }, { state: 'OPEN', statusCheckRollup: [{ conclusion: 'FAILURE' }] }]
+      const hold: (() => void)[] = []
+      const run: GhRun = () =>
+        new Promise(resolve => {
+          const out = JSON.stringify(answers.shift())
+          if (answers.length === 1) return resolve({ code: 0, stdout: out })
+          hold.push(() => resolve({ code: 0, stdout: out }))
+        })
+      const gh = cliGh(run, () => t)
+      expect(await gh.check(pr('5'), repoA)).toBe('pass')
+      t += 61_000
+      expect(await gh.check(pr('5'), repoA, { stale: true })).toBe('pass')
+      await tick()
+      hold[0]()
+      await tick()
+      expect(await gh.check(pr('5'), repoA, { stale: true })).toBe('fail')
+    })
+
+    it('does not start a second gh while one is still running', async () => {
+      const g = gated()
+      const gh = cliGh(g.run)
+      await gh.check(ci('1'), repoA, { stale: true })
+      await gh.check(ci('1'), repoA, { stale: true })
+      await tick()
+      expect(g.calls).toHaveLength(1)
+    })
+
+    it('the blocking mode still waits for the real verdict', async () => {
+      const g = gated()
+      const gh = cliGh(g.run)
+      await gh.check(ci('1'), repoA, { stale: true })
+      let verdict: string | undefined
+      const p = gh.check(ci('1'), repoA).then(v => (verdict = v))
+      await tick()
+      expect(verdict).toBeUndefined()
+      g.release[0]()
+      await p
+      expect(verdict).toBe('pass')
+    })
   })
 })

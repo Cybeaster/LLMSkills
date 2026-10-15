@@ -1,5 +1,6 @@
 import { homedir } from 'node:os'
 import type { Row } from './overview.js'
+import { pad } from './width.js'
 
 export type Line = { row: Row; prefix: string }
 
@@ -20,12 +21,6 @@ export function shortCwd(cwd: string, home = homedir()): string {
   const src = `${home}/src/`
   const short = cwd === home ? '~' : cwd.startsWith(src) ? cwd.slice(src.length) : cwd.startsWith(`${home}/`) ? `~${cwd.slice(home.length)}` : cwd
   return short.replace('/.worktrees/', '/wt/')
-}
-
-// Counts and cuts by code point: slicing UTF-16 units could leave half of an emoji.
-const pad = (s: string, n: number) => {
-  const chars = Array.from(s)
-  return chars.length > n ? `${chars.slice(0, n - 1).join('')}…` : s + ' '.repeat(n - chars.length)
 }
 
 export function listLine({ row, prefix }: Line): string {

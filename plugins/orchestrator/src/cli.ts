@@ -2,7 +2,7 @@ import { parseArgs } from 'node:util'
 import { collect } from './collect.js'
 import { CMD_TIMEOUT_MS, type Ctx } from './ctx.js'
 import { OrchError } from './errors.js'
-import { describeEvidence, parseEvidence } from './evidence.js'
+import { describeEvidence, parseEvidence, stripEscapes } from './evidence.js'
 import { flatten, renderList, renderPool } from './format.js'
 import { runHook } from './hooks.js'
 import { linkSessions } from './link.js'
@@ -76,9 +76,7 @@ async function cmdTitle(ctx: Ctx, args: string[]): Promise<Out> {
 // titles and links) gone, then every other control character but newline and tab (\r becomes a line
 // break), the last 20 lines, about 4 KB.
 function tailOf(out: string): string {
-  const clean = out
-    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
-    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+  const clean = stripEscapes(out)
     .replace(/\r\n?/g, '\n')
     .replace(/\p{Cc}/gu, c => (c === '\n' || c === '\t' ? c : ''))
     .trimEnd()

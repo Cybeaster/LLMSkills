@@ -27,6 +27,12 @@ function input(over: Partial<OverviewInput>): OverviewInput {
 }
 
 describe('buildOverview', () => {
+  it('sorts names with numbers in numeric order', () => {
+    const names = ['s10', 's2', 's1']
+    const rows = buildOverview(input({ live: names.map(n => live(n)), agents: names.map(n => agent(n, n)) }))
+    expect(rows.map(r => r.name)).toEqual(['s1', 's2', 's10'])
+  })
+
   it('nests children under their parent and rolls up flags', () => {
     const rows = buildOverview(input({
       pools: [
@@ -233,12 +239,12 @@ describe('buildOverview', () => {
   })
 
   it('clips evidence by code point, so an emoji at the cut is not split', () => {
-    // 'note: ' + 32 x is 38 characters, so the emoji starts at the 39th; the clip keeps 39 and adds the ellipsis
+    // 'note: ' + 32 x is 38 columns and the emoji is 2 wide, so it would end at column 40; the clip keeps 39 columns and adds the ellipsis
     const [row] = buildOverview(input({
       pools: [{ id: 'S', pool: pool('S', [{ status: 'done', evidence: { kind: 'note', ref: `${'x'.repeat(32)}😀tail` } }]) }],
       live: [live('S')],
     }))
-    expect(row.tasks[0].detail).toBe(`note: ${'x'.repeat(32)}😀…`)
+    expect(row.tasks[0].detail).toBe(`note: ${'x'.repeat(32)}…`)
     expect(row.tasks[0].detail).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/)
   })
 
