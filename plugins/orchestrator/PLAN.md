@@ -1238,7 +1238,17 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
 ```ts
 import { describe, expect, it } from 'vitest'
 import { OrchError } from '../src/errors.js'
-import { checkKey, describe as describeEv, grade, parseEvidence } from '../src/evidence.js'
+import { checkKey, describeEvidence, grade, parseEvidence } from '../src/evidence.js'
+import type { Evidence } from '../src/model.js'
+
+const thrown = (fn: () => unknown): unknown => {
+  try {
+    fn()
+  } catch (e) {
+    return e
+  }
+  return undefined
+}
 
 describe('parseEvidence', () => {
   it('splits on the first colon', () => {
@@ -1246,10 +1256,37 @@ describe('parseEvidence', () => {
     expect(parseEvidence('cmd: npm test -- --run')).toEqual({ kind: 'cmd', ref: 'npm test -- --run' })
   })
 
+  it('accepts every kind', () => {
+    expect(parseEvidence('commit:9f3e2a1')).toEqual({ kind: 'commit', ref: '9f3e2a1' })
+    expect(parseEvidence('pr:41')).toEqual({ kind: 'pr', ref: '41' })
+    expect(parseEvidence('note: looked fine ')).toEqual({ kind: 'note', ref: 'looked fine' })
+  })
+
   it('rejects unknown kinds and empty refs', () => {
     expect(() => parseEvidence('sha:abc')).toThrow(OrchError)
     expect(() => parseEvidence('commit:')).toThrow(/commit:<sha>/)
     expect(() => parseEvidence('abc')).toThrow(OrchError)
+  })
+
+  it('rejects no colon, a leading colon and a blank ref', () => {
+    for (const s of ['notee', 'commitx', ':abc', 'note:   ']) expect(() => parseEvidence(s), s).toThrow(OrchError)
+  })
+
+  it('fails with exit code 2', () => {
+    const err = thrown(() => parseEvidence('sha:abc'))
+    expect(err).toBeInstanceOf(OrchError)
+    expect(err).toMatchObject({ code: 2 })
+  })
+
+  it('requires a commit ref that looks like a sha', () => {
+    for (const s of ['commit:fixed the login bug', 'commit:HEAD', 'commit:done', 'commit:abc', `commit:${'a'.repeat(65)}`]) {
+      expect(() => parseEvidence(s), s).toThrow(/commit needs a sha, e\.g\. commit:\$\(git rev-parse --short HEAD\)/)
+    }
+    expect(thrown(() => parseEvidence('commit:HEAD'))).toMatchObject({ code: 2 })
+    expect(parseEvidence('commit:abc1')).toEqual({ kind: 'commit', ref: 'abc1' })
+    expect(parseEvidence('commit:9F3E2A1')).toEqual({ kind: 'commit', ref: '9F3E2A1' })
+    const sha = '0123456789abcdef0123456789abcdef01234567'
+    expect(parseEvidence(`commit:${sha}`)).toEqual({ kind: 'commit', ref: sha })
   })
 })
 
@@ -1261,21 +1298,49 @@ describe('grade', () => {
     expect(grade(undefined)).toBe('claimed')
   })
 
+  it('contradicts a command that failed', () => {
+    expect(grade({ kind: 'cmd', ref: 'x', exit: 1 })).toBe('contradicted')
+  })
+
   it('follows the live check for CI and PRs', () => {
     expect(grade({ kind: 'ci', ref: 'u' }, 'pass')).toBe('proven')
     expect(grade({ kind: 'pr', ref: '4' }, 'fail')).toBe('contradicted')
     expect(grade({ kind: 'pr', ref: '4' }, 'pending')).toBe('unverified')
     expect(grade({ kind: 'ci', ref: 'u' })).toBe('unverified')
   })
+
+  it('leaves CI unverified, never contradicted, when gh could not tell', () => {
+    expect(grade({ kind: 'ci', ref: 'u' }, 'unknown')).toBe('unverified')
+  })
 })
 
-describe('describe', () => {
+describe('describeEvidence', () => {
   it('formats each kind', () => {
-    expect(describeEv({ kind: 'commit', ref: '9f3e2a1c0ffee' })).toBe('commit 9f3e2a1')
-    expect(describeEv({ kind: 'cmd', ref: 'npm test', exit: 0 })).toBe('cmd npm test (exit 0)')
-    expect(describeEv({ kind: 'note', ref: 'looked fine' })).toBe('note: looked fine')
-    expect(describeEv({ kind: 'pr', ref: '41' })).toBe('pr 41')
-    expect(checkKey({ kind: 'pr', ref: '41' })).toBe('pr:41')
+    expect(describeEvidence({ kind: 'commit', ref: '9f3e2a1c0ffee' })).toBe('commit 9f3e2a1')
+    expect(describeEvidence({ kind: 'cmd', ref: 'npm test', exit: 0 })).toBe('cmd npm test (exit 0)')
+    expect(describeEvidence({ kind: 'note', ref: 'looked fine' })).toBe('note: looked fine')
+    expect(describeEvidence({ kind: 'pr', ref: '41' })).toBe('pr 41')
+    expect(describeEvidence({ kind: 'ci', ref: 'u' })).toBe('ci u')
+  })
+
+  it('keeps the result on one line without escape codes', () => {
+    expect(describeEvidence({ kind: 'note', ref: 'line1\nline2' })).toBe('note: line1 line2')
+    const out = describeEvidence({ kind: 'note', ref: '\u001b[31mred' })
+    expect(out).not.toContain('\u001b')
+    expect(out).toBe('note: [31mred')
+  })
+
+  it('does not throw on a hand-edited pool entry without a ref', () => {
+    expect(() => describeEvidence({ kind: 'commit' } as unknown as Evidence)).not.toThrow()
+  })
+})
+
+describe('checkKey', () => {
+  it('keys a check by repo as well as by ref', () => {
+    const pr: Evidence = { kind: 'pr', ref: '41' }
+    expect(checkKey(pr, '/a')).toBe('/a\0pr:41')
+    expect(checkKey(pr, '/a')).not.toBe(checkKey(pr, '/b'))
+    expect(checkKey(pr, '/a')).not.toBe(checkKey({ kind: 'ci', ref: '41' }, '/a'))
   })
 })
 ```
@@ -1293,43 +1358,54 @@ Expected: FAIL, `Cannot find module '../src/evidence.js'`.
 import { OrchError } from './errors.js'
 import type { Evidence } from './model.js'
 
+type Kind = Evidence['kind']
+
 export type Check = 'pass' | 'fail' | 'pending' | 'unknown'
 export type Grade = 'proven' | 'claimed' | 'contradicted' | 'unverified'
-export type ParsedEvidence = { kind: 'commit' | 'pr' | 'ci' | 'note'; ref: string } | { kind: 'cmd'; ref: string }
+// cmd evidence gets its exit code from orch running the command, so the parsed form has none
+export type ParsedEvidence = Exclude<Evidence, { kind: 'cmd' }> | { kind: 'cmd'; ref: string }
 
-const KINDS = ['commit', 'pr', 'ci', 'cmd', 'note']
+const KINDS: readonly Kind[] = ['commit', 'pr', 'ci', 'cmd', 'note']
+const isKind = (k: string): k is Kind => (KINDS as readonly string[]).includes(k)
 const USAGE = 'use commit:<sha> | pr:<number|url> | ci:<run-url> | cmd:<command> | note:<text>'
+const SHA = /^[0-9a-f]{4,64}$/i
 
 export function parseEvidence(s: string): ParsedEvidence {
   const i = s.indexOf(':')
   const kind = s.slice(0, i)
   const ref = s.slice(i + 1).trim()
-  if (i < 1 || !KINDS.includes(kind) || !ref) throw new OrchError(`bad evidence "${s}": ${USAGE}`, 2)
-  return { kind, ref } as ParsedEvidence
+  if (i < 1 || !isKind(kind) || !ref) throw new OrchError(`bad evidence "${s}": ${USAGE}`, 2)
+  if (kind === 'commit' && !SHA.test(ref)) {
+    throw new OrchError(`bad evidence "${s}": commit needs a sha, e.g. commit:$(git rev-parse --short HEAD)`, 2)
+  }
+  return { kind, ref }
 }
 
 export function grade(ev: Evidence | undefined, check?: Check): Grade {
   if (!ev || ev.kind === 'note') return 'claimed'
-  if (ev.kind === 'commit' || ev.kind === 'cmd') return 'proven'
+  if (ev.kind === 'commit') return 'proven'
+  if (ev.kind === 'cmd') return ev.exit === 0 ? 'proven' : 'contradicted'
   if (check === 'pass') return 'proven'
   if (check === 'fail') return 'contradicted'
   return 'unverified'
 }
 
-export function describe(ev: Evidence): string {
+export function describeEvidence(ev: Evidence): string {
+  const ref = String(ev.ref ?? '').replace(/[\s\p{Cc}]+/gu, ' ').trim()
   switch (ev.kind) {
     case 'commit':
-      return `commit ${ev.ref.slice(0, 7)}`
+      return `commit ${ref.slice(0, 7)}`
     case 'cmd':
-      return `cmd ${ev.ref} (exit ${ev.exit})`
+      return `cmd ${ref} (exit ${String(ev.exit)})`
     case 'note':
-      return `note: ${ev.ref}`
+      return `note: ${ref}`
     default:
-      return `${ev.kind} ${ev.ref}`
+      return `${ev.kind} ${ref}`
   }
 }
 
-export const checkKey = (ev: Evidence) => `${ev.kind}:${ev.ref}`
+// gh resolves a bare PR or run number against the repo in cwd, so the same ref in two repos is two checks
+export const checkKey = (ev: Evidence, cwd: string) => `${cwd}\0${ev.kind}:${ev.ref}`
 ```
 
 - [ ] **Step 4: Run them to see them pass**
@@ -1631,7 +1707,7 @@ describe('cliGh', () => {
     expect(await cliGh(fakeRun({}).run).check({ kind: 'commit', ref: 'a' }, '/r')).toBe('unknown')
   })
 
-  it('caches answers for 60 s', async () => {
+  it('caches answers for 60 s per repo', async () => {
     const { run, calls } = fakeRun({ status: 'completed', conclusion: 'success' })
     let now = 0
     const gh = cliGh(run, () => now)
@@ -1643,6 +1719,8 @@ describe('cliGh', () => {
     now = 61_000
     await gh.check(ev, '/r')
     expect(calls).toHaveLength(2)
+    await gh.check(ev, '/other')
+    expect(calls).toHaveLength(3)
   })
 })
 ```
@@ -1742,7 +1820,7 @@ export function cliHerdr(run: Run = runHerdr): Herdr {
 
 ```ts
 import { execFile } from 'node:child_process'
-import type { Check } from '../evidence.js'
+import { checkKey, type Check } from '../evidence.js'
 import type { Evidence } from '../model.js'
 
 export interface Gh {
@@ -1786,7 +1864,7 @@ export function cliGh(run: GhRun = runGh, now: () => number = Date.now): Gh {
   return {
     async check(ev, cwd) {
       if (ev.kind !== 'ci' && ev.kind !== 'pr') return 'unknown'
-      const key = `${ev.kind}:${ev.ref}`
+      const key = checkKey(ev, cwd)
       const hit = cache.get(key)
       if (hit && now() - hit.at < 60_000) return hit.value
       let value: Check
@@ -1830,7 +1908,7 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
 
 ```ts
 import { describe, expect, it } from 'vitest'
-import type { Check } from '../src/evidence.js'
+import { checkKey, type Check } from '../src/evidence.js'
 import { newPool, type Pool, type Task } from '../src/model.js'
 import { buildOverview, DAY, type OverviewInput } from '../src/overview.js'
 import type { HerdrAgent } from '../src/sources/herdr.js'
@@ -1883,7 +1961,11 @@ describe('buildOverview', () => {
   })
 
   it('grades evidence with the live checks', () => {
-    const checks = new Map<string, Check>([['ci:u1', 'fail'], ['pr:4', 'pending']])
+    const checks = new Map<string, Check>([
+      [checkKey({ kind: 'ci', ref: 'u1' }, '/src/S'), 'fail'],
+      [checkKey({ kind: 'pr', ref: '4' }, '/src/S'), 'pending'],
+      [checkKey({ kind: 'pr', ref: '4' }, '/src/other'), 'fail'],
+    ])
     const [row] = buildOverview(input({
       pools: [{ id: 'S', pool: pool('S', [
         { status: 'done', evidence: { kind: 'ci', ref: 'u1' } },
@@ -1981,6 +2063,9 @@ describe('format', () => {
     const lines = poolLines(row({ name: 'p', title: 'Courses', tasks: [{ id: 't1', text: 'Write brief', status: 'done', mark: '✓', detail: 'commit 9f3e2a1' }] }))
     expect(lines[0]).toBe('p — Courses')
     expect(lines[1]).toMatch(/^✓ t1\s+Write brief\s+commit 9f3e2a1$/)
+    const long = poolLines(row({ name: 'p', tasks: [{ id: 't1', text: 'a', status: 'done', mark: '~', detail: `note: ${'x'.repeat(80)}` }] }))
+    expect(long[1]).toMatch(/x…$/)
+    expect(long[1].length).toBeLessThanOrEqual(92)
     expect(poolLines(row({ name: 'p', tasks: [] }))).toEqual(['p', '(no pool yet)'])
   })
 })
@@ -1996,7 +2081,7 @@ Expected: FAIL, cannot find the two modules.
 `src/overview.ts`:
 
 ```ts
-import { checkKey, describe, grade, type Check } from './evidence.js'
+import { checkKey, describeEvidence, grade, type Check } from './evidence.js'
 import type { Status, Task } from './model.js'
 import type { PoolEntry } from './store.js'
 import type { HerdrAgent } from './sources/herdr.js'
@@ -2036,7 +2121,7 @@ export type OverviewInput = {
   now: number
 }
 
-function viewTask(t: Task, checks: Map<string, Check>, childDone: (id: string) => boolean): TaskView {
+function viewTask(t: Task, cwd: string, checks: Map<string, Check>, childDone: (id: string) => boolean): TaskView {
   const kids = t.children ?? []
   const kidsDone = kids.filter(childDone).length
   let status: Status = t.status
@@ -2050,9 +2135,9 @@ function viewTask(t: Task, checks: Map<string, Check>, childDone: (id: string) =
   } else if (status === 'done' && kids.length && !t.evidence) {
     mark = '✓'
   } else if (status === 'done') {
-    const g = grade(t.evidence, t.evidence ? checks.get(checkKey(t.evidence)) : undefined)
+    const g = grade(t.evidence, t.evidence ? checks.get(checkKey(t.evidence, cwd)) : undefined)
     mark = g === 'proven' ? '✓' : g === 'claimed' ? '~' : g === 'contradicted' ? '✗' : '?'
-    detail = t.evidence ? describe(t.evidence) : 'claimed, no evidence'
+    detail = t.evidence ? describeEvidence(t.evidence) : 'claimed, no evidence'
     if (g === 'contradicted') detail += ' ✗ failing (live)'
     if (g === 'unverified') detail += ' (unverified)'
   } else if (status === 'in_progress') {
@@ -2105,7 +2190,7 @@ export function buildOverview(input: OverviewInput): Row[] {
     const pool = e?.pool
     const s = live.get(id)
     const a = agents.get(id)
-    const tasks = (pool?.tasks ?? []).map(t => viewTask(t, input.checks, childDone))
+    const tasks = (pool?.tasks ?? []).map(t => viewTask(t, pool?.cwd ?? '', input.checks, childDone))
     const done = tasks.filter(t => t.status === 'done').length
     const parent = pool?.parent?.sessionId
     const row: Row = {
@@ -2198,7 +2283,7 @@ export function renderList(rows: Row[]): string {
 export function poolLines(row: Row): string[] {
   const head = `${row.name}${row.title ? ` — ${row.title}` : ''}`
   if (!row.tasks.length) return [head, '(no pool yet)']
-  return [head, ...row.tasks.map(t => `${t.mark} ${t.id.padEnd(4)} ${pad(t.text, 34)} ${t.detail}`.trimEnd())]
+  return [head, ...row.tasks.map(t => `${t.mark} ${t.id.padEnd(4)} ${pad(t.text, 34)} ${pad(t.detail, 50)}`.trimEnd())]
 }
 
 export const renderPool = (row: Row) => poolLines(row).join('\n') + '\n'
@@ -2362,6 +2447,9 @@ describe('orch plan / task / ask / title', () => {
     const ctx = makeCtx()
     await run(['plan', 'a'], ctx)
     expect((await run(['task', 'done', 't1', '--evidence', 'sha:1'], ctx)).code).toBe(2)
+    const split = await run(['task', 'done', 't1', '--evidence', 'note:looked', 'fine'], ctx)
+    expect(split.code).toBe(2)
+    expect(split.stderr).toMatch(/quote the evidence/)
     const missing = await run(['task', 'start', 't9'], ctx)
     expect(missing.code).toBe(1)
     expect(missing.stderr).toMatch(/no task t9/)
@@ -2549,7 +2637,7 @@ export async function collect(ctx: Ctx): Promise<Row[]> {
     pools.flatMap(e =>
       (e.pool?.tasks ?? [])
         .filter(t => t.status === 'done' && (t.evidence?.kind === 'ci' || t.evidence?.kind === 'pr'))
-        .map(async t => checks.set(checkKey(t.evidence!), await ctx.gh.check(t.evidence!, e.pool!.cwd))),
+        .map(async t => checks.set(checkKey(t.evidence!, e.pool!.cwd), await ctx.gh.check(t.evidence!, e.pool!.cwd))),
     ),
   )
   return buildOverview({ pools, live, agents, checks, now: ctx.now() })
@@ -2573,7 +2661,7 @@ import { parseArgs } from 'node:util'
 import { collect } from './collect.js'
 import type { Ctx } from './ctx.js'
 import { OrchError } from './errors.js'
-import { describe, parseEvidence } from './evidence.js'
+import { describeEvidence, parseEvidence } from './evidence.js'
 import { flatten, renderList, renderPool } from './format.js'
 import { addTask, askTask, blockTask, doneTask, newPool, plan, setTitle, startTask, type Evidence, type Pool } from './model.js'
 import { ok, type Out } from './out.js'
@@ -2625,6 +2713,7 @@ async function cmdTitle(ctx: Ctx, args: string[]): Promise<Out> {
 async function cmdDone(ctx: Ctx, args: string[]): Promise<Out> {
   const { values, positionals } = parseArgs({ args, options: { evidence: { type: 'string' } }, allowPositionals: true })
   const id = need(positionals[0], 'task id')
+  if (positionals.length > 1) throw new OrchError(`orch task done takes one task id, got "${positionals.join(' ')}"; quote the evidence, e.g. --evidence "note:looked fine"`, 2)
   let evidence: Evidence | undefined
   if (values.evidence) {
     const e = parseEvidence(values.evidence)
@@ -2642,7 +2731,7 @@ async function cmdDone(ctx: Ctx, args: string[]): Promise<Out> {
     }
   }
   await mutateSelf(ctx, p => doneTask(p, id, evidence, ctx.now()))
-  return ok(evidence ? `${id} done (${describe(evidence)})\n` : `${id} done, but only claimed: add --evidence to prove it\n`)
+  return ok(evidence ? `${id} done (${describeEvidence(evidence)})\n` : `${id} done, but only claimed: add --evidence to prove it\n`)
 }
 
 async function cmdTask(ctx: Ctx, args: string[]): Promise<Out> {
