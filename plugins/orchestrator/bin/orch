@@ -2,5 +2,896 @@
 import { createRequire as __orchRequire } from 'node:module';
 const require = __orchRequire(import.meta.url);
 
+// src/cli.ts
+import { parseArgs } from "node:util";
+
+// src/errors.ts
+var OrchError = class extends Error {
+  constructor(message, code = 1) {
+    super(message);
+    this.code = code;
+  }
+  name = "OrchError";
+};
+
+// src/evidence.ts
+var KINDS = ["commit", "pr", "ci", "cmd", "note"];
+var isKind = (k) => KINDS.includes(k);
+var USAGE = "use commit:<sha> | pr:<number|url> | ci:<run-url> | cmd:<command> | note:<text>";
+var SHA = /^[0-9a-f]{4,64}$/i;
+function parseEvidence(s) {
+  const i = s.indexOf(":");
+  const kind = s.slice(0, i);
+  const ref = s.slice(i + 1).trim();
+  if (i < 1 || !isKind(kind) || !ref) throw new OrchError(`bad evidence "${s}": ${USAGE}`, 2);
+  if (kind === "commit" && !SHA.test(ref)) {
+    throw new OrchError(`bad evidence "${s}": commit needs a sha, e.g. commit:$(git rev-parse --short HEAD)`, 2);
+  }
+  return { kind, ref };
+}
+function grade(ev, check) {
+  if (!ev || ev.kind === "note") return "claimed";
+  if (ev.kind === "commit") return "proven";
+  if (ev.kind === "cmd") return ev.exit === 0 ? "proven" : "contradicted";
+  if (check === "pass") return "proven";
+  if (check === "fail") return "contradicted";
+  return "unverified";
+}
+var oneLine = (s) => String(s ?? "").replace(/[\s\p{Cc}]+/gu, " ").trim();
+function describeEvidence(ev) {
+  const ref = oneLine(ev.ref);
+  switch (ev.kind) {
+    case "commit":
+      return `commit ${ref.slice(0, 7)}`;
+    case "cmd":
+      return `cmd ${ref} (exit ${String(ev.exit)})`;
+    case "note":
+      return `note: ${ref}`;
+    default:
+      return `${ev.kind} ${ref}`;
+  }
+}
+var checkKey = (ev, cwd) => `${cwd}\0${ev.kind}:${ev.ref}`;
+
+// src/sources/sessions.ts
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+function startTimeOf(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+  } catch {
+    return void 0;
+  }
+}
+function pidAlive(pid, procStart) {
+  if (!Number.isInteger(pid) || pid <= 1) return false;
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return false;
+  }
+  if (procStart === void 0) return true;
+  const now = startTimeOf(pid);
+  return now === void 0 || now === procStart;
+}
+function readLiveSessions(claudeHome, isAlive = pidAlive) {
+  const dir = join(claudeHome, "sessions");
+  let names;
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const out2 = [];
+  for (const n of names) {
+    if (!/^\d+\.json$/.test(n)) continue;
+    try {
+      const o = JSON.parse(readFileSync(join(dir, n), "utf8"));
+      if (o.spare === true || typeof o.parkedJobId === "string") continue;
+      if (typeof o.sessionId !== "string" || typeof o.pid !== "number") continue;
+      if (!isAlive(o.pid, typeof o.procStart === "string" ? o.procStart : void 0)) continue;
+      out2.push({
+        pid: o.pid,
+        sessionId: o.sessionId,
+        cwd: typeof o.cwd === "string" ? o.cwd : "",
+        name: typeof o.name === "string" ? o.name : void 0,
+        status: o.status === "busy" ? "busy" : "idle",
+        // a blank or unprintable reason still means the session is waiting, so it falls back to 'input'
+        waitingFor: o.status === "waiting" ? oneLine(typeof o.waitingFor === "string" ? o.waitingFor : "") || "input" : void 0,
+        bridgeSessionId: typeof o.bridgeSessionId === "string" ? o.bridgeSessionId : void 0
+      });
+    } catch {
+    }
+  }
+  return out2;
+}
+function sessionLink(s) {
+  const id = s?.bridgeSessionId?.replace(/^cse_/, "session_");
+  return id && /^[A-Za-z0-9_-]+$/.test(id) ? `https://claude.ai/code/${id}` : void 0;
+}
+
+// src/overview.ts
+var DAY = 24 * 60 * 60 * 1e3;
+var clip = (s, n) => {
+  const chars = Array.from(s);
+  return chars.length > n ? `${chars.slice(0, n - 1).join("")}\u2026` : s;
+};
+function viewTask(t, cwd, checks, childDone) {
+  const kids = t.children ?? [];
+  const kidsDone = kids.filter(childDone).length;
+  let status = t.status;
+  if (kids.length) status = kidsDone === kids.length ? "done" : t.status === "done" ? "in_progress" : t.status;
+  let mark;
+  let detail = kids.length ? `${kids.length} children: ${kidsDone} \u2713 ${kids.length - kidsDone} running` : "";
+  if (t.needsInput) {
+    mark = "\u2691";
+    detail = `"${oneLine(t.needsInput)}"`;
+  } else if (status === "done" && kids.length && !t.evidence) {
+    mark = "\u2713";
+  } else if (status === "done") {
+    const g = grade(t.evidence, t.evidence ? checks.get(checkKey(t.evidence, cwd)) : void 0);
+    mark = g === "proven" ? "\u2713" : g === "claimed" ? "~" : g === "contradicted" ? "\u2717" : "?";
+    detail = t.evidence ? clip(describeEvidence(t.evidence), 40) : "claimed, no evidence";
+    if (g === "contradicted") detail += " \u2717 failing (live)";
+    if (g === "unverified") detail += " (unverified)";
+  } else if (status === "in_progress") {
+    mark = "\u25D0";
+  } else if (status === "blocked") {
+    mark = "!";
+    detail = oneLine(t.blockedReason) || "blocked";
+  } else {
+    mark = "\xB7";
+  }
+  return { id: t.id, text: oneLine(t.text), status, mark, detail };
+}
+var byName = (a, b) => a.name.localeCompare(b.name);
+var byPriority = (a, b) => b.flags - a.flags || Number(a.state === "ended") - Number(b.state === "ended") || byName(a, b);
+function buildOverview(input) {
+  const pools = new Map(input.pools.map((e) => [e.id, e]));
+  const live = new Map(input.live.map((s) => [s.sessionId, s]));
+  const agents = new Map((input.agents ?? []).filter((a) => a.sessionId).map((a) => [a.sessionId, a]));
+  const parentOf = (id) => pools.get(id)?.pool?.parent?.sessionId;
+  const ids = new Set(live.keys());
+  for (const [id, e] of pools) if (e.error || e.pool && input.now - e.pool.updatedAt < DAY) ids.add(id);
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const id of pools.keys()) {
+      const parent = parentOf(id);
+      if (!parent) continue;
+      if (!ids.has(id) && live.has(parent)) {
+        ids.add(id);
+        grew = true;
+      }
+      if (ids.has(id) && pools.has(parent) && !ids.has(parent)) {
+        ids.add(parent);
+        grew = true;
+      }
+    }
+  }
+  const built = /* @__PURE__ */ new Map();
+  const memo = /* @__PURE__ */ new Map();
+  const completeWalk = (id, visiting) => {
+    const known = memo.get(id);
+    if (known !== void 0) return known;
+    const tasks = pools.get(id)?.pool?.tasks;
+    if (!tasks?.length || visiting.has(id)) return false;
+    visiting.add(id);
+    const ok2 = tasks.every((t) => t.children?.length ? t.children.every((c) => completeWalk(c, visiting)) : t.status === "done");
+    visiting.delete(id);
+    memo.set(id, ok2);
+    return ok2;
+  };
+  const isComplete = (id) => completeWalk(id, /* @__PURE__ */ new Set());
+  const build = (id, path) => {
+    const inner = new Set(path).add(id);
+    const children = [...ids].filter((c) => parentOf(c) === id && !inner.has(c)).map((c) => build(c, inner)).sort(byName);
+    const e = pools.get(id);
+    const pool = e?.pool;
+    const s = live.get(id);
+    const a = agents.get(id);
+    const tasks = (pool?.tasks ?? []).map((t) => viewTask(t, pool?.cwd ?? "", input.checks, isComplete));
+    const done = tasks.filter((t) => t.status === "done").length;
+    const parent = pool?.parent?.sessionId;
+    const row = {
+      sessionId: id,
+      name: oneLine(a?.name) || oneLine(s?.name) || oneLine(pool?.title) || oneLine(id.slice(0, 8)),
+      title: oneLine(pool?.title) || oneLine(a?.title),
+      // a path may hold spaces, so control characters are replaced rather than folded away by oneLine
+      cwd: (pool?.cwd || s?.cwd || "").replace(new RegExp("\\p{Cc}", "gu"), "?"),
+      state: s ? s.waitingFor ? "waiting" : s.status : "ended",
+      waitingFor: s?.waitingFor ? oneLine(s.waitingFor) : void 0,
+      tag: s ? a ? "herdr" : "external" : "\u2014",
+      paneId: a?.paneId,
+      link: sessionLink(s),
+      pid: s?.pid,
+      hasPool: tasks.length > 0,
+      unreadable: e?.error === void 0 ? void 0 : oneLine(e.error),
+      orphan: !!parent && !pools.has(parent) && !live.has(parent),
+      done,
+      total: tasks.length,
+      complete: isComplete(id),
+      flags: (pool?.tasks.filter((t) => t.needsInput).length ?? 0) + children.reduce((n, c) => n + c.flags, 0),
+      tasks,
+      children
+    };
+    built.set(id, row);
+    return row;
+  };
+  const top = [...ids].filter((id) => {
+    const p = parentOf(id);
+    return !p || !ids.has(p);
+  });
+  const rows = top.map((id) => build(id, /* @__PURE__ */ new Set()));
+  for (const id of ids) {
+    if (built.has(id)) continue;
+    let root = id;
+    for (const seen = /* @__PURE__ */ new Set(); !seen.has(root); root = parentOf(root) ?? root) seen.add(root);
+    rows.push(build(root, /* @__PURE__ */ new Set()));
+  }
+  return rows.sort(byPriority);
+}
+
+// src/store.ts
+import {
+  appendFileSync,
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readdirSync as readdirSync2,
+  readFileSync as readFileSync2,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from "node:fs";
+import { join as join2 } from "node:path";
+var ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+function poolPath(home, id) {
+  if (!ID_PATTERN.test(id)) throw new OrchError(`invalid session id "${id}"`);
+  return join2(home, `${id}.json`);
+}
+var TASK_ID = /^[A-Za-z0-9_-]+$/;
+var STATUSES = ["pending", "in_progress", "done", "blocked"];
+function isTask(v) {
+  const t = v;
+  return typeof t === "object" && t !== null && typeof t.id === "string" && TASK_ID.test(t.id) && typeof t.text === "string" && STATUSES.includes(t.status) && (t.children === void 0 || Array.isArray(t.children) && t.children.every((c) => typeof c === "string"));
+}
+function isPool(v) {
+  const p = v;
+  return typeof p?.sessionId === "string" && typeof p.cwd === "string" && Array.isArray(p.tasks) && p.tasks.every(isTask);
+}
+function parsePool(path, id, text) {
+  let v;
+  try {
+    v = JSON.parse(text);
+  } catch (e) {
+    throw new OrchError(`pool file ${path} is not valid JSON (${e.message}); fix or delete it`);
+  }
+  if (!isPool(v)) throw new OrchError(`pool file ${path} is not a pool; fix or delete it`);
+  if (v.sessionId !== id) throw new OrchError(`pool file ${path} holds session ${v.sessionId}; fix or delete it`);
+  return v;
+}
+function readPool(home, id) {
+  const path = poolPath(home, id);
+  let text;
+  try {
+    text = readFileSync2(path, "utf8");
+  } catch (e) {
+    if (e.code === "ENOENT") return void 0;
+    throw e;
+  }
+  return parsePool(path, id, text);
+}
+function writePool(home, pool) {
+  const path = poolPath(home, pool.sessionId);
+  mkdirSync(home, { recursive: true });
+  const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  try {
+    const fd = openSync(tmp, "w");
+    try {
+      writeFileSync(fd, JSON.stringify(pool, null, 2));
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tmp, path);
+  } catch (e) {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+    }
+    throw e;
+  }
+}
+function listPools(home) {
+  let names;
+  try {
+    names = readdirSync2(home);
+  } catch {
+    return [];
+  }
+  return names.filter((n) => n.endsWith(".json") && ID_PATTERN.test(n.slice(0, -".json".length))).map((n) => {
+    const id = n.slice(0, -".json".length);
+    const path = join2(home, n);
+    try {
+      return { id, pool: parsePool(path, id, readFileSync2(path, "utf8")) };
+    } catch (e) {
+      return { id, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+}
+var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+var lockTiming = { staleMs: 5e3, deadlineMs: 7e3 };
+async function withLock(home, id, fn) {
+  const lock = `${poolPath(home, id)}.lock`;
+  mkdirSync(home, { recursive: true });
+  const deadline = Date.now() + lockTiming.deadlineMs;
+  for (; ; ) {
+    let held = 0;
+    try {
+      mkdirSync(lock);
+      break;
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      try {
+        held = Date.now() - statSync(lock).mtimeMs;
+        if (held > lockTiming.staleMs) {
+          rmSync(lock, { recursive: true, force: true });
+          continue;
+        }
+      } catch (err) {
+        if (err.code === "ENOENT") continue;
+        throw new OrchError(`cannot break stale lock ${lock}: ${err.message}`);
+      }
+      if (Date.now() > deadline) {
+        throw new OrchError(
+          `pool ${id} is locked (${lock}, held ${Math.round(held)} ms); if no orch is running, delete that directory`
+        );
+      }
+      await sleep(10 + Math.random() * 20);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    rmSync(lock, { recursive: true, force: true });
+  }
+}
+function writeUnder(home, id, next) {
+  if (next.sessionId !== id) {
+    throw new OrchError(`refusing to write pool ${next.sessionId} under session ${id}`);
+  }
+  writePool(home, next);
+  return next;
+}
+function update(home, id, fn) {
+  return withLock(home, id, () => writeUnder(home, id, fn(readPool(home, id))));
+}
+var LOG_MAX_BYTES = 1024 * 1024;
+
+// src/collect.ts
+async function collect(ctx) {
+  const pools = listPools(ctx.orchHome);
+  const live = readLiveSessions(ctx.claudeHome, ctx.isAlive);
+  const agents = await ctx.herdr.list().catch(() => null);
+  const checks = /* @__PURE__ */ new Map();
+  await Promise.all(
+    pools.flatMap(
+      (e) => (e.pool?.tasks ?? []).filter((t) => t.status === "done" && (t.evidence?.kind === "ci" || t.evidence?.kind === "pr")).map(async (t) => checks.set(checkKey(t.evidence, e.pool.cwd ?? ""), await ctx.gh.check(t.evidence, e.pool.cwd)))
+    )
+  );
+  return buildOverview({ pools, live, agents, checks, now: ctx.now() });
+}
+
+// src/format.ts
+import { homedir } from "node:os";
+function flatten(rows) {
+  const out2 = [];
+  const walk = (rs, indent, nested) => rs.forEach((r, i) => {
+    const last = i === rs.length - 1;
+    out2.push({ row: r, prefix: nested ? `${indent}${last ? "\u2514 " : "\u251C "}` : "" });
+    walk(r.children, nested ? `${indent}${last ? "  " : "\u2502 "}` : "", true);
+  });
+  walk(rows, "", false);
+  return out2;
+}
+function shortCwd(cwd, home = homedir()) {
+  const src = `${home}/src/`;
+  const short = cwd === home ? "~" : cwd.startsWith(src) ? cwd.slice(src.length) : cwd.startsWith(`${home}/`) ? `~${cwd.slice(home.length)}` : cwd;
+  return short.replace("/.worktrees/", "/wt/");
+}
+var pad = (s, n) => {
+  const chars = Array.from(s);
+  return chars.length > n ? `${chars.slice(0, n - 1).join("")}\u2026` : s + " ".repeat(n - chars.length);
+};
+function listLine({ row, prefix }) {
+  const progress = row.unreadable ? "unreadable pool" : row.hasPool ? `${row.done}/${row.total}${row.complete ? " \u2713" : ""}` : "\u2014  no pool";
+  const flags = row.flags ? `  \u2691${row.flags}` : "";
+  const orphan = row.orphan ? "  orphan" : "";
+  return `${pad(prefix + row.name, 24)} ${pad(shortCwd(row.cwd), 22)} ${pad(row.state, 7)} ${pad(row.tag, 9)} ${progress}${flags}${orphan}`;
+}
+function header(rows) {
+  const all = flatten(rows).map((l) => l.row);
+  const live = all.filter((r) => r.state !== "ended").length;
+  const flags = rows.reduce((n, r) => n + r.flags, 0);
+  return `ORCHESTRATOR  ${live} live \xB7 ${flags} \u2691 \xB7 ${all.length - live} ended`;
+}
+function renderList(rows) {
+  const lines = flatten(rows).map((l) => {
+    const link = l.row.link ? `
+${" ".repeat(l.prefix.length + 2)}\u2192 ${l.row.link}` : "";
+    return listLine(l) + link;
+  });
+  return [header(rows), ...lines].join("\n") + "\n";
+}
+function poolLines(row) {
+  const head = row.title && row.title !== row.name ? `${row.name} \u2014 ${row.title}` : row.name;
+  if (row.unreadable) return [head, `unreadable pool: ${row.unreadable}`];
+  if (!row.tasks.length) return [head, "(no pool yet)"];
+  return [head, ...row.tasks.map((t) => `${t.mark} ${t.id.padEnd(4)} ${pad(t.text, 34)} ${t.detail}`.trimEnd())];
+}
+var renderPool = (row) => poolLines(row).join("\n") + "\n";
+
+// src/model.ts
+function newPool(sessionId, cwd, now) {
+  return { sessionId, title: "", cwd, tasks: [], seq: 0, createdAt: now, updatedAt: now };
+}
+var clone = (p) => structuredClone(p);
+function find(p, id) {
+  const t = p.tasks.find((t2) => t2.id === id);
+  if (!t) throw new OrchError(`no task ${id} in this pool (have: ${p.tasks.map((t2) => t2.id).join(", ") || "none"})`);
+  return t;
+}
+function nextId(p) {
+  p.seq = Math.max(p.seq ?? 0, ...p.tasks.map((t) => Number(t.id.slice(1)) || 0)) + 1;
+  return `t${p.seq}`;
+}
+function own(p, now) {
+  p.updatedAt = now;
+  p.touchedAt = now;
+  return p;
+}
+function plan(pool, texts, now) {
+  const p = clone(pool);
+  const kept = p.tasks.filter((t) => t.status !== "pending" || t.children?.length || t.needsInput);
+  const fresh = texts.map((text) => ({ id: nextId(p), text, status: "pending" }));
+  p.tasks = [...kept, ...fresh];
+  return own(p, now);
+}
+function addTask(pool, text, now) {
+  const p = clone(pool);
+  p.tasks.push({ id: nextId(p), text, status: "pending" });
+  return own(p, now);
+}
+function setTitle(pool, title, now) {
+  const p = clone(pool);
+  p.title = title;
+  return own(p, now);
+}
+function startTask(pool, id, now) {
+  const p = clone(pool);
+  const t = find(p, id);
+  t.status = "in_progress";
+  delete t.blockedReason;
+  delete t.evidence;
+  return own(p, now);
+}
+function blockTask(pool, id, reason, now) {
+  const p = clone(pool);
+  const t = find(p, id);
+  t.status = "blocked";
+  t.blockedReason = reason;
+  delete t.evidence;
+  return own(p, now);
+}
+function doneTask(pool, id, evidence, now) {
+  const p = clone(pool);
+  const t = find(p, id);
+  t.status = "done";
+  delete t.blockedReason;
+  delete t.needsInput;
+  if (evidence) t.evidence = evidence;
+  else delete t.evidence;
+  return own(p, now);
+}
+function askTask(pool, id, question, now) {
+  const p = clone(pool);
+  find(p, id).needsInput = question;
+  return own(p, now);
+}
+
+// src/out.ts
+var ok = (stdout = "") => ({ code: 0, stdout, stderr: "" });
+
+// src/self.ts
+function resolveSelf(ctx) {
+  if (ctx.env.CLAUDE_SESSION_ID) return ctx.env.CLAUDE_SESSION_ID;
+  const byPid = new Map(readLiveSessions(ctx.claudeHome, ctx.isAlive).map((s) => [s.pid, s.sessionId]));
+  let pid = ctx.pid;
+  for (let i = 0; i < 32 && pid && pid > 1; i++) {
+    const id = byPid.get(pid);
+    if (id) return id;
+    pid = ctx.ppidOf(pid);
+  }
+  throw new OrchError("cannot tell which session this is: run orch from inside a Claude Code session");
+}
+
+// src/cli.ts
+var HELP = `orch \u2014 task pools for Claude Code sessions
+
+  orch plan "step" "step" \u2026              replace the pending part of this session's pool
+  orch title "what this session is for"
+  orch task add "text"
+  orch task start <id>
+  orch task block <id> "why"
+  orch task done <id> [--evidence commit:<sha> | pr:<n|url> | ci:<run-url> | cmd:<command> | note:<text>]
+  orch ask <id> "question"               flag a question for the person (\u2691)
+  orch status [<session-id>] [--json]    this (or that) session's pool
+  orch status --all [--json]             every session
+  orch link <child> <parent> <taskId>    attach a session under a parent task
+  orch spawn-child <taskId> --name <n> --cwd <dir> --brief <file> [--prompt <text>]
+  orch reply <session> "text" [--mark-only]
+  orch tui
+`;
+var need = (v, what) => {
+  if (!v) throw new OrchError(`missing ${what}
+
+${HELP}`, 2);
+  return v;
+};
+function mutateSelf(ctx, f) {
+  const id = resolveSelf(ctx);
+  return update(ctx.orchHome, id, (p) => f(p ?? newPool(id, ctx.cwd, ctx.now())));
+}
+function poolText(ctx, p) {
+  const rows = buildOverview({ pools: listPools(ctx.orchHome), live: [], agents: null, checks: /* @__PURE__ */ new Map(), now: ctx.now() });
+  const row = flatten(rows).map((l) => l.row).find((r) => r.sessionId === p.sessionId);
+  return row ? renderPool(row) : "";
+}
+async function cmdPlan(ctx, args) {
+  if (!args.length) throw new OrchError("orch plan needs at least one step", 2);
+  const p = await mutateSelf(ctx, (p2) => plan(p2, args, ctx.now()));
+  return ok(poolText(ctx, p));
+}
+async function cmdTitle(ctx, args) {
+  const title = need(args.join(" ").trim() || void 0, "title");
+  await mutateSelf(ctx, (p) => setTitle(p, title, ctx.now()));
+  return ok(`title: ${title}
+`);
+}
+async function cmdDone(ctx, args) {
+  const { values, positionals } = parseArgs({ args, options: { evidence: { type: "string" } }, allowPositionals: true });
+  const id = need(positionals[0], "task id");
+  if (positionals.length > 1) throw new OrchError(`orch task done takes one task id, got "${positionals.join(" ")}"; quote the evidence, e.g. --evidence "note:looked fine"`, 2);
+  let evidence;
+  if (values.evidence) {
+    const e = parseEvidence(values.evidence);
+    if (e.kind === "cmd") {
+      const self = readPool(ctx.orchHome, resolveSelf(ctx));
+      if (!self?.tasks.some((t) => t.id === id)) throw new OrchError(`no task ${id} in this pool`);
+      const r = await ctx.exec(e.ref, self.cwd || ctx.cwd);
+      if (r.code !== 0) {
+        const tail = r.out.trimEnd().split("\n").slice(-20).join("\n");
+        throw new OrchError(`refused: \`${e.ref}\` exited ${r.code}, so ${id} stays open
+${tail}`);
+      }
+      evidence = { kind: "cmd", ref: e.ref, exit: 0 };
+    } else {
+      evidence = e;
+    }
+  }
+  await mutateSelf(ctx, (p) => doneTask(p, id, evidence, ctx.now()));
+  return ok(evidence ? `${id} done (${describeEvidence(evidence)})
+` : `${id} done, but only claimed: add --evidence to prove it
+`);
+}
+async function cmdTask(ctx, args) {
+  const [sub, ...rest] = args;
+  const now = ctx.now();
+  switch (sub) {
+    case "add": {
+      const text = need(rest.join(" ").trim() || void 0, "task text");
+      const p = await mutateSelf(ctx, (p2) => addTask(p2, text, now));
+      return ok(`added ${p.tasks.at(-1).id}
+`);
+    }
+    case "start": {
+      const id = need(rest[0], "task id");
+      await mutateSelf(ctx, (p) => startTask(p, id, now));
+      return ok(`${id} in progress
+`);
+    }
+    case "block": {
+      const id = need(rest[0], "task id");
+      const why = need(rest.slice(1).join(" ").trim() || void 0, "reason");
+      await mutateSelf(ctx, (p) => blockTask(p, id, why, now));
+      return ok(`${id} blocked: ${why}
+`);
+    }
+    case "done":
+      return cmdDone(ctx, rest);
+    default:
+      throw new OrchError(`usage: orch task add|start|block|done \u2026
+
+${HELP}`, 2);
+  }
+}
+async function cmdAsk(ctx, args) {
+  const id = need(args[0], "task id");
+  const question = need(args.slice(1).join(" ").trim() || void 0, "question");
+  await mutateSelf(ctx, (p) => askTask(p, id, question, ctx.now()));
+  return ok(`\u2691 ${id}: ${question}
+Now send the person a push notification naming this session and the question.
+`);
+}
+async function cmdStatus(ctx, args) {
+  const { values, positionals } = parseArgs({ args, options: { all: { type: "boolean" }, json: { type: "boolean" } }, allowPositionals: true });
+  const rows = await collect(ctx);
+  if (values.all) return ok(values.json ? `${JSON.stringify(rows, (k, v) => k === "tasks" ? void 0 : v)}
+` : renderList(rows));
+  const id = positionals[0] ?? resolveSelf(ctx);
+  const row = flatten(rows).map((l) => l.row).find((r) => r.sessionId === id);
+  if (positionals[0] && !row) throw new OrchError(`no session ${id}`);
+  if (values.json) return ok(`${JSON.stringify(row ?? null)}
+`);
+  if (row?.tasks.length) return ok(renderPool(row));
+  return ok(row && positionals[0] ? `${row.name} has no pool yet
+` : 'no pool yet: run orch plan "step" "step" \u2026\n');
+}
+async function run(argv, ctx) {
+  const [cmd, ...rest] = argv;
+  try {
+    switch (cmd) {
+      case "plan":
+        return await cmdPlan(ctx, rest);
+      case "title":
+        return await cmdTitle(ctx, rest);
+      case "task":
+        return await cmdTask(ctx, rest);
+      case "ask":
+        return await cmdAsk(ctx, rest);
+      case "status":
+        return await cmdStatus(ctx, rest);
+      case void 0:
+      case "help":
+      case "--help":
+      case "-h":
+        return ok(HELP);
+      default:
+        return { code: 2, stdout: "", stderr: `orch: unknown command ${cmd}
+
+${HELP}` };
+    }
+  } catch (e) {
+    if (e instanceof OrchError) return { code: e.code, stdout: "", stderr: `orch: ${e.message}
+` };
+    if (e instanceof TypeError && e.code?.startsWith("ERR_PARSE_ARGS")) return { code: 2, stdout: "", stderr: `orch: ${e.message}
+` };
+    throw e;
+  }
+}
+
+// src/ctx.ts
+import { spawn } from "node:child_process";
+import { readFileSync as readFileSync3 } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { join as join3 } from "node:path";
+
+// src/sources/gh.ts
+import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+var runGh = (args, cwd) => new Promise((resolve) => {
+  execFile("gh", args, { cwd, timeout: 2e4 }, (err, stdout) => resolve({ code: err ? 1 : 0, stdout: String(stdout) }));
+});
+var FAILED = ["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"];
+var PASSED = ["SUCCESS", "NEUTRAL", "SKIPPED"];
+var ANSWER_TTL_MS = 6e4;
+var UNKNOWN_TTL_MS = 15e3;
+async function ciCheck(run2, ref, cwd) {
+  const m = ref.match(/github\.com\/([^/]+\/[^/]+)\/actions\/runs\/(\d+)/);
+  const args = m ? ["run", "view", m[2], "-R", m[1], "--json", "status,conclusion"] : ["run", "view", ref, "--json", "status,conclusion"];
+  const r = await run2(args, cwd);
+  if (r.code !== 0) return "unknown";
+  const o = JSON.parse(r.stdout);
+  if (o.status !== "completed") return "pending";
+  const c = String(o.conclusion ?? "").toUpperCase();
+  return PASSED.includes(c) ? "pass" : FAILED.includes(c) ? "fail" : "unknown";
+}
+async function prCheck(run2, ref, cwd) {
+  const r = await run2(["pr", "view", ref, "--json", "state,statusCheckRollup"], cwd);
+  if (r.code !== 0) return "unknown";
+  const o = JSON.parse(r.stdout);
+  if (o.state === "MERGED") return "pass";
+  if (o.state === "CLOSED") return "fail";
+  const states = (o.statusCheckRollup ?? []).map((c) => c.conclusion || c.state || "");
+  if (states.some((s) => FAILED.includes(s))) return "fail";
+  if (states.length && states.every((s) => PASSED.includes(s))) return "pass";
+  return "pending";
+}
+function runDir(ref, cwd) {
+  if (cwd && existsSync(cwd)) return cwd;
+  return /^https?:\/\//i.test(ref) ? tmpdir() : void 0;
+}
+async function ask(run2, ev, cwd) {
+  const dir = runDir(ev.ref, cwd);
+  if (dir === void 0) return "unknown";
+  return ev.kind === "ci" ? ciCheck(run2, ev.ref, dir) : prCheck(run2, ev.ref, dir);
+}
+function cliGh(run2 = runGh, now = Date.now) {
+  const cache = /* @__PURE__ */ new Map();
+  return {
+    async check(ev, cwd) {
+      if (ev.kind !== "ci" && ev.kind !== "pr") return "unknown";
+      const key = checkKey(ev, cwd);
+      const hit = cache.get(key);
+      if (hit && (hit.arrivedAt === void 0 || now() - hit.arrivedAt < (hit.value === "unknown" ? UNKNOWN_TTL_MS : ANSWER_TTL_MS))) {
+        return hit.promise;
+      }
+      const entry = {
+        promise: ask(run2, ev, cwd).catch(() => "unknown").then((value) => {
+          entry.value = value;
+          entry.arrivedAt = now();
+          return value;
+        })
+      };
+      cache.set(key, entry);
+      return entry.promise;
+    }
+  };
+}
+
+// src/sources/herdr.ts
+import { execFile as execFile2 } from "node:child_process";
+var HerdrError = class extends OrchError {
+  constructor(message, herdrCode) {
+    super(message);
+    this.herdrCode = herdrCode;
+  }
+  name = "HerdrError";
+};
+var DEFAULT_TIMEOUT_MS = 1e4;
+var START_TIMEOUT_MS = 75e3;
+var WAIT_SLACK_MS = 1e4;
+var runHerdr = (args, timeoutMs) => {
+  const limit = timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  return new Promise((resolve) => {
+    execFile2("herdr", args, { timeout: limit, maxBuffer: 16 << 20 }, (err, stdout, stderr) => {
+      const timedOut = err?.killed === true && typeof err.code !== "string";
+      const code = err ? typeof err.code === "number" ? err.code : 127 : 0;
+      const error = err ? timedOut ? `timed out after ${limit}ms` : err.message : void 0;
+      resolve({ code, stdout: String(stdout), stderr: String(stderr), error });
+    });
+  });
+};
+var isObj = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+var str = (v) => typeof v === "string" ? v : void 0;
+var agentIn = (reply) => isObj(reply) && isObj(reply.result) && isObj(reply.result.agent) ? reply.result.agent : void 0;
+var snippet = (v) => JSON.stringify(v).slice(0, 200);
+var sessionIdIn = (s) => isObj(s) && s.kind === "id" && typeof s.value === "string" && s.value ? s.value : void 0;
+function herdrErrorIn(text) {
+  try {
+    const e = JSON.parse(text)?.error;
+    if (isObj(e) && (typeof e.code === "string" || typeof e.message === "string")) return { code: str(e.code), message: str(e.message) };
+  } catch {
+  }
+  return void 0;
+}
+function failure(args, r) {
+  const what = `herdr ${args.slice(0, 2).join(" ")} failed`;
+  const e = herdrErrorIn(r.stderr) ?? herdrErrorIn(r.stdout);
+  if (e) return new HerdrError(`${what}: ${e.message ?? e.code}${e.message && e.code ? ` (${e.code})` : ""}`, e.code);
+  return new HerdrError(`${what}: ${r.stderr.trim() || r.stdout.trim() || (r.error ?? "").trim()}`);
+}
+function cliHerdr(run2 = runHerdr) {
+  const ok2 = async (args, timeoutMs) => {
+    const r = await run2(args, timeoutMs);
+    if (r.code !== 0) throw failure(args, r);
+    return r.stdout;
+  };
+  const json = async (args, timeoutMs) => {
+    const out2 = await ok2(args, timeoutMs);
+    try {
+      return JSON.parse(out2);
+    } catch {
+      throw new HerdrError(`herdr ${args.slice(0, 2).join(" ")} did not answer with JSON: ${out2.trim().slice(0, 200)}`);
+    }
+  };
+  return {
+    async list() {
+      const o = await json(["agent", "list"]);
+      const agents = isObj(o) && isObj(o.result) ? o.result.agents : void 0;
+      if (!Array.isArray(agents)) throw new HerdrError(`unexpected herdr agent list reply: ${snippet(o)}`);
+      return agents.filter((a) => isObj(a) && a.agent === "claude" && typeof a.pane_id === "string").map((a) => ({
+        name: str(a.name),
+        paneId: a.pane_id,
+        status: str(a.agent_status) ?? "unknown",
+        sessionId: sessionIdIn(a.agent_session),
+        title: str(a.terminal_title_stripped)
+      }));
+    },
+    async focus(target) {
+      await ok2(["agent", "focus", target]);
+    },
+    async createTab({ workspace, cwd, label }) {
+      const o = await json(["tab", "create", "--workspace", workspace, "--cwd", cwd, "--label", label, "--no-focus"]);
+      const root = isObj(o) && isObj(o.result) ? o.result.root_pane : void 0;
+      const paneId = isObj(root) ? str(root.pane_id) : void 0;
+      if (!paneId) throw new HerdrError(`unexpected herdr tab create reply: ${snippet(o)}`);
+      return { paneId };
+    },
+    async startClaude({ name, paneId, args }) {
+      await ok2(["agent", "start", name, "--kind", "claude", "--pane", paneId, "--timeout", "60000", "--", ...args], START_TIMEOUT_MS);
+    },
+    async sessionIdOf(name) {
+      try {
+        return sessionIdIn(agentIn(await json(["agent", "get", name]))?.agent_session);
+      } catch {
+        return void 0;
+      }
+    },
+    async waitIdle(target, timeoutMs) {
+      await ok2(["agent", "wait", target, "--until", "idle", "--until", "done", "--until", "blocked", "--timeout", String(timeoutMs)], timeoutMs + WAIT_SLACK_MS);
+      const o = await json(["agent", "get", target]);
+      const status = str(agentIn(o)?.agent_status);
+      if (!status) throw new HerdrError(`unexpected herdr agent get reply: ${snippet(o)}`);
+      return status;
+    },
+    async prompt(target, text) {
+      await ok2(["agent", "prompt", target, text]);
+    }
+  };
+}
+
+// src/ctx.ts
+function ppidOf(pid) {
+  try {
+    const stat = readFileSync3(`/proc/${pid}/stat`, "utf8");
+    const ppid = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
+    return Number.isFinite(ppid) ? ppid : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function execShell(command, cwd) {
+  return new Promise((resolve) => {
+    const child = spawn("bash", ["-c", command], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    let out2 = "";
+    child.stdout.on("data", (d) => out2 += d);
+    child.stderr.on("data", (d) => out2 += d);
+    child.on("error", (e) => resolve({ code: 127, out: String(e) }));
+    child.on("close", (code) => resolve({ code: code ?? 1, out: out2 }));
+  });
+}
+async function readStdin() {
+  let s = "";
+  for await (const chunk of process.stdin) s += chunk;
+  return s;
+}
+function realCtx() {
+  const env = process.env;
+  const claudeHome = env.ORCH_CLAUDE_HOME ?? join3(homedir2(), ".claude");
+  return {
+    env,
+    claudeHome,
+    orchHome: env.ORCH_HOME ?? join3(claudeHome, "orchestrator"),
+    cwd: process.cwd(),
+    pid: process.pid,
+    now: Date.now,
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    ppidOf,
+    isAlive: pidAlive,
+    readStdin,
+    exec: execShell,
+    herdr: cliHerdr(),
+    gh: cliGh()
+  };
+}
+
 // src/main.ts
-process.stdout.write("orch: not built yet\n");
+var out = await run(process.argv.slice(2), realCtx());
+process.stdout.write(out.stdout);
+process.stderr.write(out.stderr);
+process.exitCode = out.code;
