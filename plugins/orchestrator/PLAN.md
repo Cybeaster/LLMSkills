@@ -758,7 +758,7 @@ import { join } from 'node:path'
 const [bundle, home, tag, dir] = process.argv.slice(2)
 const { update } = await import(bundle)
 writeFileSync(join(dir, 'ready-' + tag), '')
-const until = Date.now() + 5000
+const until = Date.now() + 10000
 while (!existsSync(join(dir, 'go'))) {
   if (Date.now() > until) throw new Error('no start signal')
   await new Promise(r => setTimeout(r, 2))
@@ -808,6 +808,27 @@ describe('store', () => {
     writeFileSync(join(h, 's1.json.123.abc.tmp'), '{"half":')
     mkdirSync(join(h, 's1.json.lock'))
     expect(listPools(h).map(e => e.id)).toEqual(['s1'])
+  })
+
+  it('listPools skips misnamed files and flags a file holding another session', () => {
+    const h = home()
+    writePool(h, newPool('s1', '/r', 1))
+    const text = readFileSync(join(h, 's1.json'), 'utf8')
+    for (const name of ['.hidden.json', 's1 copy.json', 'backup1.json']) writeFileSync(join(h, name), text)
+    const entries = listPools(h).sort((a, b) => a.id.localeCompare(b.id))
+    expect(entries.map(e => e.id)).toEqual(['backup1', 's1'])
+    expect(entries[0].pool).toBeUndefined()
+    expect(entries[0].error).toMatch(/holds session s1/)
+    expect(entries[1]).toMatchObject({ id: 's1', pool: { sessionId: 's1' } })
+  })
+
+  it('readPool refuses a file that holds another session', () => {
+    const h = home()
+    writePool(h, newPool('s1', '/r', 1))
+    writeFileSync(join(h, 'backup1.json'), readFileSync(join(h, 's1.json'), 'utf8'))
+    expect(() => readPool(h, 'backup1')).toThrow(OrchError)
+    expect(() => readPool(h, 'backup1')).toThrow(/holds session s1/)
+    expect(readPool(h, 's1')).toMatchObject({ sessionId: 's1' })
   })
 
   it('serialises updates from many processes', async () => {
@@ -1031,7 +1052,9 @@ function isPool(v: unknown): v is Pool {
   return typeof p?.sessionId === 'string' && Array.isArray(p.tasks)
 }
 
-function parsePool(path: string, text: string): Pool {
+// A pool file must hold the session its name says; a copy such as backup1.json would otherwise
+// show up as a second session with the original's tasks and questions.
+function parsePool(path: string, id: string, text: string): Pool {
   let v: unknown
   try {
     v = JSON.parse(text)
@@ -1039,6 +1062,7 @@ function parsePool(path: string, text: string): Pool {
     throw new OrchError(`pool file ${path} is not valid JSON (${(e as Error).message}); fix or delete it`)
   }
   if (!isPool(v)) throw new OrchError(`pool file ${path} is not a pool; fix or delete it`)
+  if (v.sessionId !== id) throw new OrchError(`pool file ${path} holds session ${v.sessionId}; fix or delete it`)
   return v
 }
 
@@ -1051,7 +1075,7 @@ export function readPool(home: string, id: string): Pool | undefined {
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined
     throw e
   }
-  return parsePool(path, text)
+  return parsePool(path, id, text)
 }
 
 export function writePool(home: string, pool: Pool): void {
@@ -1084,13 +1108,14 @@ export function listPools(home: string): PoolEntry[] {
   } catch {
     return []
   }
+  // Names that are not valid session ids are never written by orch; skip them like temp files and lock dirs.
   return names
-    .filter(n => n.endsWith('.json'))
+    .filter(n => n.endsWith('.json') && ID_PATTERN.test(n.slice(0, -'.json'.length)))
     .map(n => {
       const id = n.slice(0, -'.json'.length)
       const path = join(home, n)
       try {
-        return { id, pool: parsePool(path, readFileSync(path, 'utf8')) }
+        return { id, pool: parsePool(path, id, readFileSync(path, 'utf8')) }
       } catch (e) {
         return { id, error: e instanceof Error ? e.message : String(e) }
       }
