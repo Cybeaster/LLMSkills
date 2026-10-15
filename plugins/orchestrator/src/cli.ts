@@ -10,6 +10,7 @@ import { addTask, askTask, blockTask, doneTask, newPool, plan, setTitle, startTa
 import { ok, type Out } from './out.js'
 import { briefFile } from './paths.js'
 import { buildOverview } from './overview.js'
+import { reply } from './reply.js'
 import { resolveSelf, trySelf } from './self.js'
 import { spawnChild } from './spawn.js'
 import { listPools, readPool, update } from './store.js'
@@ -207,6 +208,12 @@ async function cmdSpawn(ctx: Ctx, args: string[]): Promise<Out> {
   })
 }
 
+async function cmdReply(ctx: Ctx, args: string[]): Promise<Out> {
+  const { values, positionals } = parseArgs({ args, options: { 'mark-only': { type: 'boolean' } }, allowPositionals: true })
+  const session = need(positionals[0], 'session')
+  return reply(ctx, session, positionals.slice(1).join(' ').trim() || undefined, !!values['mark-only'])
+}
+
 export async function run(argv: string[], ctx: Ctx): Promise<Out> {
   const [cmd, ...rest] = argv
   // --help or -h anywhere before a `--` is a request for help, never task text
@@ -230,6 +237,8 @@ export async function run(argv: string[], ctx: Ctx): Promise<Out> {
         return await cmdLink(ctx, rest)
       case 'spawn-child':
         return await cmdSpawn(ctx, rest)
+      case 'reply':
+        return await cmdReply(ctx, rest)
       case undefined:
       case 'help':
       case '--help':

@@ -508,7 +508,7 @@ var runHerdr = (args, timeoutMs) => {
 };
 var isObj = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 var str = (v) => typeof v === "string" ? v : void 0;
-var agentIn = (reply) => isObj(reply) && isObj(reply.result) && isObj(reply.result.agent) ? reply.result.agent : void 0;
+var agentIn = (reply2) => isObj(reply2) && isObj(reply2.result) && isObj(reply2.result.agent) ? reply2.result.agent : void 0;
 var snippet = (v) => JSON.stringify(v).slice(0, 200);
 var sessionIdIn = (s) => isObj(s) && s.kind === "id" && typeof s.value === "string" && s.value ? s.value : void 0;
 function herdrErrorIn(text) {
@@ -1039,6 +1039,85 @@ function workDir(ctx, p) {
   return abs;
 }
 
+// src/targets.ts
+var NoMatch = class extends OrchError {
+};
+var live = (r) => r.state !== "ended";
+var narrow = (rows) => {
+  const l = rows.filter(live);
+  return rows.length > 1 && l.length ? l : rows;
+};
+function resolveTarget(rows, query) {
+  const all = flatten(rows).map((l) => l.row);
+  const exact = narrow(all.filter((r) => r.sessionId === query || r.name === query));
+  const matches = exact.length ? exact : narrow(all.filter((r) => query.length >= 6 && r.sessionId.startsWith(query) || r.title === query));
+  if (matches.length === 1) return matches[0];
+  if (!matches.length) throw new NoMatch(`no session matches "${query}"`);
+  throw new OrchError(`"${query}" matches several sessions: ${matches.map((r) => `${r.name} (${r.sessionId.slice(0, 8)})`).join(", ")}`);
+}
+async function resolveSession(ctx, rows, query, opts = {}) {
+  try {
+    const r = resolveTarget(rows, query);
+    return { sessionId: r.sessionId, name: r.name };
+  } catch (e) {
+    if (!(e instanceof NoMatch)) throw e;
+    let pool;
+    try {
+      pool = readPool(ctx.orchHome, query);
+    } catch {
+    }
+    if (pool) return { sessionId: query, name: pool.title || query };
+    if (opts.herdr) {
+      const agent = await ctx.herdr.list().then(
+        (l) => l.find((a) => a.name === query),
+        () => void 0
+      );
+      if (agent?.sessionId) return { sessionId: agent.sessionId, name: query };
+      if (agent) throw new OrchError(`that session has no id yet; run orch status --all and link by its id`);
+    }
+    throw e;
+  }
+}
+
+// src/reply.ts
+var EXIT_SENDMESSAGE = 3;
+async function reply(ctx, query, text, markOnly) {
+  const row = resolveTarget(await collect(ctx), query);
+  const task = readPool(ctx.orchHome, row.sessionId)?.tasks.find((t) => t.needsInput);
+  if (!task) throw new OrchError(`${row.name} has no open question`);
+  if (!markOnly) {
+    if (!text) throw new OrchError("missing reply text", 2);
+    if (row.state === "ended") throw new OrchError(`${row.name} has ended; its question stays open`);
+    if (row.state === "waiting") throw new OrchError(`${row.name} is waiting on a dialog (${row.waitingFor}); answer that in the session first`);
+    const message = `[orch reply to: "${task.needsInput}"] ${text}`;
+    if (!row.paneId) {
+      return { code: EXIT_SENDMESSAGE, stdout: `${JSON.stringify({ route: "sendmessage", to: row.name, text: message })}
+`, stderr: "" };
+    }
+    const blocked = new OrchError(`${row.name} is waiting on a permission prompt; answer that in its pane first`);
+    let state;
+    try {
+      state = await ctx.herdr.waitIdle(row.paneId, 9e4);
+    } catch (e) {
+      const timedOut = e instanceof HerdrError && (e.herdrCode === "timeout" || /timed out/.test(e.message));
+      if (!timedOut) throw e;
+      throw new OrchError(`${row.name} is still busy after 90 s; its question stays open, try again later`);
+    }
+    if (state === "blocked") throw blocked;
+    try {
+      await ctx.herdr.prompt(row.paneId, message);
+    } catch (e) {
+      if (e instanceof HerdrError && e.herdrCode === "agent_blocked") throw blocked;
+      throw new OrchError(
+        `${row.name} may not have got the reply (${e instanceof Error ? e.message : String(e)}); check its pane, then run orch reply ${row.name} --mark-only if it arrived`
+      );
+    }
+  }
+  await updateIfExists(ctx.orchHome, row.sessionId, (p) => clearQuestions(p, ctx.now(), task.id) ?? p);
+  return ok(`answered ${row.name} ${task.id}
+`);
+}
+
 // src/self.ts
 function resolveSelf(ctx) {
   const fromEnv = ctx.env.CLAUDE_CODE_SESSION_ID || ctx.env.CLAUDE_SESSION_ID;
@@ -1131,46 +1210,6 @@ ${cmd}
   }
   return ok(`${JSON.stringify({ sessionId: childId, agent: name, paneId })}
 `);
-}
-
-// src/targets.ts
-var NoMatch = class extends OrchError {
-};
-var live = (r) => r.state !== "ended";
-var narrow = (rows) => {
-  const l = rows.filter(live);
-  return rows.length > 1 && l.length ? l : rows;
-};
-function resolveTarget(rows, query) {
-  const all = flatten(rows).map((l) => l.row);
-  const exact = narrow(all.filter((r) => r.sessionId === query || r.name === query));
-  const matches = exact.length ? exact : narrow(all.filter((r) => query.length >= 6 && r.sessionId.startsWith(query) || r.title === query));
-  if (matches.length === 1) return matches[0];
-  if (!matches.length) throw new NoMatch(`no session matches "${query}"`);
-  throw new OrchError(`"${query}" matches several sessions: ${matches.map((r) => `${r.name} (${r.sessionId.slice(0, 8)})`).join(", ")}`);
-}
-async function resolveSession(ctx, rows, query, opts = {}) {
-  try {
-    const r = resolveTarget(rows, query);
-    return { sessionId: r.sessionId, name: r.name };
-  } catch (e) {
-    if (!(e instanceof NoMatch)) throw e;
-    let pool;
-    try {
-      pool = readPool(ctx.orchHome, query);
-    } catch {
-    }
-    if (pool) return { sessionId: query, name: pool.title || query };
-    if (opts.herdr) {
-      const agent = await ctx.herdr.list().then(
-        (l) => l.find((a) => a.name === query),
-        () => void 0
-      );
-      if (agent?.sessionId) return { sessionId: agent.sessionId, name: query };
-      if (agent) throw new OrchError(`that session has no id yet; run orch status --all and link by its id`);
-    }
-    throw e;
-  }
 }
 
 // src/cli.ts
@@ -1347,6 +1386,11 @@ async function cmdSpawn(ctx, args) {
     prompt: values.prompt
   });
 }
+async function cmdReply(ctx, args) {
+  const { values, positionals } = parseArgs({ args, options: { "mark-only": { type: "boolean" } }, allowPositionals: true });
+  const session = need(positionals[0], "session");
+  return reply(ctx, session, positionals.slice(1).join(" ").trim() || void 0, !!values["mark-only"]);
+}
 async function run(argv, ctx) {
   const [cmd, ...rest] = argv;
   const flags = rest.includes("--") ? rest.slice(0, rest.indexOf("--")) : rest;
@@ -1369,6 +1413,8 @@ async function run(argv, ctx) {
         return await cmdLink(ctx, rest);
       case "spawn-child":
         return await cmdSpawn(ctx, rest);
+      case "reply":
+        return await cmdReply(ctx, rest);
       case void 0:
       case "help":
       case "--help":
