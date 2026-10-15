@@ -27,6 +27,9 @@ function parseEvidence(s) {
   if (kind2 === "commit" && !SHA.test(ref)) {
     throw new OrchError(`bad evidence "${s}": commit needs a sha, e.g. commit:$(git rev-parse --short HEAD)`, 2);
   }
+  if ((kind2 === "pr" || kind2 === "ci") && ref.startsWith("-")) {
+    throw new OrchError(`bad evidence "${s}": a ${kind2} ref cannot start with "-"`, 2);
+  }
   return { kind: kind2, ref };
 }
 function grade(ev, check) {
@@ -39,6 +42,7 @@ function grade(ev, check) {
 }
 var oneLine = (s) => String(s ?? "").replace(new RegExp("\\p{Cf}", "gu"), "").replace(/[\s\p{Cc}]+/gu, " ").trim();
 var stripEscapes = (s) => s.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "");
+var safeLine = (s) => oneLine(stripEscapes(String(s ?? "")));
 function describeEvidence(ev) {
   const ref = oneLine(ev.ref);
   switch (ev.kind) {
@@ -192,7 +196,12 @@ function buildOverview(input) {
   const agents = new Map((input.agents ?? []).filter((a) => a.sessionId).map((a) => [a.sessionId, a]));
   const parentOf = (id) => pools.get(id)?.pool?.parent?.sessionId;
   const ids = new Set(live2.keys());
-  for (const [id, e] of pools) if (e.error || e.pool && input.now - e.pool.updatedAt < DAY) ids.add(id);
+  const parents = new Set(input.pools.map((e) => e.pool?.parent?.sessionId));
+  const blank = (id) => {
+    const p = pools.get(id)?.pool;
+    return !live2.has(id) && !!p && !p.tasks.length && !p.title && !parents.has(id);
+  };
+  for (const [id, e] of pools) if (e.error || e.pool && input.now - e.pool.updatedAt < DAY && !blank(id)) ids.add(id);
   for (let grew = true; grew; ) {
     grew = false;
     for (const id of pools.keys()) {
@@ -237,7 +246,7 @@ function buildOverview(input) {
       name: oneLine(a?.name) || oneLine(s?.name) || oneLine(pool?.title) || oneLine(id.slice(0, 8)),
       title: oneLine(pool?.title) || oneLine(a?.title),
       // a path may hold spaces, so control characters are replaced rather than folded away by oneLine
-      cwd: (pool?.cwd || s?.cwd || "").replace(new RegExp("\\p{Cc}", "gu"), "?"),
+      cwd: (pool?.cwd || s?.cwd || "").replace(/[\p{Cc}\p{Cf}]/gu, "?"),
       state: s ? s.waitingFor ? "waiting" : s.status : "ended",
       waitingFor: s?.waitingFor ? oneLine(s.waitingFor) : void 0,
       tag: s ? a ? "herdr" : "external" : "\u2014",
@@ -250,6 +259,7 @@ function buildOverview(input) {
       done,
       total: tasks.length,
       complete: isComplete(id),
+      touchedAt: pool?.touchedAt ?? pool?.updatedAt ?? 0,
       flags: (pool?.tasks.filter((t) => t.needsInput).length ?? 0) + children.reduce((n, c) => n + c.flags, 0),
       tasks,
       children
@@ -472,7 +482,7 @@ var ANSWER_TTL_MS = 6e4;
 var UNKNOWN_TTL_MS = 15e3;
 async function ciCheck(run2, ref, cwd) {
   const m = ref.match(/github\.com\/([^/]+\/[^/]+)\/actions\/runs\/(\d+)/);
-  const args = m ? ["run", "view", m[2], "-R", m[1], "--json", "status,conclusion"] : ["run", "view", ref, "--json", "status,conclusion"];
+  const args = m ? ["run", "view", "-R", m[1], "--json", "status,conclusion", "--", m[2]] : ["run", "view", "--json", "status,conclusion", "--", ref];
   const r = await run2(args, cwd);
   if (r.code !== 0) return { value: "unknown", final: false };
   const o = JSON.parse(r.stdout);
@@ -481,7 +491,7 @@ async function ciCheck(run2, ref, cwd) {
   return PASSED.includes(c) ? { value: "pass", final: true } : FAILED.includes(c) ? { value: "fail", final: false } : { value: "unknown", final: false };
 }
 async function prCheck(run2, ref, cwd) {
-  const r = await run2(["pr", "view", ref, "--json", "state,statusCheckRollup"], cwd);
+  const r = await run2(["pr", "view", "--json", "state,statusCheckRollup", "--", ref], cwd);
   if (r.code !== 0) return { value: "unknown", final: false };
   const o = JSON.parse(r.stdout);
   if (o.state === "MERGED") return { value: "pass", final: true };
@@ -718,13 +728,12 @@ async function readStdin() {
   for await (const chunk of process.stdin) s += chunk;
   return s;
 }
-function realCtx() {
-  const env = process.env;
-  const claudeHome = env.ORCH_CLAUDE_HOME ?? join3(homedir(), ".claude");
+function realCtx(env = process.env) {
+  const claudeHome = env.ORCH_CLAUDE_HOME || env.CLAUDE_CONFIG_DIR || join3(homedir(), ".claude");
   return {
     env,
     claudeHome,
-    orchHome: env.ORCH_HOME ?? join3(claudeHome, "orchestrator"),
+    orchHome: env.ORCH_HOME || join3(claudeHome, "orchestrator"),
     cwd: process.cwd(),
     pid: process.pid,
     now: Date.now,
@@ -898,6 +907,37 @@ function startTurn(pool, now) {
 // src/out.ts
 var ok = (stdout = "") => ({ code: 0, stdout, stderr: "" });
 
+// src/prune.ts
+import { existsSync as existsSync3, statSync as statSync2, unlinkSync, utimesSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { join as join4 } from "node:path";
+var MAX_AGE_MS = 7 * DAY;
+var EVERY_MS = 60 * 60 * 1e3;
+function pruneEmptyPools(ctx, keep) {
+  const marker = join4(ctx.orchHome, ".pruned");
+  const now = ctx.now();
+  if (existsSync3(marker) && now - statSync2(marker).mtimeMs < EVERY_MS) return [];
+  writeFileSync2(marker, "");
+  utimesSync(marker, now / 1e3, now / 1e3);
+  const pools = listPools(ctx.orchHome);
+  const alive = new Set(readLiveSessions(ctx.claudeHome, ctx.isAlive).map((s) => s.sessionId));
+  const referenced = /* @__PURE__ */ new Set();
+  for (const e of pools) {
+    if (e.pool?.parent) referenced.add(e.pool.parent.sessionId);
+    for (const t of e.pool?.tasks ?? []) for (const c of t.children ?? []) referenced.add(c);
+  }
+  const removed = [];
+  for (const { id, pool } of pools) {
+    if (!pool || id === keep || alive.has(id) || referenced.has(id) || pool.parent || pool.tasks.length) continue;
+    if (now - Math.max(pool.updatedAt, pool.touchedAt ?? 0) < MAX_AGE_MS) continue;
+    try {
+      unlinkSync(poolPath(ctx.orchHome, id));
+      removed.push(id);
+    } catch {
+    }
+  }
+  return removed;
+}
+
 // src/hooks.ts
 var WORK = /* @__PURE__ */ new Set(["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "Agent", "Task"]);
 var NO_POOL = '[orch] Your last turn changed files or ran commands, and this session has no task pool. If this is multi-step work, run `orch plan "step" "step" \u2026` (see the orch-pool skill).';
@@ -957,6 +997,11 @@ ${unset}`);
       log(ctx.orchHome, `hook session-start: cannot link ${id} under ${parentId}: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
+  try {
+    pruneEmptyPools(ctx, id);
+  } catch (e) {
+    log(ctx.orchHome, `hook session-start: prune: ${e instanceof Error ? e.message : String(e)}`);
+  }
   if (!pool.brief) return ok();
   const next = pool.tasks.length ? "run `orch status` to pick up where you left off" : "then run `orch plan` for your part and tick each task with evidence";
   if (!pool.parent) return context("SessionStart", `[orch] Read ${pool.brief} first, ${next}.`);
@@ -968,8 +1013,22 @@ ${unset}`);
   const task = parent?.tasks.find((t) => t.id === pool.parent.taskId);
   return context(
     "SessionStart",
-    `[orch] This session is a child of "${parent?.title || pool.parent.sessionId}" for its task ${pool.parent.taskId}${task ? ` ("${task.text}")` : ""}. Read ${pool.brief} first, ${next}.`
+    `[orch] This session is a child of "${oneLine(parent?.title) || pool.parent.sessionId}" for its task ${pool.parent.taskId}${task ? ` ("${oneLine(task.text)}")` : ""}. Read ${pool.brief} first, ${next}.`
   );
+}
+var REPLY_FRAME = "[orch reply to: ";
+function clearAnswered(pool, prompt, now) {
+  if (typeof prompt !== "string" || !prompt.startsWith(REPLY_FRAME)) return clearQuestions(pool, now);
+  const m = /^"(?:[^"\\]|\\.)*"/.exec(prompt.slice(REPLY_FRAME.length));
+  let asked;
+  try {
+    asked = m && JSON.parse(m[0]);
+  } catch {
+    return void 0;
+  }
+  const quoted = (s) => Array.from(oneLine(s)).slice(0, 200).join("");
+  const task = typeof asked === "string" ? pool.tasks.find((t) => t.needsInput && quoted(t.needsInput) === asked) : void 0;
+  return task ? clearQuestions(pool, now, task.id) : void 0;
 }
 async function promptSubmit(ctx, input) {
   const id = input.session_id;
@@ -981,7 +1040,7 @@ async function promptSubmit(ctx, input) {
     id,
     (p) => {
       const q2 = p ?? newPool(id, input.cwd ?? ctx.cwd, now);
-      return startTurn(clearQuestions(q2, now) ?? q2, now);
+      return startTurn(clearAnswered(q2, input.prompt, now) ?? q2, now);
     },
     LOCK_WAIT_MS
   );
@@ -1063,11 +1122,11 @@ async function linkSessions(ctx, childId, parentId, taskId, opts = {}) {
 }
 
 // src/paths.ts
-import { statSync as statSync2 } from "node:fs";
+import { statSync as statSync3 } from "node:fs";
 import { resolve } from "node:path";
 function kind(path) {
   try {
-    const s = statSync2(path);
+    const s = statSync3(path);
     return s.isFile() ? "file" : s.isDirectory() ? "dir" : "other";
   } catch {
     return void 0;
@@ -1115,7 +1174,7 @@ async function resolveSession(ctx, rows, query, opts = {}) {
       pool = readPool(ctx.orchHome, query);
     } catch {
     }
-    if (pool) return { sessionId: query, name: pool.title || query };
+    if (pool) return { sessionId: query, name: safeLine(pool.title) || query };
     if (opts.herdr) {
       const agent = await ctx.herdr.list().then(
         (l) => l.find((a) => a.name === query),
@@ -1276,7 +1335,7 @@ ${cmd}
     throw new OrchError(`${name} runs in ${paneId} (session ${childId}) but linking failed: ${why2(e)}. Link it: ${linkCmd(q(childId))} ; then send its intro: ${promptCmd(name)}`);
   }
   try {
-    await ctx.herdr.prompt(name, intro);
+    await ctx.herdr.prompt(name, shown);
   } catch (e) {
     throw new OrchError(`${name} is linked under ${parentId} ${task.id}, but sending its intro failed (${why2(e)}). Send it yourself: ${promptCmd(name)}`);
   }
@@ -1346,6 +1405,7 @@ async function cmdDone(ctx, args) {
   const id = need(positionals[0], "task id");
   if (positionals.length > 1) throw new OrchError(`orch task done takes one task id, got "${positionals.join(" ")}"; quote the evidence, e.g. --evidence "note:looked fine"`, 2);
   let evidence;
+  let unsettled;
   if (values.evidence !== void 0) {
     const e = parseEvidence(values.evidence);
     if (e.kind === "cmd") {
@@ -1362,9 +1422,17 @@ async function cmdDone(ctx, args) {
       evidence = { kind: "cmd", ref: e.ref, exit: 0 };
     } else {
       evidence = e;
+      if (e.kind === "ci" || e.kind === "pr") {
+        if (!readPool(ctx.orchHome, resolveSelf(ctx))?.tasks.some((t) => t.id === id)) throw new OrchError(`no task ${id} in this pool`);
+        const verdict = await ctx.gh.check(e, ctx.cwd);
+        if (verdict === "fail") throw new OrchError(`refused: ${describeEvidence(e)} is failing, so ${id} stays open`);
+        if (verdict !== "pass") unsettled = `${id} done; ${describeEvidence(e)} is ${verdict}, orch will keep checking it
+`;
+      }
     }
   }
   await mutateSelf(ctx, (p) => doneTask(p, id, evidence, ctx.now()));
+  if (unsettled) return ok(unsettled);
   const where = evidence?.kind === "cmd" ? ` in ${ctx.cwd}` : "";
   return ok(evidence ? `${id} done (${describeEvidence(evidence)}${where})
 ` : `${id} done, but only claimed: add --evidence to prove it

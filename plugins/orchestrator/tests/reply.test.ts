@@ -242,6 +242,16 @@ describe('orch reply', () => {
     expect(readPool(ctx.orchHome, 's-old')!.tasks[0].needsInput).toBeUndefined()
   })
 
+  it('cleans the title of an old pool before it echoes it back', async () => {
+    const ctx = makeCtx({ now: () => 10 * 86_400_000 })
+    writePool(ctx.orchHome, { ...askTask(plan(newPool('s-old', '/r', 1), ['a'], 2), 't1', 'q', 3), title: 'evil\x1b]0;PWNED\x07 name' })
+    const out = await run(['reply', 's-old', '--', 'hi'], ctx)
+    expect(out.code).toBe(1)
+    expect(out.stderr).toMatch(/has ended/)
+    expect(out.stderr).not.toContain('\x1b')
+    expect(out.stderr).not.toContain('PWNED')
+  })
+
   it('keeps the newlines for SendMessage', async () => {
     const ctx = makeCtx()
     asking(ctx, 's-ext', 'api-fix', false)

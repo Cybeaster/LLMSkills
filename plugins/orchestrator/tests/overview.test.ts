@@ -110,6 +110,32 @@ describe('buildOverview', () => {
     expect(row).toMatchObject({ state: 'waiting', waitingFor: 'dialog open' })
   })
 
+  it('hides an ended session whose pool is empty, has no title and no children', () => {
+    const empty = (id: string, extra: Partial<Pool> = {}) => ({ id, pool: pool(id, [], extra) })
+    const rows = buildOverview(input({
+      pools: [empty('bare'), empty('titled', { title: 'Notes' }), empty('parent'), { id: 'kid', pool: pool('kid', [{}], { parent: { sessionId: 'parent', taskId: 't1' } }) }, empty('livebare')],
+      live: [live('livebare')],
+    }))
+    expect(rows.map(r => r.sessionId).sort()).toEqual(['livebare', 'parent', 'titled'])
+  })
+
+  it('replaces format characters in cwd as well as control characters', () => {
+    const rows = buildOverview(input({ live: [live('x', { cwd: '/src/a\u202Eb\x1bc d' })], pools: [] }))
+    expect(rows[0].cwd).toBe('/src/a?b?c d')
+  })
+
+  it('carries when a pool was last touched', () => {
+    const rows = buildOverview(input({
+      pools: [
+        { id: 'a', pool: pool('a', [{}], { updatedAt: NOW - 500, touchedAt: NOW - 100 }) },
+        { id: 'b', pool: pool('b', [{}], { updatedAt: NOW - 700 }) },
+      ],
+      live: [live('a'), live('b'), live('c')],
+    }))
+    const at = (id: string) => rows.find(r => r.sessionId === id)!.touchedAt
+    expect([at('a'), at('b'), at('c')]).toEqual([NOW - 100, NOW - 700, 0])
+  })
+
   it('drops ended sessions after a day unless their parent is live', () => {
     const old = (id: string, extra: Partial<Pool> = {}) => ({ id, pool: pool(id, [{}], { updatedAt: NOW - 2 * DAY, ...extra }) })
     const rows = buildOverview(input({

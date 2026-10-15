@@ -97,6 +97,7 @@ async function cmdDone(ctx: Ctx, args: string[]): Promise<Out> {
   const id = need(positionals[0], 'task id')
   if (positionals.length > 1) throw new OrchError(`orch task done takes one task id, got "${positionals.join(' ')}"; quote the evidence, e.g. --evidence "note:looked fine"`, 2)
   let evidence: Evidence | undefined
+  let unsettled: string | undefined
   if (values.evidence !== undefined) {
     const e = parseEvidence(values.evidence)
     if (e.kind === 'cmd') {
@@ -113,10 +114,18 @@ async function cmdDone(ctx: Ctx, args: string[]): Promise<Out> {
       }
       evidence = { kind: 'cmd', ref: e.ref, exit: 0 }
     } else {
-      evidence = e
+      evidence = e as Evidence
+      if (e.kind === 'ci' || e.kind === 'pr') {
+        if (!readPool(ctx.orchHome, resolveSelf(ctx))?.tasks.some(t => t.id === id)) throw new OrchError(`no task ${id} in this pool`)
+        // an answer someone acts on waits for gh: no stale verdict
+        const verdict = await ctx.gh.check(e as Evidence, ctx.cwd)
+        if (verdict === 'fail') throw new OrchError(`refused: ${describeEvidence(e as Evidence)} is failing, so ${id} stays open`)
+        if (verdict !== 'pass') unsettled = `${id} done; ${describeEvidence(e as Evidence)} is ${verdict}, orch will keep checking it\n`
+      }
     }
   }
   await mutateSelf(ctx, p => doneTask(p, id, evidence, ctx.now()))
+  if (unsettled) return ok(unsettled)
   const where = evidence?.kind === 'cmd' ? ` in ${ctx.cwd}` : ''
   return ok(evidence ? `${id} done (${describeEvidence(evidence)}${where})\n` : `${id} done, but only claimed: add --evidence to prove it\n`)
 }

@@ -1,11 +1,13 @@
 import { appendFileSync, closeSync, fstatSync, openSync, readSync } from 'node:fs'
 import type { Ctx } from './ctx.js'
 import { OrchError } from './errors.js'
-import { clearQuestions, linkChild, newPool, setParent, startTurn } from './model.js'
+import { oneLine } from './evidence.js'
+import { clearQuestions, linkChild, newPool, setParent, startTurn, type Pool } from './model.js'
 import { ok, type Out } from './out.js'
+import { pruneEmptyPools } from './prune.js'
 import { log, poolPath, readPool, update, updateIfExists } from './store.js'
 
-type HookInput = { session_id?: string; cwd?: string; transcript_path?: string; source?: string }
+type HookInput = { session_id?: string; cwd?: string; transcript_path?: string; source?: string; prompt?: string }
 type Input = HookInput & { session_id: string }
 
 const WORK = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash', 'Agent', 'Task']) // subagent edits never show up in this transcript
@@ -79,6 +81,12 @@ async function sessionStart(ctx: Ctx, input: Input): Promise<Out> {
     }
   }
 
+  try {
+    pruneEmptyPools(ctx, id)
+  } catch (e) {
+    log(ctx.orchHome, `hook session-start: prune: ${e instanceof Error ? e.message : String(e)}`)
+  }
+
   if (!pool.brief) return ok()
   const next = pool.tasks.length ? 'run `orch status` to pick up where you left off' : 'then run `orch plan` for your part and tick each task with evidence'
   if (!pool.parent) return context('SessionStart', `[orch] Read ${pool.brief} first, ${next}.`)
@@ -91,8 +99,27 @@ async function sessionStart(ctx: Ctx, input: Input): Promise<Out> {
   const task = parent?.tasks.find(t => t.id === pool.parent!.taskId)
   return context(
     'SessionStart',
-    `[orch] This session is a child of "${parent?.title || pool.parent.sessionId}" for its task ${pool.parent.taskId}${task ? ` ("${task.text}")` : ''}. Read ${pool.brief} first, ${next}.`,
+    `[orch] This session is a child of "${oneLine(parent?.title) || pool.parent.sessionId}" for its task ${pool.parent.taskId}${task ? ` ("${oneLine(task.text)}")` : ''}. Read ${pool.brief} first, ${next}.`,
   )
+}
+
+const REPLY_FRAME = '[orch reply to: '
+
+// An orch reply answers one question; the frame quotes it. Any other prompt answers everything.
+function clearAnswered(pool: Pool, prompt: string | undefined, now: number): Pool | undefined {
+  if (typeof prompt !== 'string' || !prompt.startsWith(REPLY_FRAME)) return clearQuestions(pool, now)
+  // JSON.stringify escapes the closing quote, so the quoted string ends at the first unescaped one
+  const m = /^"(?:[^"\\]|\\.)*"/.exec(prompt.slice(REPLY_FRAME.length))
+  let asked: unknown
+  try {
+    asked = m && JSON.parse(m[0])
+  } catch {
+    return undefined
+  }
+  // the frame holds a one-line, 200-character form of the question
+  const quoted = (s: string) => Array.from(oneLine(s)).slice(0, 200).join('')
+  const task = typeof asked === 'string' ? pool.tasks.find(t => t.needsInput && quoted(t.needsInput) === asked) : undefined
+  return task ? clearQuestions(pool, now, task.id) : undefined
 }
 
 async function promptSubmit(ctx: Ctx, input: Input): Promise<Out> {
@@ -107,7 +134,7 @@ async function promptSubmit(ctx: Ctx, input: Input): Promise<Out> {
     id,
     p => {
       const q = p ?? newPool(id, input.cwd ?? ctx.cwd, now)
-      return startTurn(clearQuestions(q, now) ?? q, now)
+      return startTurn(clearAnswered(q, input.prompt, now) ?? q, now)
     },
     LOCK_WAIT_MS,
   )

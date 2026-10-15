@@ -53,6 +53,17 @@ describe('parseEvidence', () => {
   })
 })
 
+describe('parseEvidence refs that look like flags', () => {
+  it.each(['pr:--web', 'pr:-R x/y', 'ci:-1', 'ci:--repo=x/y'])('refuses %s', s => {
+    expect(() => parseEvidence(s)).toThrow(/bad evidence.*cannot start with "-"/)
+  })
+
+  it('still takes a note or command that starts with a dash', () => {
+    expect(parseEvidence('note:-1 on the diff')).toEqual({ kind: 'note', ref: '-1 on the diff' })
+    expect(parseEvidence('cmd:-x')).toEqual({ kind: 'cmd', ref: '-x' })
+  })
+})
+
 describe('grade', () => {
   it('trusts commits and commands orch ran, not notes', () => {
     expect(grade({ kind: 'commit', ref: 'a' })).toBe('proven')

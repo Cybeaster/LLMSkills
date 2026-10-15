@@ -110,6 +110,8 @@ describe('orch status', () => {
     const json = JSON.parse((await run(['status', '--all', '--json'], ctx)).stdout)
     expect(json.map((r: { name: string }) => r.name).sort()).toEqual(['me', 'other'])
     expect(json.some((r: object) => 'tasks' in r)).toBe(false)
+    expect(json.find((r: { name: string }) => r.name === 'me').touchedAt).toBeGreaterThan(1000)
+    expect(json.find((r: { name: string }) => r.name === 'other').touchedAt).toBe(0)
     const one = JSON.parse((await run(['status', 's-self', '--json'], ctx)).stdout)
     expect(one.tasks.map((t: { text: string }) => t.text)).toEqual(['a'])
     expect((await run(['status', 's-nope'], ctx)).stderr).toMatch(/no session s-nope/)
@@ -117,9 +119,10 @@ describe('orch status', () => {
   })
 
   it('grades CI evidence with the live check', async () => {
-    const ctx = makeCtx({ gh: { check: async () => 'fail' } })
+    const ctx = makeCtx({ gh: { check: async () => 'pending' } })
     await run(['plan', 'a'], ctx)
     await run(['task', 'done', 't1', '--evidence', 'ci:https://github.com/o/r/actions/runs/1'], ctx)
+    ctx.gh = { check: async () => 'fail' }
     expect((await run(['status'], ctx)).stdout).toMatch(/^✗ t1 /m)
   })
 
@@ -317,13 +320,50 @@ describe('who is calling', () => {
   })
 })
 
+describe('orch task done with ci: and pr: evidence', () => {
+  const doneWith = async (answer: 'pass' | 'fail' | 'pending' | 'unknown', evidence: string) => {
+    const gh = fakeGh(answer)
+    const ctx = makeCtx({ gh })
+    await run(['plan', 'a'], ctx)
+    const out = await run(['task', 'done', 't1', '--evidence', evidence], ctx)
+    return { out, gh, ctx }
+  }
+
+  it.each(['ci:https://github.com/o/r/actions/runs/1', 'pr:41'])('refuses %s while it is failing', async ev => {
+    const { out, gh, ctx } = await doneWith('fail', ev)
+    expect(out.code).toBe(1)
+    expect(out.stderr).toMatch(/refused: (ci|pr) .* is failing, so t1 stays open/)
+    expect(gh.calls).toHaveLength(1)
+    expect(readPool(ctx.orchHome, 's-self')!.tasks[0].status).toBe('pending')
+  })
+
+  it('accepts evidence that passes', async () => {
+    const { out, ctx } = await doneWith('pass', 'pr:41')
+    expect(out).toMatchObject({ code: 0, stdout: 't1 done (pr 41)\n' })
+    expect(readPool(ctx.orchHome, 's-self')!.tasks[0]).toMatchObject({ status: 'done', evidence: { kind: 'pr', ref: '41' } })
+  })
+
+  it.each(['pending', 'unknown'] as const)('accepts evidence that is %s and says orch will keep checking', async verdict => {
+    const { out, ctx } = await doneWith(verdict, 'ci:77')
+    expect(out.code).toBe(0)
+    expect(out.stdout).toBe(`t1 done; ci 77 is ${verdict}, orch will keep checking it\n`)
+    expect(readPool(ctx.orchHome, 's-self')!.tasks[0].status).toBe('done')
+  })
+
+  it('does not ask gh about other evidence', async () => {
+    const { gh } = await doneWith('fail', 'note:fine')
+    expect(gh.calls).toEqual([])
+  })
+})
+
 describe('orch status and gh', () => {
   it('asks gh nothing for status --all, as text or JSON', async () => {
-    const gh = fakeGh('fail')
+    const gh = fakeGh('pass')
     const ctx = makeCtx({ gh })
     writeSession(ctx, { pid: 1, sessionId: 's-self', name: 'me' })
     await run(['plan', 'a'], ctx)
     await run(['task', 'done', 't1', '--evidence', CI], ctx)
+    gh.calls.length = 0 // done asked once itself
     expect((await run(['status', '--all'], ctx)).code).toBe(0)
     expect((await run(['status', '--all', '--json'], ctx)).code).toBe(0)
     expect(gh.calls).toEqual([])
@@ -334,6 +374,7 @@ describe('orch status and gh', () => {
     const ctx = makeCtx({ gh })
     await run(['plan', 'a'], ctx)
     await run(['task', 'done', 't1', '--evidence', CI], ctx)
+    gh.calls.length = 0
     writePool(ctx.orchHome, doneTask(plan(newPool('s-other', '/o', 1), ['x'], 2), 't1', { kind: 'pr', ref: '7' }, 3))
     await run(['status'], ctx)
     expect(gh.calls.map(([ev]) => ev.kind)).toEqual(['ci'])

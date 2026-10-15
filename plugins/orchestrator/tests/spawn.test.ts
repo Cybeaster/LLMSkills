@@ -113,7 +113,17 @@ describe('orch spawn-child', () => {
     inHerdr(ctx)
     parent(ctx)
     await spawn(ctx, '--prompt', 'Start with the tests.')
-    expect(ctx.herdr.calls[2][2]).toMatch(/with evidence\.\n\nStart with the tests\.$/)
+    expect(ctx.herdr.calls[2][2]).toMatch(/with evidence\. Start with the tests\.$/)
+  })
+
+  it('sends the intro to herdr as one line, even with a multi-line --prompt', async () => {
+    const ctx = makeCtx()
+    inHerdr(ctx)
+    parent(ctx)
+    await spawn(ctx, '--prompt', 'one\ntwo\x1b[31m\n\nthree')
+    const sent = ctx.herdr.calls[2][2]
+    expect(sent).not.toMatch(/[\x00-\x1f]/)
+    expect(sent).toMatch(/with evidence\. one two \[31m three$/)
   })
 
   it('prints the command when HERDR_ENV is set but there is no workspace', async () => {

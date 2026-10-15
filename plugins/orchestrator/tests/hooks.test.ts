@@ -2,9 +2,9 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { run } from '../src/cli.js'
-import { askTask, newPool, plan } from '../src/model.js'
+import { askTask, linkChild, newPool, plan } from '../src/model.js'
 import { poolPath, readPool, writePool } from '../src/store.js'
-import { makeCtx, type TestCtx } from './helpers.js'
+import { makeCtx, writeSession, type TestCtx } from './helpers.js'
 
 const hook = (ctx: TestCtx, name: string, input: object) => {
   ctx.stdin = JSON.stringify(input)
@@ -17,6 +17,78 @@ function transcript(ctx: TestCtx, tools: { name: string; at: number }[]): string
   writeFileSync(path, tools.map(t => JSON.stringify({ type: 'assistant', timestamp: new Date(t.at).toISOString(), message: { content: [{ type: 'tool_use', name: t.name, input: {} }] } })).join('\n') + '\n')
   return path
 }
+
+describe('hook prompt-submit and orch reply', () => {
+  const twoQuestions = (ctx: TestCtx) => {
+    let p = plan(newPool('s-self', '/r', 1), ['a', 'b', 'c'], 2)
+    p = askTask(p, 't2', 'Strict or "lenient"?', 3)
+    writePool(ctx.orchHome, askTask(p, 't3', 'Which curve?', 4))
+  }
+  const asked = (ctx: TestCtx) => readPool(ctx.orchHome, 's-self')!.tasks.map(t => t.needsInput)
+
+  it('clears only the question an orch reply frame quotes', async () => {
+    const ctx = makeCtx()
+    twoQuestions(ctx)
+    await hook(ctx, 'prompt-submit', { session_id: 's-self', prompt: `[orch reply to: ${JSON.stringify('Strict or "lenient"?')}] lenient` })
+    expect(asked(ctx)).toEqual([undefined, undefined, 'Which curve?'])
+  })
+
+  it('clears nothing when the quoted question matches no task', async () => {
+    const ctx = makeCtx()
+    twoQuestions(ctx)
+    await hook(ctx, 'prompt-submit', { session_id: 's-self', prompt: `[orch reply to: "something else"] yes` })
+    expect(asked(ctx)).toEqual([undefined, 'Strict or "lenient"?', 'Which curve?'])
+  })
+
+  it('still clears every question for a prompt the person typed', async () => {
+    const ctx = makeCtx()
+    twoQuestions(ctx)
+    await hook(ctx, 'prompt-submit', { session_id: 's-self', prompt: 'lenient, and the second curve' })
+    expect(asked(ctx)).toEqual([undefined, undefined, undefined])
+  })
+})
+
+describe('pruning empty pools at session start', () => {
+  const D = 86_400_000
+  const NOW = 30 * D
+  const empty = (id: string, at: number, extra: object = {}) => ({ ...newPool(id, '/r', at), ...extra })
+  const start = (ctx: TestCtx) => hook(ctx, 'session-start', { session_id: 's-new', cwd: '/r', source: 'startup' })
+  const gone = (ctx: TestCtx, id: string) => !existsSync(poolPath(ctx.orchHome, id))
+
+  it('deletes old ended pools with no tasks, and keeps everything else', async () => {
+    const ctx = makeCtx({ now: () => NOW })
+    writePool(ctx.orchHome, empty('old-empty', NOW - 8 * D))
+    writePool(ctx.orchHome, empty('recent-empty', NOW - 6 * D))
+    writePool(ctx.orchHome, plan(empty('old-tasks', NOW - 8 * D), ['a'], NOW - 8 * D))
+    writePool(ctx.orchHome, empty('old-touched', NOW - 8 * D, { touchedAt: NOW - D }))
+    writePool(ctx.orchHome, empty('old-live', NOW - 8 * D))
+    writePool(ctx.orchHome, empty('old-parent', NOW - 8 * D))
+    writePool(ctx.orchHome, empty('old-kid', NOW - 8 * D, { parent: { sessionId: 'old-parent', taskId: 't1' } }))
+    writePool(ctx.orchHome, plan(empty('holder', NOW - D), ['x'], NOW - D))
+    writePool(ctx.orchHome, linkChild(readPool(ctx.orchHome, 'holder')!, 't1', 'old-listed', NOW - D))
+    writePool(ctx.orchHome, empty('old-listed', NOW - 8 * D))
+    writeSession(ctx, { pid: 7, sessionId: 'old-live' })
+    await start(ctx)
+    expect(['old-empty'].every(id => gone(ctx, id))).toBe(true)
+    for (const id of ['recent-empty', 'old-tasks', 'old-touched', 'old-live', 'old-parent', 'old-kid', 'old-listed', 's-new']) expect(gone(ctx, id), id).toBe(false)
+  })
+
+  it('prunes at most once an hour', async () => {
+    let now = NOW
+    const ctx = makeCtx({ now: () => now })
+    writePool(ctx.orchHome, empty('first', NOW - 8 * D))
+    await start(ctx)
+    expect(gone(ctx, 'first')).toBe(true)
+    expect(existsSync(join(ctx.orchHome, '.pruned'))).toBe(true)
+    writePool(ctx.orchHome, empty('second', NOW - 8 * D))
+    now += 30 * 60_000
+    await start(ctx)
+    expect(gone(ctx, 'second')).toBe(false)
+    now += 40 * 60_000
+    await start(ctx)
+    expect(gone(ctx, 'second')).toBe(true)
+  })
+})
 
 describe('hook session-start', () => {
   it('registers the session and exports its id', async () => {
@@ -38,6 +110,14 @@ describe('hook session-start', () => {
     expect(readPool(ctx.orchHome, 's-par')!.tasks[0]).toMatchObject({ children: ['s-kid'], status: 'in_progress' })
     expect(JSON.parse(out.stdout).hookSpecificOutput.hookEventName).toBe('SessionStart')
     expect(contextOf(out.stdout)).toMatch(/child of "Courses".*t1 \("Make courses"\).*Read \/r\/brief\.md first/)
+  })
+
+  it('folds the parent title and task text onto one line', async () => {
+    const ctx = makeCtx()
+    writePool(ctx.orchHome, { ...plan(newPool('s-par', '/r', 1), ['Make\x1b]0;x\x07\ncourses'], 2), title: 'Cour\nses' })
+    Object.assign(ctx.env, { ORCH_PARENT: 's-par', ORCH_PARENT_TASK: 't1', ORCH_BRIEF: '/r/brief.md' })
+    const out = await hook(ctx, 'session-start', { session_id: 's-kid', cwd: '/r/wt', source: 'startup' })
+    expect(contextOf(out.stdout)).toContain('child of "Cour ses" for its task t1 ("Make ]0;x courses")')
   })
 
   it('does not export an id that failed vetting into the env file', async () => {

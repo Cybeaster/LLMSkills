@@ -32,14 +32,20 @@ describe('cliGh', () => {
   it('reads a CI run from its URL', async () => {
     const { run, calls } = fakeRun({ status: 'completed', conclusion: 'failure' })
     expect(await cliGh(run).check(ci('https://github.com/o/r/actions/runs/77'), repoA)).toBe('fail')
-    expect(calls[0]).toEqual(['run', 'view', '77', '-R', 'o/r', '--json', 'status,conclusion'])
+    expect(calls[0]).toEqual(['run', 'view', '-R', 'o/r', '--json', 'status,conclusion', '--', '77'])
   })
 
   it('reads a bare CI id from the repo in cwd', async () => {
     const { run, calls, cwds } = fakeRun(done('success'))
     expect(await cliGh(run).check(ci('77'), repoA)).toBe('pass')
-    expect(calls[0]).toEqual(['run', 'view', '77', '--json', 'status,conclusion'])
+    expect(calls[0]).toEqual(['run', 'view', '--json', 'status,conclusion', '--', '77'])
     expect(cwds[0]).toBe(repoA)
+  })
+
+  it('puts a pr ref after -- as well', async () => {
+    const { run, calls } = fakeRun({ state: 'OPEN', statusCheckRollup: [] })
+    await cliGh(run).check(pr('41'), repoA)
+    expect(calls[0]).toEqual(['pr', 'view', '--json', 'state,statusCheckRollup', '--', '41'])
   })
 
   it('reports a running CI run as pending', async () => {
@@ -245,13 +251,13 @@ describe('cliGh when the cwd is gone', () => {
   it.each(gone)('runs a URL ref from an existing directory, not orch\'s own (cwd %j)', async cwd => {
     const ciRun = fakeRun(done('success'))
     expect(await cliGh(ciRun.run).check(ci('https://github.com/o/r/actions/runs/77'), cwd)).toBe('pass')
-    expect(ciRun.calls).toEqual([['run', 'view', '77', '-R', 'o/r', '--json', 'status,conclusion']])
+    expect(ciRun.calls).toEqual([['run', 'view', '-R', 'o/r', '--json', 'status,conclusion', '--', '77']])
     expect(ciRun.cwds[0]).toBe(tmpdir())
     expect(existsSync(ciRun.cwds[0])).toBe(true)
 
     const prRun = fakeRun({ state: 'MERGED', statusCheckRollup: [] })
     expect(await cliGh(prRun.run).check(pr('https://github.com/o/r/pull/41'), cwd)).toBe('pass')
-    expect(prRun.calls).toEqual([['pr', 'view', 'https://github.com/o/r/pull/41', '--json', 'state,statusCheckRollup']])
+    expect(prRun.calls).toEqual([['pr', 'view', '--json', 'state,statusCheckRollup', '--', 'https://github.com/o/r/pull/41']])
     expect(prRun.cwds[0]).toBe(tmpdir())
   })
 

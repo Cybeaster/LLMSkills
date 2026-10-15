@@ -21,6 +21,10 @@ export function parseEvidence(s: string): ParsedEvidence {
   if (kind === 'commit' && !SHA.test(ref)) {
     throw new OrchError(`bad evidence "${s}": commit needs a sha, e.g. commit:$(git rev-parse --short HEAD)`, 2)
   }
+  // gh would read a leading dash as a flag
+  if ((kind === 'pr' || kind === 'ci') && ref.startsWith('-')) {
+    throw new OrchError(`bad evidence "${s}": a ${kind} ref cannot start with "-"`, 2)
+  }
   return { kind, ref }
 }
 

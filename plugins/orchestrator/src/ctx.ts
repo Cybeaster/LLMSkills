@@ -125,13 +125,13 @@ async function readStdin(): Promise<string> {
   return s
 }
 
-export function realCtx(): Ctx {
-  const env = process.env
-  const claudeHome = env.ORCH_CLAUDE_HOME ?? join(homedir(), '.claude')
+export function realCtx(env: Record<string, string | undefined> = process.env): Ctx {
+  // an empty value is no value
+  const claudeHome = env.ORCH_CLAUDE_HOME || env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
   return {
     env,
     claudeHome,
-    orchHome: env.ORCH_HOME ?? join(claudeHome, 'orchestrator'),
+    orchHome: env.ORCH_HOME || join(claudeHome, 'orchestrator'),
     cwd: process.cwd(),
     pid: process.pid,
     now: Date.now,

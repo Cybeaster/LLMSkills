@@ -37,7 +37,7 @@ export async function spawnChild(ctx: Ctx, o: SpawnOptions): Promise<Out> {
     `You are a child session of "${oneLine(parent.title) || parentId}", working on its task ${task.id}: "${oneLine(task.text)}". ` +
     `Read ${brief} first, then run \`orch plan\` for your part and tick each task with evidence.` +
     (o.prompt ? `\n\n${o.prompt}` : '')
-  // what is printed for a person to paste: never carries a control character
+  // what is printed for a person to paste, and what herdr gets as one prompt: never a control character or a newline
   const shown = oneLine(intro)
 
   if (ctx.env.HERDR_ENV !== '1' || !ctx.env.HERDR_WORKSPACE_ID) {
@@ -82,7 +82,7 @@ export async function spawnChild(ctx: Ctx, o: SpawnOptions): Promise<Out> {
     throw new OrchError(`${name} runs in ${paneId} (session ${childId}) but linking failed: ${why(e)}. Link it: ${linkCmd(q(childId))} ; then send its intro: ${promptCmd(name)}`)
   }
   try {
-    await ctx.herdr.prompt(name, intro)
+    await ctx.herdr.prompt(name, shown)
   } catch (e) {
     throw new OrchError(`${name} is linked under ${parentId} ${task.id}, but sending its intro failed (${why(e)}). Send it yourself: ${promptCmd(name)}`)
   }

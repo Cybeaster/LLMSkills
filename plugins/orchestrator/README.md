@@ -10,7 +10,7 @@ Design: [DESIGN.md](DESIGN.md). Plan: [PLAN.md](PLAN.md).
 
 ## Requirements
 
-- Node 18+ for `bin/orch` and the hooks; Node 20+ for `orch tui` (`package.json` `engines` says `>=20`, but the CLI is deliberately kept runnable on 18).
+- Node 18+ for `bin/orch` and the hooks; Node 20+ for `orch tui` (`package.json` `engines` says `>=18`, the floor of the CLI and the hooks; `orch tui` needs 20).
 - `gh` for `pr:` and `ci:` evidence.
 - herdr for the TUI's `f` key, for in-pane replies, and for `spawn-child` in a tab.
 
@@ -59,4 +59,4 @@ npm run build      # bin/orch and lib/orch-tui.mjs are committed: rebuild before
 npm run check:bundle   # after committing: fails if the committed bundles are stale
 ```
 
-Pools live in `~/.claude/orchestrator/<sessionId>.json` (`ORCH_HOME` overrides); hook errors go to `orch.log` there.
+Pools live in `~/.claude/orchestrator/<sessionId>.json` (`ORCH_HOME` overrides it; the Claude home itself is `ORCH_CLAUDE_HOME`, else `CLAUDE_CONFIG_DIR`, else `~/.claude`); hook errors go to `orch.log` there.

@@ -21816,7 +21816,12 @@ function buildOverview(input) {
   const agents = new Map((input.agents ?? []).filter((a) => a.sessionId).map((a) => [a.sessionId, a]));
   const parentOf = (id) => pools.get(id)?.pool?.parent?.sessionId;
   const ids = new Set(live.keys());
-  for (const [id, e] of pools) if (e.error || e.pool && input.now - e.pool.updatedAt < DAY) ids.add(id);
+  const parents = new Set(input.pools.map((e) => e.pool?.parent?.sessionId));
+  const blank = (id) => {
+    const p = pools.get(id)?.pool;
+    return !live.has(id) && !!p && !p.tasks.length && !p.title && !parents.has(id);
+  };
+  for (const [id, e] of pools) if (e.error || e.pool && input.now - e.pool.updatedAt < DAY && !blank(id)) ids.add(id);
   for (let grew = true; grew; ) {
     grew = false;
     for (const id of pools.keys()) {
@@ -21861,7 +21866,7 @@ function buildOverview(input) {
       name: oneLine(a?.name) || oneLine(s?.name) || oneLine(pool?.title) || oneLine(id.slice(0, 8)),
       title: oneLine(pool?.title) || oneLine(a?.title),
       // a path may hold spaces, so control characters are replaced rather than folded away by oneLine
-      cwd: (pool?.cwd || s?.cwd || "").replace(new RegExp("\\p{Cc}", "gu"), "?"),
+      cwd: (pool?.cwd || s?.cwd || "").replace(/[\p{Cc}\p{Cf}]/gu, "?"),
       state: s ? s.waitingFor ? "waiting" : s.status : "ended",
       waitingFor: s?.waitingFor ? oneLine(s.waitingFor) : void 0,
       tag: s ? a ? "herdr" : "external" : "\u2014",
@@ -21874,6 +21879,7 @@ function buildOverview(input) {
       done,
       total: tasks.length,
       complete: isComplete(id),
+      touchedAt: pool?.touchedAt ?? pool?.updatedAt ?? 0,
       flags: (pool?.tasks.filter((t) => t.needsInput).length ?? 0) + children.reduce((n, c) => n + c.flags, 0),
       tasks,
       children

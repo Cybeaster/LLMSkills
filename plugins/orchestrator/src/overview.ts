@@ -30,6 +30,7 @@ export type Row = {
   done: number
   total: number
   complete: boolean
+  touchedAt: number
   flags: number
   tasks: TaskView[]
   children: Row[]
@@ -86,7 +87,13 @@ export function buildOverview(input: OverviewInput): Row[] {
   // Who is shown: every live session, pools written in the last day, ended children of live
   // parents, and the parent of anything shown.
   const ids = new Set(live.keys())
-  for (const [id, e] of pools) if (e.error || (e.pool && input.now - e.pool.updatedAt < DAY)) ids.add(id)
+  // an ended session that never planned, titled or parented anything is not worth a row
+  const parents = new Set(input.pools.map(e => e.pool?.parent?.sessionId))
+  const blank = (id: string) => {
+    const p = pools.get(id)?.pool
+    return !live.has(id) && !!p && !p.tasks.length && !p.title && !parents.has(id)
+  }
+  for (const [id, e] of pools) if (e.error || (e.pool && input.now - e.pool.updatedAt < DAY && !blank(id))) ids.add(id)
   for (let grew = true; grew; ) {
     grew = false
     for (const id of pools.keys()) {
@@ -132,7 +139,7 @@ export function buildOverview(input: OverviewInput): Row[] {
       name: oneLine(a?.name) || oneLine(s?.name) || oneLine(pool?.title) || oneLine(id.slice(0, 8)),
       title: oneLine(pool?.title) || oneLine(a?.title),
       // a path may hold spaces, so control characters are replaced rather than folded away by oneLine
-      cwd: (pool?.cwd || s?.cwd || '').replace(/\p{Cc}/gu, '?'),
+      cwd: (pool?.cwd || s?.cwd || '').replace(/[\p{Cc}\p{Cf}]/gu, '?'),
       state: s ? (s.waitingFor ? 'waiting' : s.status) : 'ended',
       waitingFor: s?.waitingFor ? oneLine(s.waitingFor) : undefined,
       tag: s ? (a ? 'herdr' : 'external') : '—',
@@ -145,6 +152,7 @@ export function buildOverview(input: OverviewInput): Row[] {
       done,
       total: tasks.length,
       complete: isComplete(id),
+      touchedAt: pool?.touchedAt ?? pool?.updatedAt ?? 0,
       flags: (pool?.tasks.filter(t => t.needsInput).length ?? 0) + children.reduce((n, c) => n + c.flags, 0),
       tasks,
       children,

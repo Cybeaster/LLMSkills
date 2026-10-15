@@ -1,5 +1,6 @@
 import type { Ctx } from './ctx.js'
 import { OrchError } from './errors.js'
+import { safeLine } from './evidence.js'
 import { flatten } from './format.js'
 import type { Row } from './overview.js'
 import { readPool } from './store.js'
@@ -39,7 +40,7 @@ export async function resolveSession(ctx: Ctx, rows: Row[], query: string, opts:
     } catch {
       // not a usable id or an unreadable pool: not a match
     }
-    if (pool) return { sessionId: query, name: pool.title || query }
+    if (pool) return { sessionId: query, name: safeLine(pool.title) || query }
     if (opts.herdr) {
       const agent = await ctx.herdr.list().then(
         l => l.find(a => a.name === query),

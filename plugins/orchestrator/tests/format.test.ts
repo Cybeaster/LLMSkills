@@ -5,7 +5,7 @@ import { width as stringWidth } from '../src/width.js'
 
 const row = (o: Partial<Row>): Row => ({
   sessionId: 's', name: 's', title: '', cwd: '/home/u/src/ItAbyss', state: 'idle', tag: 'herdr',
-  hasPool: true, orphan: false, done: 0, total: 0, complete: false, flags: 0, tasks: [], children: [], ...o,
+  hasPool: true, orphan: false, done: 0, total: 0, complete: false, touchedAt: 0, flags: 0, tasks: [], children: [], ...o,
 })
 
 describe('format', () => {

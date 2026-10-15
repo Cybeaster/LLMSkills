@@ -32,7 +32,7 @@ const UNKNOWN_TTL_MS = 15_000
 
 async function ciCheck(run: GhRun, ref: string, cwd: string): Promise<Answer> {
   const m = ref.match(/github\.com\/([^/]+\/[^/]+)\/actions\/runs\/(\d+)/)
-  const args = m ? ['run', 'view', m[2], '-R', m[1], '--json', 'status,conclusion'] : ['run', 'view', ref, '--json', 'status,conclusion']
+  const args = m ? ['run', 'view', '-R', m[1], '--json', 'status,conclusion', '--', m[2]] : ['run', 'view', '--json', 'status,conclusion', '--', ref]
   const r = await run(args, cwd)
   if (r.code !== 0) return { value: 'unknown', final: false }
   const o = JSON.parse(r.stdout)
@@ -43,7 +43,7 @@ async function ciCheck(run: GhRun, ref: string, cwd: string): Promise<Answer> {
 }
 
 async function prCheck(run: GhRun, ref: string, cwd: string): Promise<Answer> {
-  const r = await run(['pr', 'view', ref, '--json', 'state,statusCheckRollup'], cwd)
+  const r = await run(['pr', 'view', '--json', 'state,statusCheckRollup', '--', ref], cwd)
   if (r.code !== 0) return { value: 'unknown', final: false }
   const o = JSON.parse(r.stdout)
   if (o.state === 'MERGED') return { value: 'pass', final: true }
