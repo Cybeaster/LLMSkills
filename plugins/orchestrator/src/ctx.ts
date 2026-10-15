@@ -10,7 +10,8 @@ import { pidAlive } from './sources/sessions.js'
 // signal: the command was killed by it (code is then 1). timedOut: orch killed it at CMD_TIMEOUT_MS.
 export type ExecResult = { code: number; out: string; signal?: string; timedOut?: boolean }
 
-// Under the Bash tool's 2-minute default, so orch answers before the tool gives up on it.
+// A cmd: proof should be a quick check, not a long suite. This cap stops one from hanging a session
+// or leaving work running (Claude Code's Bash tool backgrounds a slow call rather than ending it).
 export const CMD_TIMEOUT_MS = 110_000
 const OUT_KEEP = 64 * 1024
 
@@ -40,6 +41,9 @@ export function ppidOf(pid: number): number | undefined {
     return undefined
   }
 }
+
+// The command's group is detached from orch's, so these are forwarded to it. SIGKILL cannot be forwarded.
+const FORWARDED = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'] as const
 
 export type ExecOptions = { timeoutMs?: number; graceMs?: number; closeWaitMs?: number }
 
@@ -79,14 +83,12 @@ export function execShell(command: string, cwd: string, opts: ExecOptions = {}):
       settled = true
       clearTimeout(deadline)
       clearTimeout(killTimer)
-      process.off('SIGINT', terminate)
-      process.off('SIGTERM', terminate)
+      for (const sig of FORWARDED) process.off(sig, terminate)
       killGroup('SIGKILL')
       resolve({ ...r, out, ...(timedOut ? { timedOut } : {}) })
     }
     // listening before the shell exists, so a signal can never arrive while nobody would forward it
-    process.on('SIGINT', terminate)
-    process.on('SIGTERM', terminate)
+    for (const sig of FORWARDED) process.on(sig, terminate)
 
     let child: ChildProcessByStdio<null, Readable, Readable>
     try {
@@ -107,6 +109,8 @@ export function execShell(command: string, cwd: string, opts: ExecOptions = {}):
     })
     let exited: ExecResult | undefined
     child.on('exit', (code, signal) => {
+      // the shell finished in time: whatever still holds the pipes is bounded by closeWaitMs, not the deadline
+      clearTimeout(deadline)
       exited = { code: code ?? 1, out, ...(signal ? { signal } : {}) }
       setTimeout(() => settle(exited!), closeWaitMs).unref()
     })

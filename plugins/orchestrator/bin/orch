@@ -572,6 +572,7 @@ function ppidOf(pid) {
     return void 0;
   }
 }
+var FORWARDED = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"];
 function execShell(command, cwd, opts = {}) {
   const { timeoutMs = CMD_TIMEOUT_MS, graceMs = 2e3, closeWaitMs = 1e3 } = opts;
   if (!existsSync2(cwd)) return Promise.resolve({ code: 127, out: `directory ${cwd} does not exist` });
@@ -603,13 +604,11 @@ function execShell(command, cwd, opts = {}) {
       settled = true;
       clearTimeout(deadline);
       clearTimeout(killTimer);
-      process.off("SIGINT", terminate);
-      process.off("SIGTERM", terminate);
+      for (const sig of FORWARDED) process.off(sig, terminate);
       killGroup("SIGKILL");
       resolve({ ...r, out, ...timedOut ? { timedOut } : {} });
     };
-    process.on("SIGINT", terminate);
-    process.on("SIGTERM", terminate);
+    for (const sig of FORWARDED) process.on(sig, terminate);
     let child;
     try {
       child = spawn("bash", ["-c", command], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] });
@@ -629,6 +628,7 @@ function execShell(command, cwd, opts = {}) {
     });
     let exited;
     child.on("exit", (code, signal) => {
+      clearTimeout(deadline);
       exited = { code: code ?? 1, out, ...signal ? { signal } : {} };
       setTimeout(() => settle(exited), closeWaitMs).unref();
     });
@@ -845,8 +845,13 @@ async function cmdTitle(ctx, args) {
 `);
 }
 function tailOf(out) {
-  const clean = out.replace(/\r\n?/g, "\n").replace(new RegExp("\\p{Cc}", "gu"), (c) => c === "\n" || c === "	" ? c : "").trimEnd().split("\n").slice(-20).join("\n");
+  const clean = out.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "").replace(/\r\n?/g, "\n").replace(new RegExp("\\p{Cc}", "gu"), (c) => c === "\n" || c === "	" ? c : "").trimEnd().split("\n").slice(-20).join("\n");
   return clean.length > 4096 ? `\u2026${clean.slice(-4096)}` : clean;
+}
+function refusal(message, out) {
+  const tail = tailOf(out);
+  return new OrchError(tail ? `${message}
+${tail}` : message);
 }
 async function cmdDone(ctx, args) {
   const { values, positionals } = parseArgs({ args, options: { evidence: { type: "string" } }, allowPositionals: true });
@@ -860,12 +865,11 @@ async function cmdDone(ctx, args) {
       if (!self?.tasks.some((t) => t.id === id)) throw new OrchError(`no task ${id} in this pool`);
       const r = await ctx.exec(e.ref, ctx.cwd);
       if (r.timedOut) {
-        throw new OrchError(`refused: \`${e.ref}\` timed out after ${CMD_TIMEOUT_MS / 1e3} s in ${ctx.cwd}, so ${id} stays open; run long commands yourself and tick with commit:, ci: or note:`);
+        throw refusal(`refused: \`${e.ref}\` timed out after ${CMD_TIMEOUT_MS / 1e3} s in ${ctx.cwd}, so ${id} stays open; run long commands yourself and tick with commit:, ci: or note:`, r.out);
       }
       if (r.signal || r.code !== 0) {
         const how = r.signal ? `was killed by ${r.signal}` : `exited ${r.code}`;
-        throw new OrchError(`refused: \`${e.ref}\` ${how} in ${ctx.cwd}, so ${id} stays open
-${tailOf(r.out)}`);
+        throw refusal(`refused: \`${e.ref}\` ${how} in ${ctx.cwd}, so ${id} stays open`, r.out);
       }
       evidence = { kind: "cmd", ref: e.ref, exit: 0 };
     } else {

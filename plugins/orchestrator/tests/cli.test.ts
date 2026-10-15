@@ -220,13 +220,24 @@ describe('orch task done --evidence', () => {
     expect(ctx.exec.calls).toEqual([])
   })
 
-  it('refuses a command that timed out and says how to prove long work', async () => {
-    const ctx = makeCtx({ exec: fakeExec(() => ({ code: 1, out: 'building…\n', signal: 'SIGTERM', timedOut: true })) })
+  it('refuses a command that timed out, shows what it printed and says how to prove long work', async () => {
+    const ctx = makeCtx({ exec: fakeExec(() => ({ code: 1, out: 'building…\nwaiting for lock\n', signal: 'SIGTERM', timedOut: true })) })
     await run(['plan', 'a'], ctx)
     const out = await run(['task', 'done', 't1', '--evidence', 'cmd:make all'], ctx)
     expect(out.code).toBe(1)
-    expect(out.stderr).toBe(`orch: refused: \`make all\` timed out after 110 s in ${ctx.cwd}, so t1 stays open; run long commands yourself and tick with commit:, ci: or note:\n`)
+    expect(out.stderr).toBe(`orch: refused: \`make all\` timed out after 110 s in ${ctx.cwd}, so t1 stays open; run long commands yourself and tick with commit:, ci: or note:\nbuilding…\nwaiting for lock\n`)
     expect(readPool(ctx.orchHome, 's-self')!.tasks[0].status).toBe('pending')
+  })
+
+  it('leaves no blank line when a refused command printed nothing', async () => {
+    const ctx = makeCtx({ exec: fakeExec(() => ({ code: 1, out: '', timedOut: true })) })
+    await run(['plan', 'a'], ctx)
+    const out = await run(['task', 'done', 't1', '--evidence', 'cmd:make all'], ctx)
+    expect(out.stderr).toMatch(/or note:\n$/)
+    expect(out.stderr).not.toMatch(/\n\n/)
+    const quiet = makeCtx({ exec: fakeExec(() => ({ code: 2, out: '' })) })
+    await run(['plan', 'a'], quiet)
+    expect((await run(['task', 'done', 't1', '--evidence', 'cmd:true'], quiet)).stderr).toMatch(/stays open\n$/)
   })
 
   it('names the signal that killed the command instead of calling it an exit', async () => {
@@ -238,16 +249,22 @@ describe('orch task done --evidence', () => {
     expect(out.stderr).not.toMatch(/exited/)
   })
 
-  it('shows a cleaned tail of a failing command: no control characters, 20 lines, about 4 KB', async () => {
+  it('shows a cleaned tail of a failing command: no escape sequences or control characters, 20 lines, about 4 KB', async () => {
     const lines = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`).join('\n')
-    const dirty = makeCtx({ exec: fakeExec(() => ({ code: 1, out: `${lines}\nprogress 1\rprogress 2\r\n\x1b]0;evil\x07tab\there\x00\x7f\n` })) })
+    const dirty = makeCtx({
+      exec: fakeExec(() => ({
+        code: 1,
+        // a title (OSC ended by BEL), a colour (CSI), a hyperlink (OSC ended by ESC \), a tab, NUL and DEL
+        out: `${lines}\nprogress 1\rprogress 2\r\n\x1b]0;evil\x07\x1b[31mred\x1b[0m \x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\ tab\there\x00\x7f\n`,
+      })),
+    })
     await run(['plan', 'a'], dirty)
     const out = await run(['task', 'done', 't1', '--evidence', 'cmd:build'], dirty)
     // eslint-disable-next-line no-control-regex
     expect(out.stderr.replace(/\n/g, '').replace(/\t/g, '')).not.toMatch(/[\x00-\x1f\x7f]/)
     expect(out.stderr).toContain('progress 1\nprogress 2\n')
-    expect(out.stderr).toContain(']0;evil')
-    expect(out.stderr).toContain('tab\there')
+    expect(out.stderr).toContain('red link tab\there')
+    for (const left of ['evil', '[31m', '[0m', 'http://x', ']8;;', ']0;']) expect(out.stderr, left).not.toContain(left)
     // 33 cleaned lines, so the last 20 start at line 14
     expect(out.stderr).toContain('line 14\n')
     expect(out.stderr).not.toMatch(/line 13\n/)

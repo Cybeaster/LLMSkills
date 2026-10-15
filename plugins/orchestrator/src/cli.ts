@@ -62,10 +62,13 @@ async function cmdTitle(ctx: Ctx, args: string[]): Promise<Out> {
   return ok(`title: ${title}\n`)
 }
 
-// What a failing command printed, safe to show: no control characters but newline and tab (\r becomes a
-// line break), the last 20 lines, about 4 KB.
+// What a failing command printed, safe to show: whole escape sequences (CSI such as colours, OSC such as
+// titles and links) gone, then every other control character but newline and tab (\r becomes a line
+// break), the last 20 lines, about 4 KB.
 function tailOf(out: string): string {
   const clean = out
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
     .replace(/\r\n?/g, '\n')
     .replace(/\p{Cc}/gu, c => (c === '\n' || c === '\t' ? c : ''))
     .trimEnd()
@@ -73,6 +76,12 @@ function tailOf(out: string): string {
     .slice(-20)
     .join('\n')
   return clean.length > 4096 ? `…${clean.slice(-4096)}` : clean
+}
+
+// A refusal, followed by the tail of what the command printed when it printed anything.
+function refusal(message: string, out: string): OrchError {
+  const tail = tailOf(out)
+  return new OrchError(tail ? `${message}\n${tail}` : message)
 }
 
 async function cmdDone(ctx: Ctx, args: string[]): Promise<Out> {
@@ -88,11 +97,11 @@ async function cmdDone(ctx: Ctx, args: string[]): Promise<Out> {
       // where the session is (the Bash tool's current directory), which is not always where its pool began
       const r = await ctx.exec(e.ref, ctx.cwd)
       if (r.timedOut) {
-        throw new OrchError(`refused: \`${e.ref}\` timed out after ${CMD_TIMEOUT_MS / 1000} s in ${ctx.cwd}, so ${id} stays open; run long commands yourself and tick with commit:, ci: or note:`)
+        throw refusal(`refused: \`${e.ref}\` timed out after ${CMD_TIMEOUT_MS / 1000} s in ${ctx.cwd}, so ${id} stays open; run long commands yourself and tick with commit:, ci: or note:`, r.out)
       }
       if (r.signal || r.code !== 0) {
         const how = r.signal ? `was killed by ${r.signal}` : `exited ${r.code}`
-        throw new OrchError(`refused: \`${e.ref}\` ${how} in ${ctx.cwd}, so ${id} stays open\n${tailOf(r.out)}`)
+        throw refusal(`refused: \`${e.ref}\` ${how} in ${ctx.cwd}, so ${id} stays open`, r.out)
       }
       evidence = { kind: 'cmd', ref: e.ref, exit: 0 }
     } else {

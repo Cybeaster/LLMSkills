@@ -65,6 +65,15 @@ describe('execShell', () => {
     await waitFor(() => pidGone(child), 'the background sleep to die')
   })
 
+  it('does not call a success a timeout when a background child holds the pipe past the deadline', async () => {
+    // the shell exits 0 at ~0.1 s, the deadline is 0.6 s, and close is awaited until 0.9 s after the exit
+    const r = await execShell('sleep 30 & echo $!; sleep 0.1', tempDir(), { timeoutMs: 600, closeWaitMs: 900 })
+    expect(r.code).toBe(0)
+    expect(r.timedOut).toBeUndefined()
+    expect(r.signal).toBeUndefined()
+    await waitFor(() => pidGone(Number(r.out.trim().split('\n')[0])), 'the background sleep to die')
+  })
+
   it('escalates to SIGKILL when the command ignores SIGTERM', async () => {
     const r = await execShell("trap '' TERM; echo ready; sleep 30", tempDir(), { timeoutMs: 400, graceMs: 200 })
     expect(r.timedOut).toBe(true)
@@ -84,10 +93,12 @@ describe('execShell', () => {
   })
 
   it('leaves no signal listeners behind', async () => {
-    const before = [process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')]
+    const signals = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'] as const
+    const count = () => signals.map(s => process.listenerCount(s))
+    const before = count()
     await execShell('true', tempDir())
     await execShell('sleep 30', tempDir(), { timeoutMs: 100 })
-    expect([process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')]).toEqual(before)
+    expect(count()).toEqual(before)
   })
 })
 

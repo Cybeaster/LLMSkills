@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { describeFailure } from '../src/cli.js'
+import { readPool } from '../src/store.js'
 import { pidGone, waitFor } from './helpers.js'
 
 // These run the built bin/orch, so `npm run build` has to come first (check:bundle keeps it current).
@@ -15,10 +16,13 @@ afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
 })
 
+// Inside Claude Code these are set to the real session, which would win over the test's own id.
 function sandbox() {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'orch-main-')))
   dirs.push(dir)
-  const env = { ...process.env, ORCH_HOME: join(dir, 'orch'), ORCH_CLAUDE_HOME: join(dir, 'claude'), CLAUDE_SESSION_ID: 's-main' }
+  const env: NodeJS.ProcessEnv = { ...process.env, ORCH_HOME: join(dir, 'orch'), ORCH_CLAUDE_HOME: join(dir, 'claude'), CLAUDE_SESSION_ID: 's-main' }
+  delete env.CLAUDE_CODE_SESSION_ID
+  delete env.CLAUDE_PID
   return { dir, env }
 }
 
@@ -41,9 +45,12 @@ describe('bin/orch', () => {
     expect(r.stderr).not.toMatch(/\n\s+at |Node\.js v|node:internal/)
   })
 
-  it('kills the command and its group when orch is terminated mid-command', async () => {
+  // The command's group is detached from orch's, so a signal to orch alone would leave it running.
+  // Whatever orch is sent, the command is stopped with SIGTERM and the tick is refused.
+  it.each(['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGQUIT'] as const)('kills the command and its group when orch gets %s mid-command', async signal => {
     const { dir, env } = sandbox()
     expect(spawnSync(process.execPath, [BIN, 'plan', 'a'], { env }).status).toBe(0)
+    expect(readPool(env.ORCH_HOME!, 's-main')).toBeDefined()
     const pidFile = join(dir, 'pid')
     const child = spawn(process.execPath, [BIN, 'task', 'done', 't1', '--evidence', `cmd:echo $$ > ${pidFile}; exec sleep 30`], { env, cwd: dir })
     let stderr = ''
@@ -53,7 +60,7 @@ describe('bin/orch', () => {
     let pid = 0
     try {
       pid = await waitFor(() => Number((() => { try { return readFileSync(pidFile, 'utf8') } catch { return '' } })().trim()) || undefined, 'the command to start')
-      child.kill('SIGTERM')
+      child.kill(signal)
       expect(await closed).toBe(1)
       expect(stderr).toMatch(/killed by SIGTERM/)
       await waitFor(() => pidGone(pid), 'the command to die')
