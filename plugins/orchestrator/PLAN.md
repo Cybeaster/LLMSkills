@@ -1212,10 +1212,11 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 // Exported so tests can shrink the times.
 export const lockTiming = { staleMs: 5_000, deadlineMs: 7_000 }
 
-async function withLock<T>(home: string, id: string, fn: () => T): Promise<T> {
+// waitMs: how long this caller waits for the lock; hooks pass a short one so they never stall a prompt.
+async function withLock<T>(home: string, id: string, fn: () => T, waitMs = lockTiming.deadlineMs): Promise<T> {
   const lock = `${poolPath(home, id)}.lock`
   mkdirSync(home, { recursive: true })
-  const deadline = Date.now() + lockTiming.deadlineMs
+  const deadline = Date.now() + waitMs
   for (;;) {
     let held = 0
     try {
@@ -1262,16 +1263,21 @@ function writeUnder(home: string, id: string, next: Pool): Pool {
 }
 
 // Read, change and write one pool under its lock. Never hold two locks at once.
-export function update(home: string, id: string, fn: (p: Pool | undefined) => Pool): Promise<Pool> {
-  return withLock(home, id, () => writeUnder(home, id, fn(readPool(home, id))))
+export function update(home: string, id: string, fn: (p: Pool | undefined) => Pool, waitMs?: number): Promise<Pool> {
+  return withLock(home, id, () => writeUnder(home, id, fn(readPool(home, id))), waitMs)
 }
 
-export function updateIfExists(home: string, id: string, fn: (p: Pool) => Pool): Promise<Pool | undefined> {
-  return withLock(home, id, () => {
-    const cur = readPool(home, id)
-    if (!cur) return undefined
-    return writeUnder(home, id, fn(cur))
-  })
+export function updateIfExists(home: string, id: string, fn: (p: Pool) => Pool, waitMs?: number): Promise<Pool | undefined> {
+  return withLock(
+    home,
+    id,
+    () => {
+      const cur = readPool(home, id)
+      if (!cur) return undefined
+      return writeUnder(home, id, fn(cur))
+    },
+    waitMs,
+  )
 }
 
 const LOG_MAX_BYTES = 1024 * 1024
@@ -4728,12 +4734,12 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
 `tests/hooks.test.ts`:
 
 ```ts
-import { readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { run } from '../src/cli.js'
 import { askTask, newPool, plan } from '../src/model.js'
-import { readPool, writePool } from '../src/store.js'
+import { poolPath, readPool, writePool } from '../src/store.js'
 import { makeCtx, type TestCtx } from './helpers.js'
 
 const hook = (ctx: TestCtx, name: string, input: object) => {
@@ -4753,7 +4759,7 @@ describe('hook session-start', () => {
     const ctx = makeCtx()
     const envFile = join(ctx.cwd, 'env')
     ctx.env.CLAUDE_ENV_FILE = envFile
-    const out = await hook(ctx, 'session-start', { session_id: 's-new', cwd: '/repo' })
+    const out = await hook(ctx, 'session-start', { session_id: 's-new', cwd: '/repo', source: 'startup' })
     expect(out).toEqual({ code: 0, stdout: '', stderr: '' })
     expect(readPool(ctx.orchHome, 's-new')).toMatchObject({ sessionId: 's-new', cwd: '/repo' })
     expect(readFileSync(envFile, 'utf8')).toBe('export CLAUDE_SESSION_ID=s-new\n')
@@ -4763,10 +4769,108 @@ describe('hook session-start', () => {
     const ctx = makeCtx()
     writePool(ctx.orchHome, { ...plan(newPool('s-par', '/r', 1), ['Make courses'], 2), title: 'Courses' })
     Object.assign(ctx.env, { ORCH_PARENT: 's-par', ORCH_PARENT_TASK: 't1', ORCH_BRIEF: '/r/brief.md' })
-    const out = await hook(ctx, 'session-start', { session_id: 's-kid', cwd: '/r/wt' })
+    const out = await hook(ctx, 'session-start', { session_id: 's-kid', cwd: '/r/wt', source: 'startup' })
     expect(readPool(ctx.orchHome, 's-kid')).toMatchObject({ parent: { sessionId: 's-par', taskId: 't1' }, brief: '/r/brief.md' })
     expect(readPool(ctx.orchHome, 's-par')!.tasks[0]).toMatchObject({ children: ['s-kid'], status: 'in_progress' })
+    expect(JSON.parse(out.stdout).hookSpecificOutput.hookEventName).toBe('SessionStart')
     expect(contextOf(out.stdout)).toMatch(/child of "Courses".*t1 \("Make courses"\).*Read \/r\/brief\.md first/)
+  })
+
+  it('does not export an id that failed vetting into the env file', async () => {
+    const ctx = makeCtx()
+    const envFile = join(ctx.cwd, 'env')
+    ctx.env.CLAUDE_ENV_FILE = envFile
+    const out = await hook(ctx, 'session-start', { session_id: 'x; touch /tmp/pwned', cwd: '/repo' })
+    expect(out).toEqual({ code: 0, stdout: '', stderr: '' })
+    expect(existsSync(envFile)).toBe(false)
+    expect(readFileSync(join(ctx.orchHome, 'orch.log'), 'utf8')).toMatch(/invalid session id/)
+  })
+
+  const parentPool = (ctx: TestCtx) => writePool(ctx.orchHome, { ...plan(newPool('s-par', '/r', 1), ['Make courses'], 2), title: 'Courses' })
+  const orchEnv = (ctx: TestCtx, task = 't1', parent = 's-par') =>
+    Object.assign(ctx.env, { ORCH_PARENT: parent, ORCH_PARENT_TASK: task, ORCH_BRIEF: '/r/brief.md' })
+  const lockDir = (ctx: TestCtx, id: string) => mkdirSync(`${poolPath(ctx.orchHome, id)}.lock`, { recursive: true })
+
+  it('keeps the brief when ORCH_PARENT_TASK names no task', async () => {
+    const ctx = makeCtx()
+    parentPool(ctx)
+    orchEnv(ctx, 't9')
+    const out = await hook(ctx, 'session-start', { session_id: 's-kid', cwd: '/r', source: 'startup' })
+    const kid = readPool(ctx.orchHome, 's-kid')!
+    expect(kid.parent).toBeUndefined()
+    expect(kid.brief).toBe('/r/brief.md')
+    expect(contextOf(out.stdout)).toMatch(/Read \/r\/brief\.md first/)
+    expect(readPool(ctx.orchHome, 's-par')!.tasks[0].children).toBeUndefined()
+    expect(readFileSync(join(ctx.orchHome, 'orch.log'), 'utf8')).toMatch(/t9/)
+  })
+
+  it('keeps the brief when ORCH_PARENT is not a valid session id', async () => {
+    const ctx = makeCtx()
+    orchEnv(ctx, 't1', '../x')
+    const out = await hook(ctx, 'session-start', { session_id: 's-kid', cwd: '/r', source: 'startup' })
+    expect(readPool(ctx.orchHome, 's-kid')).toMatchObject({ brief: '/r/brief.md' })
+    expect(readPool(ctx.orchHome, 's-kid')!.parent).toBeUndefined()
+    expect(contextOf(out.stdout)).toMatch(/Read \/r\/brief\.md first/)
+    expect(readFileSync(join(ctx.orchHome, 'orch.log'), 'utf8')).toMatch(/invalid session id/)
+  })
+
+  it('links only on startup, so /clear cannot add a duplicate child', async () => {
+    const ctx = makeCtx()
+    parentPool(ctx)
+    orchEnv(ctx)
+    await hook(ctx, 'session-start', { session_id: 'kid1', cwd: '/r', source: 'startup' })
+    await hook(ctx, 'session-start', { session_id: 'kid2', cwd: '/r', source: 'clear' })
+    expect(readPool(ctx.orchHome, 's-par')!.tasks[0].children).toEqual(['kid1'])
+    expect(readPool(ctx.orchHome, 'kid2')!.parent).toBeUndefined()
+  })
+
+  it('does not re-parent or duplicate a resumed child', async () => {
+    const ctx = makeCtx()
+    parentPool(ctx)
+    orchEnv(ctx)
+    await hook(ctx, 'session-start', { session_id: 'kid1', cwd: '/r', source: 'startup' })
+    const out = await hook(ctx, 'session-start', { session_id: 'kid1', cwd: '/r', source: 'resume' })
+    await hook(ctx, 'session-start', { session_id: 'kid1', cwd: '/r', source: 'startup' })
+    expect(readPool(ctx.orchHome, 's-par')!.tasks[0].children).toEqual(['kid1'])
+    expect(contextOf(out.stdout)).toMatch(/Read \/r\/brief\.md first/)
+  })
+
+  it('does not link into a parent other than the one the child already has', async () => {
+    const ctx = makeCtx()
+    parentPool(ctx)
+    writePool(ctx.orchHome, { ...newPool('s-kid', '/r', 1), parent: { sessionId: 's-other', taskId: 't1' } })
+    orchEnv(ctx)
+    await hook(ctx, 'session-start', { session_id: 's-kid', cwd: '/r', source: 'startup' })
+    expect(readPool(ctx.orchHome, 's-kid')!.parent).toEqual({ sessionId: 's-other', taskId: 't1' })
+    expect(readPool(ctx.orchHome, 's-par')!.tasks[0].children).toBeUndefined()
+  })
+
+  it('unsets ORCH_* in the env file so nested claude runs do not inherit them', async () => {
+    const ctx = makeCtx()
+    const envFile = join(ctx.cwd, 'env')
+    ctx.env.CLAUDE_ENV_FILE = envFile
+    orchEnv(ctx)
+    await hook(ctx, 'session-start', { session_id: 's-kid', cwd: '/r', source: 'startup' })
+    expect(readFileSync(envFile, 'utf8')).toBe('export CLAUDE_SESSION_ID=s-kid\nunset ORCH_PARENT ORCH_PARENT_TASK ORCH_BRIEF\n')
+  })
+
+  it('exports the id even when its own pool is locked', async () => {
+    const ctx = makeCtx()
+    const envFile = join(ctx.cwd, 'env')
+    ctx.env.CLAUDE_ENV_FILE = envFile
+    lockDir(ctx, 's-busy')
+    const out = await hook(ctx, 'session-start', { session_id: 's-busy', cwd: '/r', source: 'startup' })
+    expect(out.code).toBe(0)
+    expect(readFileSync(envFile, 'utf8')).toBe('export CLAUDE_SESSION_ID=s-busy\n')
+  })
+
+  it('tells a child that already has tasks to pick up where it left off', async () => {
+    const ctx = makeCtx()
+    parentPool(ctx)
+    writePool(ctx.orchHome, { ...plan(newPool('s-kid', '/r', 1), ['a'], 2), parent: { sessionId: 's-par', taskId: 't1' }, brief: '/r/brief.md' })
+    const out = await hook(ctx, 'session-start', { session_id: 's-kid', cwd: '/r', source: 'resume' })
+    expect(contextOf(out.stdout)).toMatch(/orch status.*where you left off/)
+    expect(contextOf(out.stdout)).not.toMatch(/orch plan/)
   })
 
   it('never fails the session, and logs what went wrong', async () => {
@@ -4792,6 +4896,7 @@ describe('hook prompt-submit', () => {
     writePool(ctx.orchHome, { ...plan(newPool('s1', '/r', 1), ['a'], 2), turnStartedAt: 5000 })
     const path = transcript(ctx, [{ name: 'Edit', at: 6000 }])
     const out = await hook(ctx, 'prompt-submit', { session_id: 's1', transcript_path: path })
+    expect(JSON.parse(out.stdout).hookSpecificOutput.hookEventName).toBe('UserPromptSubmit')
     expect(contextOf(out.stdout)).toMatch(/was not updated during your last turn/)
   })
 
@@ -4807,6 +4912,54 @@ describe('hook prompt-submit', () => {
     writePool(ctx.orchHome, { ...newPool('s1', '/r', 1), turnStartedAt: 5000 })
     const path = transcript(ctx, [{ name: 'Write', at: 6000 }])
     expect(contextOf((await hook(ctx, 'prompt-submit', { session_id: 's1', transcript_path: path })).stdout)).toMatch(/has no task pool/)
+  })
+
+  it('still clears the question when the transcript cannot be read', async () => {
+    const ctx = makeCtx()
+    writePool(ctx.orchHome, { ...askTask(plan(newPool('s1', '/r', 1), ['a'], 2), 't1', 'q?', 3), turnStartedAt: 5000 })
+    const out = await hook(ctx, 'prompt-submit', { session_id: 's1', transcript_path: '/nonexistent' })
+    expect(out).toEqual({ code: 0, stdout: '', stderr: '' })
+    const p = readPool(ctx.orchHome, 's1')!
+    expect(p.tasks[0].needsInput).toBeUndefined()
+    expect(p.turnStartedAt).toBeGreaterThan(5000)
+    expect(readFileSync(join(ctx.orchHome, 'orch.log'), 'utf8')).toMatch(/transcript/)
+  })
+
+  it('gives up quickly on a leftover lock', async () => {
+    const ctx = makeCtx()
+    writePool(ctx.orchHome, plan(newPool('s1', '/r', 1), ['a'], 2))
+    mkdirSync(`${poolPath(ctx.orchHome, 's1')}.lock`)
+    const t0 = Date.now()
+    const out = await hook(ctx, 'prompt-submit', { session_id: 's1' })
+    expect(out).toEqual({ code: 0, stdout: '', stderr: '' })
+    expect(Date.now() - t0).toBeLessThan(3000)
+    expect(readFileSync(join(ctx.orchHome, 'orch.log'), 'utf8')).toMatch(/locked/)
+  })
+
+  it('counts a subagent run as work', async () => {
+    const ctx = makeCtx()
+    writePool(ctx.orchHome, { ...plan(newPool('s1', '/r', 1), ['a'], 2), turnStartedAt: 5000 })
+    for (const name of ['Agent', 'Task']) {
+      const path = transcript(ctx, [{ name, at: 6000 }])
+      expect(contextOf((await hook(ctx, 'prompt-submit', { session_id: 's1', transcript_path: path })).stdout)).toMatch(/not updated/)
+      writePool(ctx.orchHome, { ...plan(newPool('s1', '/r', 1), ['a'], 2), turnStartedAt: 5000 })
+    }
+  })
+
+  it('treats the pool as touched when touchedAt equals the turn start', async () => {
+    const ctx = makeCtx()
+    writePool(ctx.orchHome, { ...plan(newPool('s1', '/r', 1), ['a'], 5000), turnStartedAt: 5000 })
+    const path = transcript(ctx, [{ name: 'Edit', at: 6000 }])
+    expect((await hook(ctx, 'prompt-submit', { session_id: 's1', transcript_path: path })).stdout).toBe('')
+  })
+
+  it('ignores transcript lines without a timestamp or of another type', async () => {
+    const ctx = makeCtx()
+    writePool(ctx.orchHome, { ...plan(newPool('s1', '/r', 1), ['a'], 2), turnStartedAt: 5000 })
+    const path = join(ctx.cwd, 'u.jsonl')
+    const use = { content: [{ type: 'tool_use', name: 'Edit' }] }
+    writeFileSync(path, [{ type: 'api-request-blob', message: use }, { type: 'assistant', message: use }].map(o => JSON.stringify(o)).join('\n') + '\n')
+    expect((await hook(ctx, 'prompt-submit', { session_id: 's1', transcript_path: path })).stdout).toBe('')
   })
 
   it('stays quiet after a read-only turn or on the first prompt', async () => {
@@ -4831,14 +4984,15 @@ Expected: FAIL, `orch: unknown command hook` makes the first assertions fail.
 ```ts
 import { appendFileSync, closeSync, fstatSync, openSync, readSync } from 'node:fs'
 import type { Ctx } from './ctx.js'
+import { OrchError } from './errors.js'
 import { clearQuestions, linkChild, newPool, setParent, startTurn } from './model.js'
 import { ok, type Out } from './out.js'
-import { log, readPool, update, updateIfExists } from './store.js'
+import { log, poolPath, readPool, update, updateIfExists } from './store.js'
 
-type HookInput = { session_id?: string; cwd?: string; transcript_path?: string }
+type HookInput = { session_id?: string; cwd?: string; transcript_path?: string; source?: string }
 type Input = HookInput & { session_id: string }
 
-const WORK = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash'])
+const WORK = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash', 'Agent', 'Task']) // subagent edits never show up in this transcript
 const NO_POOL =
   '[orch] Your last turn changed files or ran commands, and this session has no task pool. If this is multi-step work, run `orch plan "step" "step" …` (see the orch-pool skill).'
 const STALE =
@@ -4846,6 +5000,9 @@ const STALE =
 
 const context = (event: string, text: string): Out =>
   ok(`${JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: text } })}\n`)
+
+// A hook must never wait long on a lock: a stuck one would delay every prompt.
+const LOCK_WAIT_MS = 1500
 
 // A hook must never break the session: every error is logged and swallowed.
 export async function runHook(ctx: Ctx, name: string | undefined): Promise<Out> {
@@ -4856,7 +5013,7 @@ export async function runHook(ctx: Ctx, name: string | undefined): Promise<Out> 
     if (name === 'prompt-submit') return await promptSubmit(ctx, input as Input)
     log(ctx.orchHome, `unknown hook ${name}`)
   } catch (e) {
-    log(ctx.orchHome, `hook ${name}: ${e instanceof Error ? e.stack : String(e)}`)
+    log(ctx.orchHome, `hook ${name}: ${e instanceof OrchError ? e.message : e instanceof Error ? e.stack : String(e)}`)
   }
   return ok()
 }
@@ -4864,24 +5021,61 @@ export async function runHook(ctx: Ctx, name: string | undefined): Promise<Out> 
 async function sessionStart(ctx: Ctx, input: Input): Promise<Out> {
   const id = input.session_id
   const now = ctx.now()
-  if (ctx.env.CLAUDE_ENV_FILE) appendFileSync(ctx.env.CLAUDE_ENV_FILE, `export CLAUDE_SESSION_ID=${id}\n`)
-
+  // poolPath vets the id; the env file is sourced by a shell, so nothing is written before it passes.
+  poolPath(ctx.orchHome, id)
   // ORCH_* are set only when the person started this child by hand (spawn-child outside herdr).
   const parentId = ctx.env.ORCH_PARENT
   const taskId = ctx.env.ORCH_PARENT_TASK
-  const pool = await update(ctx.orchHome, id, p => {
-    const q = p ?? newPool(id, input.cwd ?? ctx.cwd, now)
-    return parentId && taskId && !q.parent ? setParent(q, { sessionId: parentId, taskId }, ctx.env.ORCH_BRIEF, now) : q
-  })
-  if (parentId && taskId && pool.parent?.sessionId === parentId)
-    await updateIfExists(ctx.orchHome, parentId, p => linkChild(p, taskId, id, now))
+  const brief = ctx.env.ORCH_BRIEF
+  if (ctx.env.CLAUDE_ENV_FILE) {
+    const unset = parentId || taskId || brief ? 'unset ORCH_PARENT ORCH_PARENT_TASK ORCH_BRIEF\n' : ''
+    appendFileSync(ctx.env.CLAUDE_ENV_FILE, `export CLAUDE_SESSION_ID=${id}\n${unset}`)
+  }
 
-  if (!pool.parent || !pool.brief) return ok()
-  const parent = readPool(ctx.orchHome, pool.parent.sessionId)
+  // /clear, resume and compact start a session again; only a fresh start may link, or a child would be added twice.
+  const linking = input.source === 'startup' && !!(parentId && taskId)
+  let linkable = false
+  if (linking) {
+    try {
+      linkable = !!readPool(ctx.orchHome, parentId!)?.tasks.some(t => t.id === taskId)
+      if (!linkable) log(ctx.orchHome, `hook session-start: parent ${parentId} has no task ${taskId}; keeping only the brief`)
+    } catch (e) {
+      log(ctx.orchHome, `hook session-start: cannot use parent ${parentId}: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  const pool = await update(
+    ctx.orchHome,
+    id,
+    p => {
+      const q = p ?? newPool(id, input.cwd ?? ctx.cwd, now)
+      if (!linking || q.parent) return q
+      if (linkable) return setParent(q, { sessionId: parentId!, taskId: taskId! }, brief, now)
+      return brief ? { ...q, brief, updatedAt: now } : q
+    },
+    LOCK_WAIT_MS,
+  )
+  if (linkable && pool.parent?.sessionId === parentId && pool.parent?.taskId === taskId) {
+    try {
+      await updateIfExists(ctx.orchHome, parentId!, p => linkChild(p, taskId!, id, now), LOCK_WAIT_MS)
+    } catch (e) {
+      log(ctx.orchHome, `hook session-start: cannot link ${id} under ${parentId}: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  if (!pool.brief) return ok()
+  const next = pool.tasks.length ? 'run `orch status` to pick up where you left off' : 'then run `orch plan` for your part and tick each task with evidence'
+  if (!pool.parent) return context('SessionStart', `[orch] Read ${pool.brief} first, ${next}.`)
+  let parent
+  try {
+    parent = readPool(ctx.orchHome, pool.parent.sessionId)
+  } catch {
+    // an unreadable parent only costs the title
+  }
   const task = parent?.tasks.find(t => t.id === pool.parent!.taskId)
   return context(
     'SessionStart',
-    `[orch] This session is a child of "${parent?.title || pool.parent.sessionId}" for its task ${pool.parent.taskId}${task ? ` ("${task.text}")` : ''}. Read ${pool.brief} first, then run \`orch plan\` for your part and tick each task with evidence.`,
+    `[orch] This session is a child of "${parent?.title || pool.parent.sessionId}" for its task ${pool.parent.taskId}${task ? ` ("${task.text}")` : ''}. Read ${pool.brief} first, ${next}.`,
   )
 }
 
@@ -4890,12 +5084,26 @@ async function promptSubmit(ctx: Ctx, input: Input): Promise<Out> {
   const now = ctx.now()
   const before = readPool(ctx.orchHome, id)
   const since = before?.turnStartedAt
-  const didWork = since !== undefined && !!input.transcript_path && workedSince(input.transcript_path, since)
 
-  await update(ctx.orchHome, id, p => {
-    const q = p ?? newPool(id, input.cwd ?? ctx.cwd, now)
-    return startTurn(clearQuestions(q, now) ?? q, now)
-  })
+  // The pool update comes first: an unreadable transcript must not keep the question flag or the turn clock stale.
+  await update(
+    ctx.orchHome,
+    id,
+    p => {
+      const q = p ?? newPool(id, input.cwd ?? ctx.cwd, now)
+      return startTurn(clearQuestions(q, now) ?? q, now)
+    },
+    LOCK_WAIT_MS,
+  )
+
+  let didWork = false
+  if (since !== undefined && input.transcript_path) {
+    try {
+      didWork = workedSince(input.transcript_path, since)
+    } catch (e) {
+      log(ctx.orchHome, `hook prompt-submit: cannot read transcript: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
 
   if (!didWork || !before) return ok()
   if (!before.tasks.length) return context('UserPromptSubmit', NO_POOL)
@@ -4912,7 +5120,7 @@ export function workedSince(path: string, since: number): boolean {
     } catch {
       continue // the first line of a tail read is usually cut
     }
-    if (o.type !== 'assistant' || Date.parse(o.timestamp ?? '') < since) continue
+    if (o.type !== 'assistant' || !(Date.parse(o.timestamp ?? '') >= since)) continue
     if (o.message?.content?.some(b => b?.type === 'tool_use' && WORK.has(b.name ?? ''))) return true
   }
   return false

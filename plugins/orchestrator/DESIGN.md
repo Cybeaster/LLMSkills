@@ -215,6 +215,9 @@ The text is prefixed `[orch reply to: "<question>"]` so the receiving session kn
 | Two sessions in one cwd | Always told apart by `sessionId`, never by path |
 | `orch reply` target ended or its pane gone | Refused with the reason; the ⚑ stays open |
 | Concurrent writes (child registering into parent) | Atomic rename plus a per-file lock in `orch` |
+| Hook meets a held or orphaned lock | Gives up after 1.5 s and logs it; the prompt is never held up |
+| Hand-started child given a wrong `ORCH_PARENT_TASK` | Not linked; it still gets its brief, and `orch link` fixes the link |
+| `/clear` in a session | Claude Code starts a new session id: the old pool shows as *ended*, the new one starts empty, and a child is linked only on its first start, so it is never added twice |
 
 ## 10. Out of scope for v1
 
@@ -223,6 +226,7 @@ The text is prefixed `[orch reply to: "<question>"]` so the receiving session kn
 - Resuming an exited external session inside herdr.
 - Sending free-form prompts or keys to sessions; only answers to ⚑ go through `orch reply`.
 - Sessions on other machines.
+- Carrying a pool across `/clear` (the new session id has no link to the old one).
 - Claude Code's Bash sandbox: it runs commands in their own pid namespace and limits writes, so `orch` called from inside it cannot see other sessions or write `$ORCH_HOME`. The README tells the user to add `orch *` to `sandbox.excludedCommands`.
 
 ## 11. Testing
