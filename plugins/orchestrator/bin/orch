@@ -1421,8 +1421,8 @@ async function cmdReply(ctx, args) {
   const session = need(positionals[0], "session");
   return reply(ctx, session, positionals.slice(1).join(" ").trim() || void 0, !!values["mark-only"], values.task);
 }
-async function run(argv, ctx) {
-  const [cmd, ...rest] = argv;
+async function run(argv2, ctx) {
+  const [cmd, ...rest] = argv2;
   const flags = rest.includes("--") ? rest.slice(0, rest.indexOf("--")) : rest;
   if (flags.includes("--help") || flags.includes("-h")) return ok(HELP);
   try {
@@ -1465,11 +1465,18 @@ ${HELP}` };
 }
 
 // src/main.ts
+var argv = process.argv.slice(2);
 try {
-  const out = await run(process.argv.slice(2), realCtx());
-  process.stdout.write(out.stdout);
-  process.stderr.write(out.stderr);
-  process.exitCode = out.code;
+  if (argv[0] === "tui") {
+    const tui = new URL("../lib/orch-tui.mjs", import.meta.url).href;
+    const { startTui } = await import(tui);
+    await startTui(realCtx());
+  } else {
+    const out = await run(argv, realCtx());
+    process.stdout.write(out.stdout);
+    process.stderr.write(out.stderr);
+    process.exitCode = out.code;
+  }
 } catch (e) {
   process.stderr.write(describeFailure(e));
   process.exitCode = 1;

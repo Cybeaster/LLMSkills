@@ -9,7 +9,7 @@
     "build": "node build.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "check:bundle": "node build.mjs && git diff --exit-code -- bin lib"
+    "check:bundle": "node build.mjs && git diff --exit-code -- bin lib && git ls-files --error-unmatch bin/orch lib/orch-tui.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
