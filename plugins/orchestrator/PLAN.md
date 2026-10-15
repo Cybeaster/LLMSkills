@@ -160,7 +160,6 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
     "ink": "^6.0.0",
     "ink-testing-library": "^4.0.0",
     "react": "^19.1.0",
-    "string-width": "^8.3.0",
     "typescript": "^5.9.0",
     "vitest": "^3.2.0"
   }
@@ -2504,6 +2503,16 @@ describe('cliGh limits and caching', () => {
     }
   })
 
+  it('asks again about a failed run, which can be re-run under the same id', async () => {
+    let t = 0
+    const failed = fakeRun(done('failure'))
+    const gh = cliGh(failed.run, () => t)
+    expect(await gh.check(ci('1'), repoA)).toBe('fail')
+    t += 61_000
+    await gh.check(ci('1'), repoA)
+    expect(failed.calls).toHaveLength(2)
+  })
+
   it('asks again about an open PR once its answer expires', async () => {
     let t = 0
     const open = fakeRun({ state: 'OPEN', statusCheckRollup: [] })
@@ -2743,7 +2752,7 @@ const runGh: GhRun = (args, cwd) =>
 const FAILED = ['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE']
 const PASSED = ['SUCCESS', 'NEUTRAL', 'SKIPPED']
 
-// final: the state cannot change any more (a finished run, a merged or closed PR), so it is never asked again
+// final: the state cannot change any more (a passed run, a merged or closed PR), so it is never asked again
 type Answer = { value: Check; final: boolean }
 const MAX_GH = 4
 const ANSWER_TTL_MS = 60_000
@@ -2757,7 +2766,8 @@ async function ciCheck(run: GhRun, ref: string, cwd: string): Promise<Answer> {
   const o = JSON.parse(r.stdout)
   if (o.status !== 'completed') return { value: 'pending', final: false }
   const c = String(o.conclusion ?? '').toUpperCase()
-  return PASSED.includes(c) ? { value: 'pass', final: true } : FAILED.includes(c) ? { value: 'fail', final: true } : { value: 'unknown', final: false }
+  // only a pass is final: a failed run can be re-run under the same id
+  return PASSED.includes(c) ? { value: 'pass', final: true } : FAILED.includes(c) ? { value: 'fail', final: false } : { value: 'unknown', final: false }
 }
 
 async function prCheck(run: GhRun, ref: string, cwd: string): Promise<Answer> {
@@ -2848,7 +2858,8 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
 
 **Files:**
 - Create: `plugins/orchestrator/src/overview.ts`
-- Create: `plugins/orchestrator/src/width.ts`
+- Create: `plugins/orchestrator/src/width.ts` (display width without the RegExp `v` flag, so `bin/orch` keeps running on Node 18)
+- Test: `plugins/orchestrator/tests/width.test.ts`
 - Create: `plugins/orchestrator/src/format.ts`
 - Test: `plugins/orchestrator/tests/overview.test.ts`, `plugins/orchestrator/tests/format.test.ts`
 
@@ -3286,10 +3297,10 @@ describe('buildOverview', () => {
 `tests/format.test.ts`:
 
 ```ts
-import stringWidth from 'string-width'
 import { describe, expect, it } from 'vitest'
 import { flatten, header, listLine, poolLines, renderList, shortCwd } from '../src/format.js'
 import type { Row } from '../src/overview.js'
+import { width as stringWidth } from '../src/width.js'
 
 const row = (o: Partial<Row>): Row => ({
   sessionId: 's', name: 's', title: '', cwd: '/home/u/src/ItAbyss', state: 'idle', tag: 'herdr',
@@ -3581,21 +3592,88 @@ export function buildOverview(input: OverviewInput): Row[] {
 }
 ```
 
+`tests/width.test.ts`:
+
+```ts
+import { describe, expect, it } from 'vitest'
+import { clip, pad, width } from '../src/width.js'
+
+describe('width', () => {
+  it.each([
+    ['abc', 3],
+    ['', 0],
+    ['日本語', 6],
+    ['한글', 4],
+    ['ＡＢ', 4],
+    ['🚀', 2],
+    ['❤️', 2],
+    ['👨‍👩‍👧', 2],
+    ['é', 1],
+    ['a​b', 2],
+    ['‮', 0],
+    ['🚀 rocket', 9],
+  ])('%j is %i columns wide', (s, n) => {
+    expect(width(s)).toBe(n)
+  })
+
+  it('clips by columns and never splits a wide character or an emoji', () => {
+    expect(clip('日本語日本語', 7)).toBe('日本語…')
+    expect(clip('日本語', 6)).toBe('日本語')
+    expect(clip('a🚀b🚀c', 4)).toBe('a🚀…')
+    expect(width(clip('x'.repeat(50), 24))).toBe(24)
+  })
+
+  it('pads to exactly n columns', () => {
+    expect(width(pad('日本', 10))).toBe(10)
+    expect(pad('ab', 4)).toBe('ab  ')
+    expect(width(pad('😀'.repeat(20), 8))).toBe(7 + 1)
+  })
+})
+```
+
 `src/width.ts`:
 
 ```ts
-import stringWidth from 'string-width'
-
+// Display width without a dependency: the CLI bundle must load on Node 18, and the width packages
+// (string-width 8) build RegExps with the `v` flag, which Node 18 rejects at load. Only the `u` flag is used here.
 const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+
+const INVISIBLE = /^[\p{Mn}\p{Me}\p{Cf}]+$/u
+const PICTOGRAPH = /\p{Extended_Pictographic}/u
+
+// East Asian wide and fullwidth blocks
+const WIDE: [number, number][] = [
+  [0x1100, 0x115f],
+  [0x2e80, 0xa4cf],
+  [0xac00, 0xd7a3],
+  [0xf900, 0xfaff],
+  [0xfe30, 0xfe4f],
+  [0xff00, 0xff60],
+  [0xffe0, 0xffe6],
+  [0x20000, 0x3fffd],
+]
+
+function graphemeWidth(g: string): number {
+  if (INVISIBLE.test(g)) return 0
+  if (PICTOGRAPH.test(g) || g.includes('️')) return 2
+  const cp = g.codePointAt(0)!
+  return WIDE.some(([lo, hi]) => cp >= lo && cp <= hi) ? 2 : 1
+}
+
+export function width(s: string): number {
+  let n = 0
+  for (const { segment } of graphemes.segment(s)) n += graphemeWidth(segment)
+  return n
+}
 
 // Cuts to at most n terminal columns with a trailing …, by grapheme, so a wide character or an emoji
 // sequence at the cut is never split. Text that already fits is returned as is.
 export function clip(s: string, n: number): string {
-  if (stringWidth(s) <= n) return s
+  if (width(s) <= n) return s
   let out = ''
   let used = 0
   for (const { segment } of graphemes.segment(s)) {
-    const w = stringWidth(segment)
+    const w = graphemeWidth(segment)
     if (used + w > n - 1) break
     out += segment
     used += w
@@ -3606,7 +3684,7 @@ export function clip(s: string, n: number): string {
 // Clips, then pads with spaces to exactly n columns.
 export function pad(s: string, n: number): string {
   const c = clip(s, n)
-  return c + ' '.repeat(Math.max(0, n - stringWidth(c)))
+  return c + ' '.repeat(Math.max(0, n - width(c)))
 }
 ```
 
@@ -4359,7 +4437,7 @@ describe('ppidOf', () => {
 
 ```ts
 import { spawn, spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -4386,7 +4464,23 @@ function sandbox() {
   return { dir, env }
 }
 
+// The CLI and the hooks run on whatever node the machine has; only the TUI bundle needs 20.
+const OLD_NODE = '/usr/bin/node'
+const oldNode = (() => {
+  if (!existsSync(OLD_NODE)) return false
+  const v = spawnSync(OLD_NODE, ['-p', 'process.versions.node.split(".")[0]'], { encoding: 'utf8' })
+  return v.status === 0 && Number(v.stdout) < 20
+})()
+
 describe('bin/orch', () => {
+  it.skipIf(!oldNode)('loads and runs on a Node older than 20', () => {
+    const { env } = sandbox()
+    const r = spawnSync(OLD_NODE, [BIN, 'help'], { encoding: 'utf8', env })
+    expect(r.stderr).toBe('')
+    expect(r.status).toBe(0)
+    expect(r.stdout).toContain('orch plan')
+  })
+
   it('prints help for tui --help without starting the TUI', () => {
     const { env } = sandbox()
     const r = spawnSync(process.execPath, [BIN, 'tui', '--help'], { encoding: 'utf8', env, timeout: 5000 })
@@ -7076,7 +7170,56 @@ describe('filter', () => {
   })
 })
 
+describe('modified keys and the highlight after a link', () => {
+  it('keeps ctrl- and meta-modified characters out of the filter', async () => {
+    const { app } = mount(world())
+    await press(app, '/', '\x01', '\x1bx', 'z')
+    expect(last(app)).toContain('filter: z')
+    expect(last(app)).not.toMatch(/filter: [^z\n]*[ax]/)
+  })
+
+  it('selects the child again after linking it from the picker', async () => {
+    const { app, actions } = mount(world())
+    await press(app, 'j', 'j', 'l', '\r', 'j', '\r')
+    expect(actions.link).toHaveBeenCalled()
+    expect(last(app)).toMatch(/▸ Orchestrator/)
+  })
+})
+
 describe('small terminals', () => {
+  it.each([8, 10, 12])('no screen reaches %i lines, in the list, a picker or a pool', async rows => {
+    const ids = Array.from({ length: 14 }, (_, i) => `E${i + 1}`)
+    const data = world(ids)
+    const { app } = mount(data, { focus: vi.fn(async () => 'a message') }, { rows })
+    const check = () => expect(last(app).split('\n').length).toBeLessThan(rows)
+    check()
+    await press(app, 'f')
+    check()
+    for (let i = 0; i < 16; i++) await press(app, 'j')
+    check()
+    await press(app, 'l')
+    check()
+    for (let i = 0; i < 16; i++) await press(app, 'j')
+    check()
+    await press(app, keys.esc)
+    await press(app, '\r')
+    check()
+    const long = buildOverview({
+      pools: [{ id: 'B', pool: pool('B', 'Many', Array.from({ length: 30 }, () => ({}))) }],
+      live: [{ pid: 1, sessionId: 'B', cwd: '/src/B', status: 'idle' }],
+      agents: [],
+      checks: new Map(),
+      now: 1000,
+    })
+    const second = mount(long, { focus: vi.fn(async () => 'a message') }, { rows })
+    await press(second.app, '\r', 'f')
+    expect(last(second.app).split('\n').length).toBeLessThan(rows)
+    for (let i = 0; i < 40; i++) await press(second.app, 'j')
+    expect(last(second.app).split('\n').length).toBeLessThan(rows)
+    expect(last(second.app)).toContain('Many step 30')
+  }, 30000)
+
+
   const many = () => world(Array.from({ length: 8 }, (_, i) => `E${i + 1}`))
 
   it('shows a window of rows that fits and scrolls with the cursor', async () => {
@@ -7252,11 +7395,21 @@ export function App({
   const excluded = mode.kind === 'pick-parent' ? subtreeIds(all.find(r => r.sessionId === mode.child.sessionId) ?? mode.child) : new Set<string>()
   const parents = mode.kind === 'pick-parent' ? all.filter(r => !excluded.has(r.sessionId) && r.hasPool) : []
   const tasks = mode.kind === 'pick-task' ? mode.parent.tasks : []
-  const ids = mode.kind === 'list' ? lines.map(l => l.row.sessionId) : mode.kind === 'pick-parent' ? parents.map(r => r.sessionId) : tasks.map(t => t.id)
+  const selectedRow = mode.kind === 'list' ? undefined : mode.kind === 'pool' ? all.find(r => r.sessionId === mode.id) : undefined
+  // the pool view scrolls under its heading line, one body line per step
+  const body = selectedRow ? poolLines(selectedRow).slice(1) : []
+  const ids =
+    mode.kind === 'list'
+      ? lines.map(l => l.row.sessionId)
+      : mode.kind === 'pick-parent'
+        ? parents.map(r => r.sessionId)
+        : mode.kind === 'pool'
+          ? body.map((_, i) => String(i))
+          : tasks.map(t => t.id)
   const size = ids.length
   const found = selectedId === undefined ? -1 : ids.indexOf(selectedId)
   const at = found >= 0 ? found : Math.min(cursor, Math.max(0, size - 1))
-  const selected = mode.kind === 'list' ? lines[at]?.row : mode.kind === 'pool' ? all.find(r => r.sessionId === mode.id) : undefined
+  const selected = mode.kind === 'list' ? lines[at]?.row : selectedRow
 
   const select = (i: number) => {
     const n = Math.max(0, Math.min(i, size - 1))
@@ -7274,9 +7427,10 @@ export function App({
     exit()
   }
 
-  // The window of rows that fits under the header and above the message and footer, kept where it was
-  // until the cursor leaves it.
-  const room = Math.max(3, height - 3)
+  // The window of rows that fits between the header and the message and footer lines (and a picker's title or
+  // a pool's heading), kept where it was until the cursor leaves it. One line stays free so Ink never fills the screen.
+  const picking = mode.kind === 'pick-parent' || mode.kind === 'pick-task' || mode.kind === 'pool'
+  const room = Math.max(3, height - 4 - (picking ? 1 : 0))
   const top = useRef(0)
   top.current = Math.max(0, Math.min(top.current, size - room))
   if (at < top.current) top.current = at
@@ -7352,11 +7506,18 @@ export function App({
         ))}
       {mode.kind === 'pool' &&
         (selected ? (
-          poolLines(selected).map((s, i) => (
-            <Text key={i} bold={i === 0} wrap="truncate-end">
-              {s}
+          <>
+            <Text bold wrap="truncate-end">
+              {poolLines(selected)[0]}
             </Text>
-          ))
+            {body.map((s, i) =>
+              visible(i) ? (
+                <Text key={i} wrap="truncate-end">
+                  {s}
+                </Text>
+              ) : null,
+            )}
+          </>
         ) : (
           <Text dimColor>this session is gone</Text>
         ))}
@@ -7468,7 +7629,7 @@ await build({ ...common, define: { 'process.env.NODE_ENV': '"production"' }, ban
 In `package.json`, make `check:bundle` also fail when a bundle was built but never added to git (`git diff` alone only sees tracked files):
 
 ```json
-    "check:bundle": "node build.mjs && git diff --exit-code -- bin lib && git ls-files --error-unmatch bin/orch lib/orch-tui.mjs && test -z \"$(git status --porcelain -- bin lib)\"",
+    "check:bundle": "node build.mjs && git diff --exit-code -- bin lib && git ls-files --error-unmatch bin/orch lib/orch-tui.mjs && test -z \"$(git status --porcelain -- bin lib)\" && (! [ -x /usr/bin/node ] || /usr/bin/node bin/orch help >/dev/null)",
 ```
 
 - [ ] **Step 4: Run them to see them pass**
