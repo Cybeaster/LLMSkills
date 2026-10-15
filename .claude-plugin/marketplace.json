@@ -9,6 +9,11 @@
       "name": "learning-skills",
       "source": "./plugins/learning-skills",
       "description": "Skills for learning to code: mentoring a beginner through building their first project, and explaining unfamiliar codebases from zero."
+    },
+    {
+      "name": "orchestrator",
+      "source": "./plugins/orchestrator",
+      "description": "One view over every local Claude Code session: task pools with evidence, child sessions under their parent task, a TUI, and /orch for your phone."
     }
   ]
 }
