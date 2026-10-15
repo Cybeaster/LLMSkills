@@ -7727,7 +7727,7 @@ The person runs many Claude sessions at once and follows them through one overvi
 
 ## When you need the person
 
-Run `orch ask <taskId> "the question"`, then send a push notification naming this session and the question. The person may answer from their phone; the answer arrives as your next prompt, prefixed `[orch reply to: "…"]`.
+Run `orch ask <taskId> "the question"`, then send a push notification with the PushNotification tool naming this session and the question. The person may answer from their phone; the answer arrives as your next prompt, prefixed `[orch reply to: "…"]`.
 
 ## If you are a child
 
@@ -7750,8 +7750,8 @@ Show the person every local Claude session and let them act on one. This is used
 
 1. Run `orch status --all --json`. It prints a compact tree of rows without their tasks: `sessionId`, `name`, `state` (busy, idle, waiting, ended), `tag`, `done`/`total`, `flags` (open questions in the subtree), `link` and `children`.
 2. Ask *Which session?* with AskUserQuestion. Options, at most four: sessions with `flags > 0` first, then waiting, then busy ones; label each `name done/total` plus ` ⚑` when it has flags. The person can type any other session's name through *Other*. If there are no sessions, say so and stop.
-3. Run `orch status <sessionId> --json` for the chosen row; it adds `tasks` (each with `mark`, `id`, `text`, `detail`). Print them as a short list (`mark id text — detail`) and the `link` if there is one. Then ask *What now?* with the options **Answer ⚑** (only when one of its tasks has `mark` ⚑; for a parent, offer the child that asks), **Open session** (only when it has a `link`), **Back**.
-4. **Answer ⚑**: if the session has more than one ⚑ task, ask which one first. Ask the person for the answer as free text, then run `orch reply <sessionId> --task <taskId> -- "<answer>"` (always the id, since two sessions can share a name; always `--`, since an answer may start with a dash).
+3. Run `orch status <sessionId> --json` for the chosen row; it adds `tasks` (each with `mark`, `id`, `text`, `detail`). Print them as a short list (`mark id text — detail`) and the `link` if there is one. Then ask *What now?* with the options **Answer ⚑** (only when one of its tasks has `mark` ⚑; for a parent whose own tasks show no ⚑, find the child under `children` in the step-1 tree with `flags > 0` and use that child's `sessionId` for steps 3–4), **Open session** (only when it has a `link`), **Back**.
+4. **Answer ⚑**: if the session has more than one ⚑ task, ask which one first. Ask the person for the answer as free text, then run `orch reply <sessionId> --task <taskId> -- '<answer>'` in single quotes, with every `'` in the answer written as `'\''`, so `$`, backticks and `"` in the answer reach the session literally (always the id, since two sessions can share a name; always `--`, since an answer may start with a dash).
    - exit 0: say it was delivered.
    - exit 3: it printed `{"route":"sendmessage","sessionId":…,"name":…,"cwd":…,"taskId":…,"text":…}`. Find that session with ListAgents: by `sessionId` if the listing shows it, else by `cwd`, else by `name`. Send `text` with SendMessage, then run `orch reply <sessionId> --task <taskId> --mark-only`. If no listed session matches, say so and leave the ⚑ open.
    - any other exit: show the error line.
@@ -7774,6 +7774,12 @@ One view over every Claude Code session running on this machine.
 
 Design: [DESIGN.md](DESIGN.md). Plan: [PLAN.md](PLAN.md).
 
+## Requirements
+
+- Node 18+ for `bin/orch` and the hooks; Node 20+ for `orch tui` (`package.json` `engines` says `>=20`, but the CLI is deliberately kept runnable on 18).
+- `gh` for `pr:` and `ci:` evidence.
+- herdr for the TUI's `f` key, for in-pane replies, and for `spawn-child` in a tab.
+
 ## Install
 
 ```bash
@@ -7781,17 +7787,19 @@ claude plugin marketplace add ~/src/ClaudeSkills     # once
 claude plugin install orchestrator@claude-skills
 ```
 
-Then start (or restart) sessions; each registers itself. `orch` is on PATH only inside Claude's own shell, so for the overview pane add an alias once and run `orch tui` in a herdr pane of its own:
+Then start (or restart) sessions; each registers itself. `orch` is on PATH only inside Claude's own shell, so for the overview pane add a shell function once (it resolves the highest installed version at call time) and run `orch tui` in a herdr pane of its own:
 
 ```bash
-alias orch="$(ls -d ~/.claude/plugins/cache/claude-skills/orchestrator/*/ | tail -1)bin/orch"
+orch() { "$(ls -d ~/.claude/plugins/cache/claude-skills/orchestrator/*/ | sort -V | tail -1)bin/orch" "$@"; }
 ```
 
-If Claude Code's Bash sandbox is on, `orch` inside it cannot see other sessions or write its store: every session shows as ended and `orch plan` fails. Exclude it in your user settings (`~/.claude/settings.json`; project settings are ignored for this key):
+If Claude Code's Bash sandbox is on, `orch` inside it cannot see other sessions or write its store: every session shows as ended and `orch plan` fails. `orch` needs to read other sessions' process info and write its store, so it has to be excluded from the sandbox. Be aware of what that means: `orch task done … --evidence cmd:"…"` runs any command, and an excluded `orch *` runs it outside the sandbox, so this opens the sandbox for every session. Put it in your user settings (`~/.claude/settings.json`); project settings are ignored for this key when the sandbox is admin-required:
 
 ```json
 { "sandbox": { "excludedCommands": ["orch *"] } }
 ```
+
+The exclusion does not cover compound calls like `cd x && orch …`.
 
 ## TUI keys
 

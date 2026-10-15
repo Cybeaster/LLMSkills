@@ -227,7 +227,7 @@ The text is prefixed `[orch reply to: "<question>"]` (the question on one line, 
 - Sending free-form prompts or keys to sessions; only answers to ⚑ go through `orch reply`.
 - Sessions on other machines.
 - Carrying a pool across `/clear` (the new session id has no link to the old one).
-- Claude Code's Bash sandbox: it runs commands in their own pid namespace and limits writes, so `orch` called from inside it cannot see other sessions or write `$ORCH_HOME`. The README tells the user to add `orch *` to `sandbox.excludedCommands`.
+- Claude Code's Bash sandbox: it runs commands in their own pid namespace and limits writes, so `orch` called from inside it cannot see other sessions or write `$ORCH_HOME`. The README tells the user to add `orch *` to `sandbox.excludedCommands`, and says plainly that this also lets `cmd:` evidence run outside the sandbox.
 
 ## 11. Testing
 
