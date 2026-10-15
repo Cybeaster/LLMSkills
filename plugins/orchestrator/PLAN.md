@@ -1213,7 +1213,7 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 export const lockTiming = { staleMs: 5_000, deadlineMs: 7_000 }
 
 // waitMs: how long this caller waits for the lock; hooks pass a short one so they never stall a prompt.
-async function withLock<T>(home: string, id: string, fn: () => T, waitMs = lockTiming.deadlineMs): Promise<T> {
+export async function withLock<T>(home: string, id: string, fn: () => T, waitMs = lockTiming.deadlineMs): Promise<T> {
   const lock = `${poolPath(home, id)}.lock`
   mkdirSync(home, { recursive: true })
   const deadline = Date.now() + waitMs
@@ -3015,6 +3015,18 @@ describe('buildOverview', () => {
     expect(rows[0].cwd).toBe('/src/a?b?c d')
   })
 
+  it('keeps an ended child that never planned, so it can be relinked', () => {
+    const rows = buildOverview(input({
+      pools: [
+        { id: 'P', pool: pool('P', [{ children: ['kid'] }]) },
+        { id: 'kid', pool: pool('kid', [], { parent: { sessionId: 'P', taskId: 't1' } }) },
+        { id: 'briefed', pool: pool('briefed', [], { brief: '/r/b.md' }) },
+      ],
+      live: [live('P')],
+    }))
+    expect(flatten(rows).map(l => l.row.sessionId).sort()).toEqual(['P', 'briefed', 'kid'])
+  })
+
   it('carries when a pool was last touched', () => {
     const rows = buildOverview(input({
       pools: [
@@ -3556,11 +3568,11 @@ export function buildOverview(input: OverviewInput): Row[] {
   // Who is shown: every live session, pools written in the last day, ended children of live
   // parents, and the parent of anything shown.
   const ids = new Set(live.keys())
-  // an ended session that never planned, titled or parented anything is not worth a row
+  // an ended session that never planned, titled, briefed or parented anything, and has no parent, is not worth a row
   const parents = new Set(input.pools.map(e => e.pool?.parent?.sessionId))
   const blank = (id: string) => {
     const p = pools.get(id)?.pool
-    return !live.has(id) && !!p && !p.tasks.length && !p.title && !parents.has(id)
+    return !live.has(id) && !!p && !p.tasks.length && !p.title && !p.parent && !p.brief && !parents.has(id)
   }
   for (const [id, e] of pools) if (e.error || (e.pool && input.now - e.pool.updatedAt < DAY && !blank(id))) ids.add(id)
   for (let grew = true; grew; ) {
@@ -4329,6 +4341,15 @@ describe('orch task done with ci: and pr: evidence', () => {
     expect(readPool(ctx.orchHome, 's-self')!.tasks[0].status).toBe('pending')
   })
 
+  it('asks gh from the pool cwd, where it is rechecked later', async () => {
+    const gh = fakeGh('pass')
+    const ctx = makeCtx({ gh })
+    await run(['plan', 'a'], ctx)
+    writePool(ctx.orchHome, { ...readPool(ctx.orchHome, 's-self')!, cwd: '/work/tree' })
+    await run(['task', 'done', 't1', '--evidence', 'pr:41'], ctx)
+    expect(gh.calls.map(([, cwd]) => cwd)).toEqual(['/work/tree'])
+  })
+
   it('accepts evidence that passes', async () => {
     const { out, ctx } = await doneWith('pass', 'pr:41')
     expect(out).toMatchObject({ code: 0, stdout: 't1 done (pr 41)\n' })
@@ -5066,13 +5087,15 @@ async function cmdDone(ctx: Ctx, args: string[]): Promise<Out> {
       }
       evidence = { kind: 'cmd', ref: e.ref, exit: 0 }
     } else {
-      evidence = e as Evidence
+      evidence = e
       if (e.kind === 'ci' || e.kind === 'pr') {
-        if (!readPool(ctx.orchHome, resolveSelf(ctx))?.tasks.some(t => t.id === id)) throw new OrchError(`no task ${id} in this pool`)
+        const self = readPool(ctx.orchHome, resolveSelf(ctx))
+        if (!self?.tasks.some(t => t.id === id)) throw new OrchError(`no task ${id} in this pool`)
+        // from the pool's cwd, where collect and the TUI recheck it: a bare number means that repo
         // an answer someone acts on waits for gh: no stale verdict
-        const verdict = await ctx.gh.check(e as Evidence, ctx.cwd)
-        if (verdict === 'fail') throw new OrchError(`refused: ${describeEvidence(e as Evidence)} is failing, so ${id} stays open`)
-        if (verdict !== 'pass') unsettled = `${id} done; ${describeEvidence(e as Evidence)} is ${verdict}, orch will keep checking it\n`
+        const verdict = await ctx.gh.check(e, self.cwd || ctx.cwd)
+        if (verdict === 'fail') throw new OrchError(`refused: ${describeEvidence(e)} is failing, so ${id} stays open`)
+        if (verdict !== 'pass') unsettled = `${id} done; ${describeEvidence(e)} is ${verdict}, orch will keep checking it\n`
       }
     }
   }
@@ -5228,10 +5251,11 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
 `tests/hooks.test.ts`:
 
 ```ts
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { run } from '../src/cli.js'
+import { findFrame, frameQuestion } from '../src/frame.js'
 import { askTask, linkChild, newPool, plan } from '../src/model.js'
 import { poolPath, readPool, writePool } from '../src/store.js'
 import { makeCtx, writeSession, type TestCtx } from './helpers.js'
@@ -5259,8 +5283,21 @@ describe('hook prompt-submit and orch reply', () => {
   it('clears only the question an orch reply frame quotes', async () => {
     const ctx = makeCtx()
     twoQuestions(ctx)
-    await hook(ctx, 'prompt-submit', { session_id: 's-self', prompt: `[orch reply to: ${JSON.stringify('Strict or "lenient"?')}] lenient` })
+    await hook(ctx, 'prompt-submit', { session_id: 's-self', prompt: `${frameQuestion('Strict or "lenient"?')} lenient` })
     expect(asked(ctx)).toEqual([undefined, undefined, 'Which curve?'])
+  })
+
+  it('finds the frame after a prefix SendMessage may add', async () => {
+    const ctx = makeCtx()
+    twoQuestions(ctx)
+    await hook(ctx, 'prompt-submit', { session_id: 's-self', prompt: `Message from the coordinator:\n${frameQuestion('Which curve?')} the second` })
+    expect(asked(ctx)).toEqual([undefined, 'Strict or "lenient"?', undefined])
+  })
+
+  it('frames and finds a question the way the reply does', () => {
+    const q = 'long\nquestion ' + 'x'.repeat(300)
+    expect(findFrame(`pre ${frameQuestion(q)} body`)).toBe(frameQuestion(q))
+    expect(findFrame('no frame [orch reply to: oops')).toBeUndefined()
   })
 
   it('clears nothing when the quoted question matches no task', async () => {
@@ -5301,6 +5338,46 @@ describe('pruning empty pools at session start', () => {
     await start(ctx)
     expect(['old-empty'].every(id => gone(ctx, id))).toBe(true)
     for (const id of ['recent-empty', 'old-tasks', 'old-touched', 'old-live', 'old-parent', 'old-kid', 'old-listed', 's-new']) expect(gone(ctx, id), id).toBe(false)
+  })
+
+  it('keeps a pool that gets a task between the scan and the delete', async () => {
+    let raced = false
+    const ctx = makeCtx({ now: () => NOW })
+    writePool(ctx.orchHome, empty('racy', NOW - 8 * D))
+    writePool(ctx.orchHome, empty('quiet', NOW - 8 * D))
+    writeSession(ctx, { pid: 9, sessionId: 'other' })
+    // the first registry read happens after the pools were listed: that is the window
+    ctx.isAlive = () => {
+      if (!raced) {
+        raced = true
+        writePool(ctx.orchHome, plan(readPool(ctx.orchHome, 'racy')!, ['late task'], NOW))
+      }
+      return true
+    }
+    await start(ctx)
+    expect(raced).toBe(true)
+    expect(readPool(ctx.orchHome, 'racy')!.tasks).toHaveLength(1)
+    expect(gone(ctx, 'quiet')).toBe(true)
+  })
+
+  it('skips a pool whose lock is held', async () => {
+    const ctx = makeCtx({ now: () => NOW })
+    writePool(ctx.orchHome, empty('busy', NOW - 8 * D))
+    mkdirSync(`${poolPath(ctx.orchHome, 'busy')}.lock`)
+    await start(ctx)
+    expect(gone(ctx, 'busy')).toBe(false)
+  })
+
+  it('deletes at most 100 pools per run and carries on the next hour', async () => {
+    let now = NOW
+    const ctx = makeCtx({ now: () => now })
+    for (let i = 0; i < 300; i++) writePool(ctx.orchHome, empty(`e${i}`, NOW - 8 * D))
+    const left = () => readdirSync(ctx.orchHome).filter(n => /^e\d+\.json$/.test(n)).length
+    await start(ctx)
+    expect(left()).toBe(200)
+    now += 61 * 60_000
+    await start(ctx)
+    expect(left()).toBe(100)
   })
 
   it('prunes at most once an hour', async () => {
@@ -5570,16 +5647,36 @@ import { existsSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'nod
 import { join } from 'node:path'
 import type { Ctx } from './ctx.js'
 import { DAY } from './overview.js'
+import type { Pool } from './model.js'
 import { readLiveSessions } from './sources/sessions.js'
-import { listPools, poolPath } from './store.js'
+import { listPools, poolPath, readPool, withLock } from './store.js'
 
 const MAX_AGE_MS = 7 * DAY
 const EVERY_MS = 60 * 60 * 1000
+const LOCK_WAIT_MS = 200
+const MAX_PER_RUN = 100 // one hook never does unbounded work; the next hourly run carries on
+
+const referencedIds = (ctx: Ctx): Set<string> => {
+  const ids = new Set<string>()
+  for (const e of listPools(ctx.orchHome)) {
+    if (e.pool?.parent) ids.add(e.pool.parent.sessionId)
+    for (const t of e.pool?.tasks ?? []) for (const c of t.children ?? []) ids.add(c)
+  }
+  return ids
+}
+
+// Not worth keeping: no tasks, no links, untouched for a week. Used for the scan and again under the lock.
+const stale = (pool: Pool | undefined, now: number): pool is Pool =>
+  !!pool && !pool.tasks.length && !pool.parent && now - Math.max(pool.updatedAt, pool.touchedAt ?? 0) >= MAX_AGE_MS
+
+const alive = (ctx: Ctx, id: string) => readLiveSessions(ctx.claudeHome, ctx.isAlive).some(s => s.sessionId === id)
 
 // Deletes the pool files of sessions that ended a week ago without ever planning anything. A pool with tasks,
 // a live session, and anything that is named as a parent or listed as a child is kept. At most once an hour,
 // tracked by the mtime of $ORCH_HOME/.pruned (set from ctx.now, so a test clock works). Returns the ids removed.
-export function pruneEmptyPools(ctx: Ctx, keep: string): string[] {
+// The scan is only a shortlist: each candidate is locked, read again and judged again before it is unlinked,
+// so a session that wrote a task meanwhile keeps its pool. A held lock means the pool is in use: skipped.
+export async function pruneEmptyPools(ctx: Ctx, keep: string): Promise<string[]> {
   const marker = join(ctx.orchHome, '.pruned')
   const now = ctx.now()
   if (existsSync(marker) && now - statSync(marker).mtimeMs < EVERY_MS) return []
@@ -5587,21 +5684,26 @@ export function pruneEmptyPools(ctx: Ctx, keep: string): string[] {
   utimesSync(marker, now / 1000, now / 1000)
 
   const pools = listPools(ctx.orchHome)
-  const alive = new Set(readLiveSessions(ctx.claudeHome, ctx.isAlive).map(s => s.sessionId))
-  const referenced = new Set<string>()
-  for (const e of pools) {
-    if (e.pool?.parent) referenced.add(e.pool.parent.sessionId)
-    for (const t of e.pool?.tasks ?? []) for (const c of t.children ?? []) referenced.add(c)
-  }
+  const live = new Set(readLiveSessions(ctx.claudeHome, ctx.isAlive).map(s => s.sessionId))
+  const referenced = referencedIds(ctx)
   const removed: string[] = []
   for (const { id, pool } of pools) {
-    if (!pool || id === keep || alive.has(id) || referenced.has(id) || pool.parent || pool.tasks.length) continue
-    if (now - Math.max(pool.updatedAt, pool.touchedAt ?? 0) < MAX_AGE_MS) continue
+    if (removed.length >= MAX_PER_RUN) break
+    if (id === keep || live.has(id) || referenced.has(id) || !stale(pool, now)) continue
     try {
-      unlinkSync(poolPath(ctx.orchHome, id))
-      removed.push(id)
+      await withLock(
+        ctx.orchHome,
+        id,
+        () => {
+          // no rescan for references: a link can only go under one of the pool's tasks, and then `stale` rejects it
+          if (!stale(readPool(ctx.orchHome, id), now) || alive(ctx, id)) return
+          unlinkSync(poolPath(ctx.orchHome, id))
+          removed.push(id)
+        },
+        LOCK_WAIT_MS,
+      )
     } catch {
-      // gone already, or not ours to remove
+      // locked, gone already or unreadable: leave it
     }
   }
   return removed
@@ -5615,6 +5717,7 @@ import { appendFileSync, closeSync, fstatSync, openSync, readSync } from 'node:f
 import type { Ctx } from './ctx.js'
 import { OrchError } from './errors.js'
 import { oneLine } from './evidence.js'
+import { findFrame, frameQuestion } from './frame.js'
 import { clearQuestions, linkChild, newPool, setParent, startTurn, type Pool } from './model.js'
 import { ok, type Out } from './out.js'
 import { pruneEmptyPools } from './prune.js'
@@ -5695,7 +5798,7 @@ async function sessionStart(ctx: Ctx, input: Input): Promise<Out> {
   }
 
   try {
-    pruneEmptyPools(ctx, id)
+    await pruneEmptyPools(ctx, id)
   } catch (e) {
     log(ctx.orchHome, `hook session-start: prune: ${e instanceof Error ? e.message : String(e)}`)
   }
@@ -5716,22 +5819,11 @@ async function sessionStart(ctx: Ctx, input: Input): Promise<Out> {
   )
 }
 
-const REPLY_FRAME = '[orch reply to: '
-
-// An orch reply answers one question; the frame quotes it. Any other prompt answers everything.
+// An orch reply answers one question, and its frame says which. Any other prompt answers everything.
 function clearAnswered(pool: Pool, prompt: string | undefined, now: number): Pool | undefined {
-  if (typeof prompt !== 'string' || !prompt.startsWith(REPLY_FRAME)) return clearQuestions(pool, now)
-  // JSON.stringify escapes the closing quote, so the quoted string ends at the first unescaped one
-  const m = /^"(?:[^"\\]|\\.)*"/.exec(prompt.slice(REPLY_FRAME.length))
-  let asked: unknown
-  try {
-    asked = m && JSON.parse(m[0])
-  } catch {
-    return undefined
-  }
-  // the frame holds a one-line, 200-character form of the question
-  const quoted = (s: string) => Array.from(oneLine(s)).slice(0, 200).join('')
-  const task = typeof asked === 'string' ? pool.tasks.find(t => t.needsInput && quoted(t.needsInput) === asked) : undefined
+  const frame = typeof prompt === 'string' ? findFrame(prompt) : undefined
+  if (!frame) return clearQuestions(pool, now)
+  const task = pool.tasks.find(t => t.needsInput && frameQuestion(t.needsInput) === frame)
   return task ? clearQuestions(pool, now, task.id) : undefined
 }
 
@@ -6614,6 +6706,7 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
 - Modify: `plugins/orchestrator/src/cli.ts` (add the `reply` case)
 - Test: `plugins/orchestrator/tests/reply.test.ts`
 - Test: `plugins/orchestrator/tests/e2e.test.ts` (spawn, link, child completes, parent rolls up)
+- Create: `plugins/orchestrator/src/frame.ts` (the `[orch reply to: …]` frame, shared with the prompt hook)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -6946,6 +7039,21 @@ Expected: FAIL, `unknown command reply`.
 
 - [ ] **Step 3: Implement**
 
+`src/frame.ts`:
+
+```ts
+import { oneLine } from './evidence.js'
+
+// The prefix orch reply puts before an answer, and the one place that knows its shape: the question on one
+// line, at most 200 code points, JSON-quoted. The prompt-submit hook finds it again to see which question was answered.
+export const frameQuestion = (question: string): string => `[orch reply to: ${JSON.stringify(Array.from(oneLine(question)).slice(0, 200).join(''))}]`
+
+const FRAME = /\[orch reply to: "(?:[^"\\]|\\.)*"\]/
+
+// The first frame anywhere in a prompt (a relay such as SendMessage may add text in front), or undefined.
+export const findFrame = (prompt: string): string | undefined => FRAME.exec(prompt)?.[0]
+```
+
 `src/reply.ts`:
 
 ```ts
@@ -6954,6 +7062,7 @@ import type { Ctx } from './ctx.js'
 import { OrchError } from './errors.js'
 import { oneLine } from './evidence.js'
 import { flatten } from './format.js'
+import { frameQuestion } from './frame.js'
 import { clearQuestions } from './model.js'
 import { ok, type Out } from './out.js'
 import { HerdrError } from './sources/herdr.js'
@@ -6991,8 +7100,7 @@ export async function reply(ctx: Ctx, query: string, text: string | undefined, m
     const row = flatten(rows).map(l => l.row).find(r => r.sessionId === sessionId)
     if (!row || row.state === 'ended') throw new OrchError(`${name} has ended; its question stays open`)
     if (row.state === 'waiting') throw new OrchError(`${name} is waiting on a dialog (${row.waitingFor}); answer that in the session first`)
-    const quoted = JSON.stringify(Array.from(oneLine(asked)).slice(0, 200).join(''))
-    const frame = (t: string) => `[orch reply to: ${quoted}] ${t}`
+    const frame = (t: string) => `${frameQuestion(asked!)} ${t}`
     if (!row.paneId) {
       // Not in herdr: /orch delivers it with SendMessage, then runs orch reply --mark-only --task.
       const payload = { route: 'sendmessage', sessionId, name, cwd: pool?.cwd ?? row.cwd, taskId: task.id, text: frame(body) }
