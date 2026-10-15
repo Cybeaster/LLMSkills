@@ -69,7 +69,7 @@ describe('orch reply', () => {
       throw new HerdrError('herdr agent prompt failed: timed out after 10000ms')
     }
     const lost = await run(['reply', 'course-go', 'strict'], ctx)
-    expect(lost.stderr).toMatch(/may not have got the reply.*timed out.*orch reply course-go --task t1 --mark-only/s)
+    expect(lost.stderr).toMatch(/may not have got the reply.*timed out.*orch reply s-go --task t1 --mark-only/s)
     expect(readPool(ctx.orchHome, 's-go')!.tasks[0].needsInput).toBe('Strict or lenient?')
   })
 
@@ -173,10 +173,11 @@ describe('orch reply', () => {
       const q = `line one\nline "two" ${'x'.repeat(300)}`
       writePool(ctx.orchHome, askTask(plan(newPool('s-q', '/r', 1), ['a'], 2), 't1', q, 3))
       ctx.herdr.agents.push({ name: 'q', paneId: 'p-q', status: 'idle', sessionId: 's-q' })
-      await run(['reply', 'q', '--', 'a\x1b[31mb\x00c\r\nd\te'], ctx)
+      await run(['reply', 'q', '--', 'a\x1b[31mb\x00c\u202ed\u200be\r\nf\tg'], ctx)
       const sent = ctx.herdr.calls[1][2]
       const quoted = JSON.stringify(`line one line "two" ${'x'.repeat(300)}`.slice(0, 200))
-      expect(sent).toBe(`[orch reply to: ${quoted}] a[31mbc\nd\te`)
+      // herdr gets one line; the control and format characters are gone
+      expect(sent).toBe(`[orch reply to: ${quoted}] a[31mbcde f g`)
     })
 
     it('refuses a reply over 4000 characters instead of cutting it', async () => {
@@ -239,5 +240,30 @@ describe('orch reply', () => {
     writePool(ctx.orchHome, askTask(plan(newPool('s-old', '/r', 1), ['a'], ctx.now()), 't1', 'q', ctx.now()))
     expect((await run(['reply', 's-old', '--mark-only'], ctx)).code).toBe(0)
     expect(readPool(ctx.orchHome, 's-old')!.tasks[0].needsInput).toBeUndefined()
+  })
+
+  it('keeps the newlines for SendMessage', async () => {
+    const ctx = makeCtx()
+    asking(ctx, 's-ext', 'api-fix', false)
+    const out = await run(['reply', 'api-fix', '--', 'one\ntwo'], ctx)
+    expect(JSON.parse(out.stdout).text).toBe('[orch reply to: "Strict or lenient?"] one\ntwo')
+  })
+
+  it('cuts the question at 200 code points, not in the middle of an emoji', async () => {
+    const ctx = makeCtx()
+    writeSession(ctx, { pid: 14, sessionId: 's-e', name: 'e' })
+    const q = `${'a'.repeat(199)}😀tail`
+    writePool(ctx.orchHome, askTask(plan(newPool('s-e', '/r', 1), ['a'], 2), 't1', q, 3))
+    ctx.herdr.agents.push({ name: 'e', paneId: 'p-e', status: 'idle', sessionId: 's-e' })
+    await run(['reply', 'e', '--', 'x'], ctx)
+    expect(ctx.herdr.calls[1][2]).toBe(`[orch reply to: "${'a'.repeat(199)}😀"] x`)
+  })
+
+  it('says an old ended session with no overview row has ended', async () => {
+    const ctx = makeCtx({ now: () => 500_000_000 })
+    writePool(ctx.orchHome, askTask(plan(newPool('s-old', '/r', 1), ['a'], 2), 't1', 'q', 3))
+    const out = await run(['reply', 's-old', '--', 'x'], ctx)
+    expect(out.code).toBe(1)
+    expect(out.stderr).toMatch(/has ended/)
   })
 })

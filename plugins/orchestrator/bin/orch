@@ -1082,7 +1082,7 @@ async function resolveSession(ctx, rows, query, opts = {}) {
 // src/reply.ts
 var EXIT_SENDMESSAGE = 3;
 var MAX_REPLY = 4e3;
-var cleanText = (s) => s.replace(new RegExp("(?![\\n\\t])\\p{Cc}", "gu"), "");
+var cleanText = (s) => s.replace(new RegExp("(?![\\n\\t])\\p{Cc}|\\p{Cf}", "gu"), "");
 async function reply(ctx, query, text, markOnly, taskId) {
   const rows = await collect(ctx);
   const { sessionId, name } = await resolveSession(ctx, rows, query);
@@ -1106,12 +1106,14 @@ async function reply(ctx, query, text, markOnly, taskId) {
     const row = flatten(rows).map((l) => l.row).find((r) => r.sessionId === sessionId);
     if (!row || row.state === "ended") throw new OrchError(`${name} has ended; its question stays open`);
     if (row.state === "waiting") throw new OrchError(`${name} is waiting on a dialog (${row.waitingFor}); answer that in the session first`);
-    const message = `[orch reply to: ${JSON.stringify(oneLine(asked).slice(0, 200))}] ${body}`;
+    const quoted = JSON.stringify(Array.from(oneLine(asked)).slice(0, 200).join(""));
+    const frame = (t) => `[orch reply to: ${quoted}] ${t}`;
     if (!row.paneId) {
-      const payload = { route: "sendmessage", sessionId, name, cwd: pool?.cwd ?? row.cwd, taskId: task.id, text: message };
+      const payload = { route: "sendmessage", sessionId, name, cwd: pool?.cwd ?? row.cwd, taskId: task.id, text: frame(body) };
       return { code: EXIT_SENDMESSAGE, stdout: `${JSON.stringify(payload)}
 `, stderr: "" };
     }
+    const message = frame(oneLine(body));
     const blocked = new OrchError(`${name} is waiting on a permission prompt; answer that in its pane first`);
     let state;
     try {
@@ -1130,7 +1132,7 @@ async function reply(ctx, query, text, markOnly, taskId) {
     } catch (e) {
       if (e instanceof HerdrError && e.herdrCode === "agent_blocked") throw blocked;
       throw new OrchError(
-        `${name} may not have got the reply (${e instanceof Error ? e.message : String(e)}); check its pane, then run orch reply ${name} --task ${task.id} --mark-only if it arrived`
+        `${name} may not have got the reply (${e instanceof Error ? e.message : String(e)}); check its pane, then run orch reply ${sessionId} --task ${task.id} --mark-only if it arrived`
       );
     }
   }

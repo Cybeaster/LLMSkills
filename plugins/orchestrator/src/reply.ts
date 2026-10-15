@@ -13,7 +13,8 @@ export const EXIT_SENDMESSAGE = 3
 export const MAX_REPLY = 4000
 
 // everything but newline and tab: a reply is typed into a pane, so an escape sequence must not get through
-const cleanText = (s: string) => s.replace(/(?![\n\t])\p{Cc}/gu, '')
+// plus format characters (bidi overrides, zero-width), which would hide what is typed
+const cleanText = (s: string) => s.replace(/(?![\n\t])\p{Cc}|\p{Cf}/gu, '')
 
 export async function reply(ctx: Ctx, query: string, text: string | undefined, markOnly: boolean, taskId?: string): Promise<Out> {
   const rows = await collect(ctx)
@@ -39,12 +40,15 @@ export async function reply(ctx: Ctx, query: string, text: string | undefined, m
     const row = flatten(rows).map(l => l.row).find(r => r.sessionId === sessionId)
     if (!row || row.state === 'ended') throw new OrchError(`${name} has ended; its question stays open`)
     if (row.state === 'waiting') throw new OrchError(`${name} is waiting on a dialog (${row.waitingFor}); answer that in the session first`)
-    const message = `[orch reply to: ${JSON.stringify(oneLine(asked).slice(0, 200))}] ${body}`
+    const quoted = JSON.stringify(Array.from(oneLine(asked)).slice(0, 200).join(''))
+    const frame = (t: string) => `[orch reply to: ${quoted}] ${t}`
     if (!row.paneId) {
       // Not in herdr: /orch delivers it with SendMessage, then runs orch reply --mark-only --task.
-      const payload = { route: 'sendmessage', sessionId, name, cwd: pool?.cwd ?? row.cwd, taskId: task.id, text: message }
+      const payload = { route: 'sendmessage', sessionId, name, cwd: pool?.cwd ?? row.cwd, taskId: task.id, text: frame(body) }
       return { code: EXIT_SENDMESSAGE, stdout: `${JSON.stringify(payload)}\n`, stderr: '' }
     }
+    // herdr agent prompt is not known to take a multi-line argument as one prompt, so it gets one line
+    const message = frame(oneLine(body))
     const blocked = new OrchError(`${name} is waiting on a permission prompt; answer that in its pane first`)
     // a reply from the phone should answer within one Bash call, so wait at most 90 s for the session to rest
     let state: string
@@ -70,7 +74,7 @@ export async function reply(ctx: Ctx, query: string, text: string | undefined, m
       // herdr says a failed or timed-out prompt may still have arrived: never invite a blind resend
       throw new OrchError(
         `${name} may not have got the reply (${e instanceof Error ? e.message : String(e)}); ` +
-          `check its pane, then run orch reply ${name} --task ${task.id} --mark-only if it arrived`,
+          `check its pane, then run orch reply ${sessionId} --task ${task.id} --mark-only if it arrived`,
       )
     }
   }
