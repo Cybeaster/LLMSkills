@@ -994,6 +994,37 @@ describe('store', () => {
     expect(() => readPool(h, 's1')).toThrow(/is not a pool; fix or delete it/)
   })
 
+  it.each([
+    ['a numeric cwd', { cwd: 5 }],
+    ['a null cwd', { cwd: null }],
+    ['no cwd', { cwd: undefined }],
+  ])('flags a pool with %s as unreadable', (_name, over) => {
+    const h = home()
+    writeFileSync(join(h, 's1.json'), JSON.stringify({ ...newPool('s1', '/r', 1), ...over }))
+    expect(listPools(h)).toEqual([{ id: 's1', error: expect.stringMatching(/s1\.json is not a pool; fix or delete it$/) }])
+    expect(() => readPool(h, 's1')).toThrow(/is not a pool; fix or delete it/)
+  })
+
+  it.each([
+    ['an escape code', 't\u001b[31m1'],
+    ['a newline', 't1\n'],
+    ['a space', 't 1'],
+    ['an empty string', ''],
+    ['a slash', 't/1'],
+    ['a non-ASCII letter', 'tä'],
+  ])('flags a pool whose task id holds %s as unreadable', (_name, id) => {
+    const h = home()
+    writeFileSync(join(h, 's1.json'), JSON.stringify({ ...newPool('s1', '/r', 1), tasks: [{ id, text: 'x', status: 'pending' }] }))
+    expect(listPools(h)).toEqual([{ id: 's1', error: expect.stringMatching(/s1\.json is not a pool; fix or delete it$/) }])
+  })
+
+  it.each(['t1', 't12', 'T-3', 'task_4', '7'])('accepts the task id %s', id => {
+    const h = home()
+    const tasks = [{ id, text: 'x', status: 'pending' }]
+    writeFileSync(join(h, 's1.json'), JSON.stringify({ ...newPool('s1', '/r', 1), tasks }))
+    expect(listPools(h)).toEqual([{ id: 's1', pool: expect.objectContaining({ tasks }) }])
+  })
+
   it('accepts every task shape the CLI writes', () => {
     const h = home()
     const tasks = [
@@ -1078,6 +1109,9 @@ export function poolPath(home: string, id: string): string {
   return join(home, `${id}.json`)
 }
 
+// orch itself only writes t1, t2 and so on; anything else was edited in by hand, and an id is printed as is.
+const TASK_ID = /^[A-Za-z0-9_-]+$/
+
 const STATUSES: readonly Status[] = ['pending', 'in_progress', 'done', 'blocked']
 
 // One malformed task (null, no text, a numeric id) would otherwise throw deep inside the overview and
@@ -1088,6 +1122,7 @@ function isTask(v: unknown): v is Task {
     typeof t === 'object' &&
     t !== null &&
     typeof t.id === 'string' &&
+    TASK_ID.test(t.id) &&
     typeof t.text === 'string' &&
     STATUSES.includes(t.status as Status) &&
     (t.children === undefined || (Array.isArray(t.children) && t.children.every(c => typeof c === 'string')))
@@ -1096,7 +1131,7 @@ function isTask(v: unknown): v is Task {
 
 function isPool(v: unknown): v is Pool {
   const p = v as Partial<Pool> | null | undefined
-  return typeof p?.sessionId === 'string' && Array.isArray(p.tasks) && p.tasks.every(isTask)
+  return typeof p?.sessionId === 'string' && typeof p.cwd === 'string' && Array.isArray(p.tasks) && p.tasks.every(isTask)
 }
 
 // A pool file must hold the session its name says; a copy such as backup1.json would otherwise
@@ -2861,6 +2896,26 @@ describe('buildOverview', () => {
     expect(row.tasks[0].detail).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/)
   })
 
+  it('replaces control characters in a cwd but keeps its spaces', () => {
+    const dirty = '/src/my project\n\u001b]0;x\u0007/sub dir'
+    const clean = '/src/my project??]0;x?/sub dir'
+    const [fromPool] = buildOverview(input({ pools: [{ id: 'S', pool: pool('S', [{}], { cwd: dirty }) }], live: [live('S')] }))
+    const [fromSession] = buildOverview(input({ live: [live('S', { cwd: dirty })] }))
+    expect(fromPool.cwd).toBe(clean)
+    expect(fromSession.cwd).toBe(clean)
+    expect(fromPool.cwd).not.toMatch(/[\u0000-\u001f\u007f]/)
+  })
+
+  it('still looks up checks by the real cwd of the pool', () => {
+    const cwd = '/src/my project\u001b'
+    const [row] = buildOverview(input({
+      pools: [{ id: 'S', pool: pool('S', [{ status: 'done', evidence: { kind: 'ci', ref: 'u1' } }], { cwd }) }],
+      live: [live('S')],
+      checks: new Map<string, Check>([[checkKey({ kind: 'ci', ref: 'u1' }, cwd), 'fail']]),
+    }))
+    expect(row.tasks[0].mark).toBe('✗')
+  })
+
   it('does not clip a question or a blocked reason', () => {
     const long = 'q'.repeat(120)
     const [row] = buildOverview(input({
@@ -2993,10 +3048,12 @@ describe('buildOverview', () => {
   it('does not call a child an orphan while its parent is live without a pool, or ended with one', () => {
     const child = (id: string, parent: string) => ({ id, pool: pool(id, [{}], { parent: { sessionId: parent, taskId: 't1' } }) })
     const rows = buildOverview(input({
-      pools: [child('K1', 'L'), child('K2', 'D'), { id: 'D', pool: pool('D', [{ children: ['K2'] }], { updatedAt: NOW - 1000 }) }],
+      // D was last written two days ago, so only its live child K2 brings it onto the screen
+      pools: [child('K1', 'L'), child('K2', 'D'), { id: 'D', pool: pool('D', [{ children: ['K2'] }], { updatedAt: NOW - 2 * DAY }) }],
       live: [live('L'), live('K1'), live('K2')],
     }))
     const all = flatten(rows).map(l => l.row)
+    expect(rows.find(r => r.sessionId === 'D')).toMatchObject({ state: 'ended', children: [{ sessionId: 'K2' }] })
     expect(all.find(r => r.sessionId === 'K1')!.orphan).toBe(false)
     expect(all.find(r => r.sessionId === 'K2')!.orphan).toBe(false)
     expect(all.find(r => r.sessionId === 'L')).toMatchObject({ orphan: false, hasPool: false })
@@ -3263,7 +3320,8 @@ export function buildOverview(input: OverviewInput): Row[] {
       sessionId: id,
       name: oneLine(a?.name) || oneLine(s?.name) || oneLine(pool?.title) || oneLine(id.slice(0, 8)),
       title: oneLine(pool?.title) || oneLine(a?.title),
-      cwd: pool?.cwd || s?.cwd || '',
+      // a path may hold spaces, so control characters are replaced rather than folded away by oneLine
+      cwd: (pool?.cwd || s?.cwd || '').replace(/\p{Cc}/gu, '?'),
       state: s ? (s.waitingFor ? 'waiting' : s.status) : 'ended',
       waitingFor: s?.waitingFor ? oneLine(s.waitingFor) : undefined,
       tag: s ? (a ? 'herdr' : 'external') : '—',
@@ -3590,6 +3648,7 @@ describe('orch status', () => {
     const one = JSON.parse((await run(['status', 's-self', '--json'], ctx)).stdout)
     expect(one.tasks.map((t: { text: string }) => t.text)).toEqual(['a'])
     expect((await run(['status', 's-nope'], ctx)).stderr).toMatch(/no session s-nope/)
+    expect((await run(['status', 's-other'], ctx)).stdout).toBe('other has no pool yet\n')
   })
 
   it('grades CI evidence with the live check', async () => {
@@ -3884,7 +3943,8 @@ async function cmdStatus(ctx: Ctx, args: string[]): Promise<Out> {
   const row = flatten(rows).map(l => l.row).find(r => r.sessionId === id)
   if (positionals[0] && !row) throw new OrchError(`no session ${id}`)
   if (values.json) return ok(`${JSON.stringify(row ?? null)}\n`)
-  return ok(row?.tasks.length ? renderPool(row) : 'no pool yet: run orch plan "step" "step" …\n')
+  if (row?.tasks.length) return ok(renderPool(row))
+  return ok(row && positionals[0] ? `${row.name} has no pool yet\n` : 'no pool yet: run orch plan "step" "step" …\n')
 }
 
 export async function run(argv: string[], ctx: Ctx): Promise<Out> {
@@ -4224,6 +4284,8 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
 `tests/link.test.ts`:
 
 ```ts
+import { writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { run } from '../src/cli.js'
 import { newPool, plan } from '../src/model.js'
@@ -4231,6 +4293,14 @@ import { readPool, writePool } from '../src/store.js'
 import { makeCtx, writeSession } from './helpers.js'
 
 describe('orch link', () => {
+  it('still links when an ancestor pool is unreadable', async () => {
+    const ctx = makeCtx()
+    for (const id of ['s-x', 's-b', 's-c']) writePool(ctx.orchHome, plan(newPool(id, '/r', 1), ['a'], ctx.now()))
+    expect((await run(['link', 's-b', 's-x', 't1'], ctx)).code).toBe(0)
+    writeFileSync(join(ctx.orchHome, 's-x.json'), '{broken')
+    expect((await run(['link', 's-c', 's-b', 't1'], ctx)).code).toBe(0)
+  })
+
   it('refuses a link that would make a cycle', async () => {
     const ctx = makeCtx()
     writePool(ctx.orchHome, plan(newPool('s-a', '/r', 1), ['a'], ctx.now()))
@@ -4392,8 +4462,16 @@ export type LinkOptions = {
 
 export async function linkSessions(ctx: Ctx, childId: string, parentId: string, taskId: string, opts: LinkOptions = {}): Promise<void> {
   if (childId === parentId) throw new OrchError('a session cannot be its own parent')
-  // walking up from the new parent must not reach the child, or the two would form a cycle
-  for (let id = readPool(ctx.orchHome, parentId)?.parent?.sessionId, n = 0; id && n < 64; id = readPool(ctx.orchHome, id)?.parent?.sessionId, n++)
+  // walking up from the new parent must not reach the child, or the two would form a cycle;
+  // an unreadable ancestor ends the walk instead of failing the link
+  const parentOf = (id: string) => {
+    try {
+      return readPool(ctx.orchHome, id)?.parent?.sessionId
+    } catch {
+      return undefined
+    }
+  }
+  for (let id = parentOf(parentId), n = 0; id && n < 64; id = parentOf(id), n++)
     if (id === childId) throw new OrchError('that parent sits below this session; linking it would make a cycle')
   if (!readPool(ctx.orchHome, parentId)?.tasks.some(t => t.id === taskId)) throw new OrchError(`the parent has no task ${taskId}`)
   const now = ctx.now()
