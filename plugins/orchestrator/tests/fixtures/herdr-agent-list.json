@@ -1,0 +1,5 @@
+{"id":"cli:agent:list","result":{"agents":[
+{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"s-parent"},"agent_status":"done","cwd":"/home/u/src/ItAbyss","name":"beginner-courses","pane_id":"w1:pR","tab_id":"w1:tR","terminal_title_stripped":"Beginner courses for all languages","workspace_id":"w1"},
+{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"s-python"},"agent_status":"working","cwd":"/home/u/src/ItAbyss/.worktrees/course-python","name":"course-python","pane_id":"wS:p1","tab_id":"wS:t1","terminal_title_stripped":"TEC-660 python-beginners course","workspace_id":"wS"},
+{"agent":"codex","agent_status":"idle","cwd":"/tmp","pane_id":"wZ:p1","workspace_id":"wZ"}
+],"type":"agent_list"}}
