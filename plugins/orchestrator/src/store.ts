@@ -128,10 +128,11 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 // Exported so tests can shrink the times.
 export const lockTiming = { staleMs: 5_000, deadlineMs: 7_000 }
 
-async function withLock<T>(home: string, id: string, fn: () => T): Promise<T> {
+// waitMs: how long this caller waits for the lock; hooks pass a short one so they never stall a prompt.
+async function withLock<T>(home: string, id: string, fn: () => T, waitMs = lockTiming.deadlineMs): Promise<T> {
   const lock = `${poolPath(home, id)}.lock`
   mkdirSync(home, { recursive: true })
-  const deadline = Date.now() + lockTiming.deadlineMs
+  const deadline = Date.now() + waitMs
   for (;;) {
     let held = 0
     try {
@@ -178,16 +179,21 @@ function writeUnder(home: string, id: string, next: Pool): Pool {
 }
 
 // Read, change and write one pool under its lock. Never hold two locks at once.
-export function update(home: string, id: string, fn: (p: Pool | undefined) => Pool): Promise<Pool> {
-  return withLock(home, id, () => writeUnder(home, id, fn(readPool(home, id))))
+export function update(home: string, id: string, fn: (p: Pool | undefined) => Pool, waitMs?: number): Promise<Pool> {
+  return withLock(home, id, () => writeUnder(home, id, fn(readPool(home, id))), waitMs)
 }
 
-export function updateIfExists(home: string, id: string, fn: (p: Pool) => Pool): Promise<Pool | undefined> {
-  return withLock(home, id, () => {
-    const cur = readPool(home, id)
-    if (!cur) return undefined
-    return writeUnder(home, id, fn(cur))
-  })
+export function updateIfExists(home: string, id: string, fn: (p: Pool) => Pool, waitMs?: number): Promise<Pool | undefined> {
+  return withLock(
+    home,
+    id,
+    () => {
+      const cur = readPool(home, id)
+      if (!cur) return undefined
+      return writeUnder(home, id, fn(cur))
+    },
+    waitMs,
+  )
 }
 
 const LOG_MAX_BYTES = 1024 * 1024
