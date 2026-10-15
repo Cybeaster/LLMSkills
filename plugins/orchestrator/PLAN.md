@@ -975,6 +975,37 @@ describe('store', () => {
     expect(existsSync(join(h, 's1.json.lock'))).toBe(false)
   })
 
+  it.each([
+    ['a null task', [null]],
+    ['a task that is a string', ['t1']],
+    ['a task with no text', [{ id: 't1', status: 'pending' }]],
+    ['a numeric text', [{ id: 't1', text: 3, status: 'pending' }]],
+    ['a numeric id', [{ id: 1, text: 'x', status: 'pending' }]],
+    ['a task with no id', [{ text: 'x', status: 'pending' }]],
+    ['an unknown status', [{ id: 't1', text: 'x', status: 'weird' }]],
+    ['no status', [{ id: 't1', text: 'x' }]],
+    ['children that is a string', [{ id: 't1', text: 'x', status: 'pending', children: 'C1' }]],
+    ['children holding a number', [{ id: 't1', text: 'x', status: 'pending', children: ['C1', 2] }]],
+    ['a good task followed by a bad one', [{ id: 't1', text: 'x', status: 'done' }, null]],
+  ])('flags a pool with %s as unreadable instead of trusting it', (_name, tasks) => {
+    const h = home()
+    writeFileSync(join(h, 's1.json'), JSON.stringify({ ...newPool('s1', '/r', 1), tasks }))
+    expect(listPools(h)).toEqual([{ id: 's1', error: expect.stringMatching(/s1\.json is not a pool; fix or delete it$/) }])
+    expect(() => readPool(h, 's1')).toThrow(/is not a pool; fix or delete it/)
+  })
+
+  it('accepts every task shape the CLI writes', () => {
+    const h = home()
+    const tasks = [
+      { id: 't1', text: 'a', status: 'pending' },
+      { id: 't2', text: 'b', status: 'in_progress', children: ['C1', 'C2'], needsInput: 'q?' },
+      { id: 't3', text: 'c', status: 'done', evidence: { kind: 'commit', ref: 'abc1234' } },
+      { id: 't4', text: 'd', status: 'blocked', blockedReason: 'key' },
+    ]
+    writeFileSync(join(h, 's1.json'), JSON.stringify({ ...newPool('s1', '/r', 1), tasks }))
+    expect(listPools(h)).toEqual([{ id: 's1', pool: expect.objectContaining({ tasks }) }])
+  })
+
   it('writePool cleans up its temp file when the write fails', () => {
     const h = home()
     mkdirSync(poolPath(h, 's1'))
@@ -1035,7 +1066,7 @@ import {
 } from 'node:fs'
 import { join } from 'node:path'
 import { OrchError } from './errors.js'
-import type { Pool } from './model.js'
+import type { Pool, Status, Task } from './model.js'
 
 export type PoolEntry = { id: string; pool?: Pool; error?: string }
 
@@ -1047,9 +1078,25 @@ export function poolPath(home: string, id: string): string {
   return join(home, `${id}.json`)
 }
 
+const STATUSES: readonly Status[] = ['pending', 'in_progress', 'done', 'blocked']
+
+// One malformed task (null, no text, a numeric id) would otherwise throw deep inside the overview and
+// take every view down, so a pool with such a task is an unreadable pool.
+function isTask(v: unknown): v is Task {
+  const t = v as Partial<Task> | null | undefined
+  return (
+    typeof t === 'object' &&
+    t !== null &&
+    typeof t.id === 'string' &&
+    typeof t.text === 'string' &&
+    STATUSES.includes(t.status as Status) &&
+    (t.children === undefined || (Array.isArray(t.children) && t.children.every(c => typeof c === 'string')))
+  )
+}
+
 function isPool(v: unknown): v is Pool {
   const p = v as Partial<Pool> | null | undefined
-  return typeof p?.sessionId === 'string' && Array.isArray(p.tasks)
+  return typeof p?.sessionId === 'string' && Array.isArray(p.tasks) && p.tasks.every(isTask)
 }
 
 // A pool file must hold the session its name says; a copy such as backup1.json would otherwise
@@ -1238,7 +1285,7 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
 ```ts
 import { describe, expect, it } from 'vitest'
 import { OrchError } from '../src/errors.js'
-import { checkKey, describeEvidence, grade, parseEvidence } from '../src/evidence.js'
+import { checkKey, describeEvidence, grade, oneLine, parseEvidence } from '../src/evidence.js'
 import type { Evidence } from '../src/model.js'
 
 const thrown = (fn: () => unknown): unknown => {
@@ -1336,6 +1383,22 @@ describe('describeEvidence', () => {
   })
 })
 
+describe('oneLine', () => {
+  it('folds whitespace and control characters into single spaces', () => {
+    expect(oneLine('a\n b\t\tc')).toBe('a b c')
+    expect(oneLine('  x  ')).toBe('x')
+    expect(oneLine('a\u001b]0;t\u0007b')).toBe('a ]0;t b')
+    expect(oneLine('\u001b\u0007')).toBe('')
+  })
+
+  it('turns anything that is not text into text', () => {
+    expect(oneLine(undefined)).toBe('')
+    expect(oneLine(null)).toBe('')
+    expect(oneLine(42)).toBe('42')
+    expect(oneLine('')).toBe('')
+  })
+})
+
 describe('checkKey', () => {
   it('keys a check by repo as well as by ref', () => {
     const pr: Evidence = { kind: 'pr', ref: '41' }
@@ -1391,8 +1454,12 @@ export function grade(ev: Evidence | undefined, check?: Check): Grade {
   return 'unverified'
 }
 
+// Text a session wrote, folded onto one line with control characters (ESC, BEL, newlines) gone, so it
+// cannot move the cursor or retitle the terminal when it is printed.
+export const oneLine = (s: unknown): string => String(s ?? '').replace(/[\s\p{Cc}]+/gu, ' ').trim()
+
 export function describeEvidence(ev: Evidence): string {
-  const ref = String(ev.ref ?? '').replace(/[\s\p{Cc}]+/gu, ' ').trim()
+  const ref = oneLine(ev.ref)
   switch (ev.kind) {
     case 'commit':
       return `commit ${ref.slice(0, 7)}`
@@ -1556,6 +1623,22 @@ describe('readLiveSessions', () => {
     expect(s.map(x => x.waitingFor)).toEqual([undefined, undefined, undefined, 'input'])
   })
 
+  it('falls back to input when a waiting session names nothing readable, and cleans what it names', () => {
+    const waiting = (pid: number, waitingFor: unknown) =>
+      `${JSON.stringify({ pid, sessionId: `s-${pid}`, cwd: '/tmp', status: 'waiting', waitingFor })}`
+    const home = homeWith({
+      '231.json': waiting(231, '  '),
+      '232.json': waiting(232, ''),
+      '233.json': waiting(233, '\n\u001b\u0007'),
+      '234.json': waiting(234, 7),
+      '235.json': waiting(235, 'dialog\nopen\u001b]0;x\u0007'),
+      '236.json': waiting(236, 'permission prompt'),
+    })
+    const s = readLiveSessions(home, alive).sort((a, b) => a.pid - b.pid)
+    expect(s.map(x => x.waitingFor)).toEqual(['input', 'input', 'input', 'input', 'dialog open ]0;x', 'permission prompt'])
+    expect(s.every(x => x.status === 'idle')).toBe(true)
+  })
+
   it('falls back to an empty cwd and no name when they are not strings', () => {
     const home = homeWith({
       '221.json': '{"pid":221,"sessionId":"s-bare","status":"idle"}',
@@ -1639,6 +1722,7 @@ Expected: FAIL, `Cannot find module '../src/sources/sessions.js'`.
 ```ts
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { oneLine } from '../evidence.js'
 
 export type LiveSession = {
   pid: number
@@ -1700,7 +1784,8 @@ export function readLiveSessions(
         cwd: typeof o.cwd === 'string' ? o.cwd : '',
         name: typeof o.name === 'string' ? o.name : undefined,
         status: o.status === 'busy' ? 'busy' : 'idle',
-        waitingFor: o.status === 'waiting' ? (typeof o.waitingFor === 'string' ? o.waitingFor : 'input') : undefined,
+        // a blank or unprintable reason still means the session is waiting, so it falls back to 'input'
+        waitingFor: o.status === 'waiting' ? oneLine(typeof o.waitingFor === 'string' ? o.waitingFor : '') || 'input' : undefined,
         bridgeSessionId: typeof o.bridgeSessionId === 'string' ? o.bridgeSessionId : undefined,
       })
     } catch {
@@ -2532,12 +2617,17 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
 `tests/overview.test.ts`:
 
 ```ts
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { checkKey, type Check } from '../src/evidence.js'
+import { header, flatten } from '../src/format.js'
 import { newPool, type Pool, type Task } from '../src/model.js'
 import { buildOverview, DAY, type OverviewInput, type Row } from '../src/overview.js'
 import type { HerdrAgent } from '../src/sources/herdr.js'
 import type { LiveSession } from '../src/sources/sessions.js'
+import { listPools } from '../src/store.js'
 
 const NOW = 10 * DAY
 
@@ -2643,11 +2733,39 @@ describe('buildOverview', () => {
     expect(rows[0].children[0]).toMatchObject({ sessionId: 'kept', state: 'ended', tag: '—' })
   })
 
-  it('survives a parent cycle and keeps every member', () => {
+  it('survives a parent cycle and shows every member exactly once', () => {
     const p = (id: string, parent: string) => ({ id, pool: pool(id, [{}], { parent: { sessionId: parent, taskId: 't1' } }) })
-    const rows = buildOverview(input({ pools: [p('A', 'B'), p('B', 'A'), p('S', 'S')], live: [live('A'), live('B'), live('S')] }))
+    // B and C are each other's parent; A and T hang off B; S is its own parent. A comes first in `ids`.
+    const rows = buildOverview(input({
+      pools: [p('A', 'B'), p('B', 'C'), p('C', 'B'), p('S', 'S'), p('T', 'B')],
+      live: [live('A'), live('B'), live('C'), live('S'), live('T')],
+    }))
     const count = (rs: Row[]): number => rs.reduce((n, r) => n + 1 + count(r.children), 0)
-    expect(count(rows)).toBe(3)
+    expect(count(rows)).toBe(5)
+    expect(flatten(rows).map(l => l.row.sessionId).sort()).toEqual(['A', 'B', 'C', 'S', 'T'])
+    expect(header(rows)).toMatch(/ 5 live /)
+  })
+
+  it('shows a long tail hanging off a cycle once, whatever order it is listed in', () => {
+    const p = (id: string, parent: string) => ({ id, pool: pool(id, [{}], { parent: { sessionId: parent, taskId: 't1' } }) })
+    // E -> D -> A -> B <-> C
+    const pools = [p('E', 'D'), p('D', 'A'), p('A', 'B'), p('B', 'C'), p('C', 'B')]
+    for (const order of [['E', 'D', 'A', 'B', 'C'], ['C', 'B', 'A', 'D', 'E'], ['D', 'C', 'E', 'A', 'B']]) {
+      const rows = buildOverview(input({ pools, live: order.map(id => live(id)) }))
+      expect(flatten(rows).map(l => l.row.sessionId).sort(), order.join()).toEqual(['A', 'B', 'C', 'D', 'E'])
+      expect(rows, order.join()).toHaveLength(1)
+    }
+  })
+
+  it('keeps ordinary roots as they are next to a cycle', () => {
+    const p = (id: string, parent?: string) => ({ id, pool: pool(id, [{}], parent ? { parent: { sessionId: parent, taskId: 't1' } } : {}) })
+    const rows = buildOverview(input({
+      pools: [p('R'), p('K', 'R'), p('X', 'Y'), p('Y', 'X')],
+      live: [live('Y'), live('K'), live('R'), live('X')],
+    }))
+    const r = rows.find(row => row.sessionId === 'R')!
+    expect(r.children.map(c => c.sessionId)).toEqual(['K'])
+    expect(flatten(rows).map(l => l.row.sessionId).sort()).toEqual(['K', 'R', 'X', 'Y'])
   })
 
   it('marks orphans and unreadable pools', () => {
@@ -2669,6 +2787,230 @@ describe('buildOverview', () => {
       live: [live('a'), live('b')],
     }))
     expect(rows.map(r => r.sessionId)).toEqual(['b', 'a', 'c'])
+  })
+
+  it('keeps a session name, title, question and task text on one line without escape codes', () => {
+    const evil = (s: string) => `${s}\n${s}\u001b]0;x\u0007${s}`
+    const [row] = buildOverview(input({
+      pools: [{ id: 'S', pool: pool('S', [
+        { text: 'fix\nthe\u001b]0;x\u0007bug', needsInput: 'which\ncurve\u001b]0;x\u0007?' },
+        { status: 'blocked', blockedReason: 'needs\nkey\u001b]0;x\u0007' },
+      ], { title: evil('t') }) }],
+      live: [live('S', { waitingFor: 'dialog\nopen\u001b]0;x\u0007' })],
+      agents: [agent('S', 'bad\nname\u001b]0;x\u0007')],
+    }))
+    expect(row.tasks[0].text).toBe('fix the ]0;x bug')
+    expect(row.tasks[0].detail).toBe('"which curve ]0;x ?"')
+    expect(row.tasks[1].detail).toBe('needs key ]0;x')
+    expect(row.name).toBe('bad name ]0;x')
+    expect(row.title).toBe('t t ]0;x t')
+    expect(row.waitingFor).toBe('dialog open ]0;x')
+    for (const text of [row.name, row.title, row.waitingFor!, ...row.tasks.flatMap(t => [t.text, t.detail])]) {
+      expect(text).not.toMatch(/[\u0000-\u001f\u007f]/)
+    }
+  })
+
+  describe('keeps what a session wrote on one line', () => {
+    const evil = 'a\nb\u001b]0;x\u0007'
+    const titled = { id: 'S', pool: pool('S', [{}], { title: evil }) }
+    const cases: [string, Partial<OverviewInput>, 'name' | 'title'][] = [
+      ['a herdr name', { live: [live('S')], agents: [agent('S', evil)] }, 'name'],
+      ['a session name', { live: [live('S', { name: evil })] }, 'name'],
+      ['a pool title used as the name', { pools: [titled], live: [live('S')] }, 'name'],
+      ['the start of the session id used as the name', { live: [live(`${evil}cdef`)] }, 'name'],
+      ['a pool title', { pools: [titled], live: [live('S')] }, 'title'],
+      ['a herdr title', { live: [live('S')], agents: [{ ...agent('S', 'n'), title: evil }] }, 'title'],
+    ]
+    it.each(cases)('%s', (_what, over, field) => {
+      const [row] = buildOverview(input(over))
+      expect(row[field]).toBe('a b ]0;x')
+    })
+  })
+
+  it('keeps the reason a pool is unreadable on one line', () => {
+    const rows = buildOverview(input({
+      pools: [{ id: 'B', error: 'bad\njson\u001b]0;x\u0007 here' }, { id: 'G', pool: pool('G', [{}]) }],
+      live: [live('B'), live('G')],
+    }))
+    expect(rows.find(r => r.sessionId === 'B')!.unreadable).toBe('bad json ]0;x here')
+    expect(rows.find(r => r.sessionId === 'G')!.unreadable).toBeUndefined()
+  })
+
+  it('keeps the error of a real broken pool file on one line', () => {
+    // V8 quotes the start of the bad JSON in its message, so a session can get its own bytes into it
+    const home = mkdtempSync(join(tmpdir(), 'orch-overview-'))
+    try {
+      writeFileSync(join(home, 's1.json'), '{"a":\n\u001b]0;x\u0007')
+      const [entry] = listPools(home)
+      expect(entry.error).toMatch(/[\u0000-\u001f]/)
+      const [row] = buildOverview(input({ pools: [entry], live: [live('s1')] }))
+      expect(row.unreadable).toContain('is not valid JSON')
+      expect(row.unreadable).not.toMatch(/[\u0000-\u001f\u007f]/)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('clips evidence by code point, so an emoji at the cut is not split', () => {
+    // 'note: ' + 32 x is 38 characters, so the emoji starts at the 39th; the clip keeps 39 and adds the ellipsis
+    const [row] = buildOverview(input({
+      pools: [{ id: 'S', pool: pool('S', [{ status: 'done', evidence: { kind: 'note', ref: `${'x'.repeat(32)}😀tail` } }]) }],
+      live: [live('S')],
+    }))
+    expect(row.tasks[0].detail).toBe(`note: ${'x'.repeat(32)}😀…`)
+    expect(row.tasks[0].detail).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/)
+  })
+
+  it('does not clip a question or a blocked reason', () => {
+    const long = 'q'.repeat(120)
+    const [row] = buildOverview(input({
+      pools: [{ id: 'S', pool: pool('S', [{ needsInput: long }, { status: 'blocked', blockedReason: long }]) }],
+      live: [live('S')],
+    }))
+    expect(row.tasks[0].detail).toBe(`"${long}"`)
+    expect(row.tasks[1].detail).toBe(long)
+  })
+
+  it('falls back to the next name when one is blank', () => {
+    const name = (a: string, s: string | undefined, title: string, id = 'abcdefghijkl') => {
+      const [row] = buildOverview(input({
+        pools: [{ id, pool: pool(id, [{}], { title }) }],
+        live: [live(id, { name: s })],
+        agents: [agent(id, a)],
+      }))
+      return row.name
+    }
+    expect(name('', 'api-fix', 'Courses')).toBe('api-fix')
+    expect(name('', '', 'Courses')).toBe('Courses')
+    expect(name('', '', '')).toBe('abcdefgh')
+    expect(name('  \n', undefined, 'Courses')).toBe('Courses')
+    expect(name('herdr-name', 'api-fix', 'Courses')).toBe('herdr-name')
+  })
+
+  it('is not complete, and does not finish its parent task, while a child pool is still empty', () => {
+    const rows = buildOverview(input({
+      pools: [
+        { id: 'P', pool: pool('P', [{ children: ['C'], status: 'done' }]) },
+        { id: 'C', pool: pool('C', [], { parent: { sessionId: 'P', taskId: 't1' } }) },
+      ],
+      live: [live('P'), live('C')],
+    }))
+    const [p] = rows
+    expect(p.tasks[0]).toMatchObject({ status: 'in_progress', detail: '1 children: 0 ✓ 1 running' })
+    expect(p).toMatchObject({ done: 0, total: 1, complete: false })
+    expect(p.children[0]).toMatchObject({ hasPool: false, total: 0, complete: false })
+  })
+
+  it('is complete only once every child is, not just some of them', () => {
+    const make = (second: 'done' | 'pending') => buildOverview(input({
+      pools: [
+        { id: 'P', pool: pool('P', [{ children: ['C1', 'C2'] }]) },
+        { id: 'C1', pool: pool('C1', [{ status: 'done', evidence: { kind: 'commit', ref: 'a' } }], { parent: { sessionId: 'P', taskId: 't1' } }) },
+        { id: 'C2', pool: pool('C2', [{ status: second, evidence: { kind: 'commit', ref: 'b' } }], { parent: { sessionId: 'P', taskId: 't1' } }) },
+      ],
+      live: [live('P'), live('C1'), live('C2')],
+    }))[0]
+    expect(make('pending')).toMatchObject({ complete: false, done: 0, total: 1 })
+    expect(make('pending').tasks[0]).toMatchObject({ status: 'pending', detail: '2 children: 1 ✓ 1 running' })
+    expect(make('done')).toMatchObject({ complete: true, done: 1, total: 1 })
+  })
+
+  it('judges completeness the same whatever order the sessions are listed in', () => {
+    // C's own task says done, but its child G is not: C is not complete, so P's task is not done.
+    // C has no parent link, so whether C is built before P depends on the order of `ids`.
+    const pools = [
+      { id: 'P', pool: pool('P', [{ children: ['C'], status: 'done' }]) },
+      { id: 'C', pool: pool('C', [{ children: ['G'], status: 'done' }]) },
+      { id: 'G', pool: pool('G', [{ status: 'pending' }]) },
+    ]
+    const a = buildOverview(input({ pools, live: [live('P'), live('C'), live('G')] }))
+    const b = buildOverview(input({ pools, live: [live('G'), live('C'), live('P')] }))
+    const c = buildOverview(input({ pools: [...pools].reverse(), live: [live('C'), live('P'), live('G')] }))
+    expect(b).toEqual(a)
+    expect(c).toEqual(a)
+    const p = a.find(r => r.sessionId === 'P')!
+    expect(p.tasks[0].status).toBe('in_progress')
+    expect(p).toMatchObject({ done: 0, complete: false })
+    expect(a.find(r => r.sessionId === 'C')).toMatchObject({ complete: false, done: 0 })
+  })
+
+  it('counts a chain of finished children as complete all the way up', () => {
+    const rows = buildOverview(input({
+      pools: [
+        { id: 'P', pool: pool('P', [{ children: ['C'] }]) },
+        { id: 'C', pool: pool('C', [{ children: ['G'] }], { parent: { sessionId: 'P', taskId: 't1' } }) },
+        { id: 'G', pool: pool('G', [{ status: 'done', evidence: { kind: 'commit', ref: 'abc' } }], { parent: { sessionId: 'C', taskId: 't1' } }) },
+      ],
+      live: [live('G'), live('C'), live('P')],
+    }))
+    const [p] = rows
+    expect(p).toMatchObject({ complete: true, done: 1, total: 1 })
+    expect(p.children[0]).toMatchObject({ complete: true })
+    expect(p.children[0].children[0]).toMatchObject({ complete: true })
+  })
+
+  it('never counts a parent cycle as complete', () => {
+    const rows = buildOverview(input({
+      pools: [
+        { id: 'A', pool: pool('A', [{ children: ['B'], status: 'done' }]) },
+        { id: 'B', pool: pool('B', [{ children: ['A'], status: 'done' }]) },
+      ],
+      live: [live('A'), live('B')],
+    }))
+    for (const { row } of flatten(rows)) expect(row.complete, row.sessionId).toBe(false)
+  })
+
+  it('lists ended sessions after live ones even when their names sort first', () => {
+    const rows = buildOverview(input({
+      pools: [
+        { id: 'a', pool: pool('a', [{}], { title: 'aaa' }) },
+        { id: 'z', pool: pool('z', [{}], { title: 'zzz' }) },
+        { id: 'm', pool: pool('m', [{}], { title: 'mmm' }) },
+      ],
+      live: [live('z'), live('m')],
+    }))
+    expect(rows.map(r => r.name)).toEqual(['mmm', 'zzz', 'aaa'])
+  })
+
+  it('sorts children by name', () => {
+    const child = (id: string, title: string) => ({ id, pool: pool(id, [{}], { title, parent: { sessionId: 'P', taskId: 't1' } }) })
+    const rows = buildOverview(input({
+      pools: [{ id: 'P', pool: pool('P', [{ children: ['Z', 'A', 'M'] }]) }, child('Z', 'zeta'), child('A', 'alpha'), child('M', 'mid')],
+      live: [live('P'), live('Z'), live('A'), live('M')],
+    }))
+    expect(rows[0].children.map(c => c.name)).toEqual(['alpha', 'mid', 'zeta'])
+  })
+
+  it('carries the herdr pane of a session, and none for an external one', () => {
+    const rows = buildOverview(input({
+      live: [live('H'), live('E')],
+      agents: [agent('H', 'in-herdr')],
+    }))
+    expect(rows.find(r => r.sessionId === 'H')).toMatchObject({ paneId: 'p-in-herdr', tag: 'herdr' })
+    expect(rows.find(r => r.sessionId === 'E')!.paneId).toBeUndefined()
+  })
+
+  it('does not call a child an orphan while its parent is live without a pool, or ended with one', () => {
+    const child = (id: string, parent: string) => ({ id, pool: pool(id, [{}], { parent: { sessionId: parent, taskId: 't1' } }) })
+    const rows = buildOverview(input({
+      pools: [child('K1', 'L'), child('K2', 'D'), { id: 'D', pool: pool('D', [{ children: ['K2'] }], { updatedAt: NOW - 1000 }) }],
+      live: [live('L'), live('K1'), live('K2')],
+    }))
+    const all = flatten(rows).map(l => l.row)
+    expect(all.find(r => r.sessionId === 'K1')!.orphan).toBe(false)
+    expect(all.find(r => r.sessionId === 'K2')!.orphan).toBe(false)
+    expect(all.find(r => r.sessionId === 'L')).toMatchObject({ orphan: false, hasPool: false })
+    expect(all.find(r => r.sessionId === 'K1')).toMatchObject({ hasPool: true })
+  })
+
+  it('reports hasPool only for a pool that has tasks', () => {
+    const rows = buildOverview(input({
+      pools: [{ id: 'E', pool: pool('E', []) }, { id: 'F', pool: pool('F', [{}]) }, { id: 'U', error: 'bad' }],
+      live: [live('E'), live('F'), live('U'), live('N')],
+    }))
+    const has = Object.fromEntries(rows.map(r => [r.sessionId, r.hasPool]))
+    expect(has).toEqual({ E: false, F: true, U: false, N: false })
+    expect(rows.find(r => r.sessionId === 'F')).toMatchObject({ orphan: false, total: 1, done: 0, complete: false })
   })
 })
 ```
@@ -2719,6 +3061,58 @@ describe('format', () => {
     expect(lines[1]).toMatch(/^✓ t1\s+Write brief\s+commit 9f3e2a1$/)
     expect(poolLines(row({ name: 'p', tasks: [] }))).toEqual(['p', '(no pool yet)'])
   })
+
+  it('only rewrites the home prefix of a path', () => {
+    expect(shortCwd('/mnt/home/u/src/x', '/home/u')).toBe('/mnt/home/u/src/x')
+    expect(shortCwd('/mnt/home/u/notes', '/home/u')).toBe('/mnt/home/u/notes')
+    expect(shortCwd('/srv/home/u/', '/home/u')).toBe('/srv/home/u/')
+    expect(shortCwd('/home/u', '/home/u')).toBe('~')
+    expect(shortCwd('/home/user/src/x', '/home/u')).toBe('/home/user/src/x')
+    expect(shortCwd('/home/u/src/a/b', '/home/u')).toBe('a/b')
+    expect(shortCwd('/opt/p/.worktrees/w', '/home/u')).toBe('/opt/p/wt/w')
+    expect(shortCwd('', '/home/u')).toBe('')
+  })
+
+  it('clips a long name or path with an ellipsis', () => {
+    const line = listLine({ prefix: '', row: row({ name: 'n'.repeat(30), cwd: '/srv/' + 'c'.repeat(40) }) })
+    expect(line.startsWith(`${'n'.repeat(23)}… `)).toBe(true)
+    expect(line).toContain(` /srv/${'c'.repeat(16)}… `)
+    expect(line).not.toContain('n'.repeat(24))
+  })
+
+  it('clips by code point, so an emoji is never cut in half', () => {
+    const lone = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/
+    const line = listLine({ prefix: '', row: row({ name: `${'n'.repeat(22)}😀tail` }) })
+    expect(line.startsWith(`${'n'.repeat(22)}😀… `)).toBe(true)
+    expect(lone.test(line)).toBe(false)
+    const short = listLine({ prefix: '', row: row({ name: '😀'.repeat(3) }) })
+    expect(short.startsWith(`😀😀😀${' '.repeat(21)} `)).toBe(true)
+    const text = poolLines(row({ name: 'p', tasks: [{ id: 't1', text: `${'w'.repeat(33)}😀😀`, status: 'pending', mark: '·', detail: '' }] }))[1]
+    expect(text).toBe(`· t1   ${'w'.repeat(33)}…`)
+    expect(lone.test(text)).toBe(false)
+  })
+
+  it('shows orphan and unreadable pool in the list', () => {
+    expect(listLine({ prefix: '', row: row({ orphan: true, done: 1, total: 2 }) })).toMatch(/1\/2  orphan$/)
+    expect(listLine({ prefix: '', row: row({ unreadable: 'Unexpected token', hasPool: false }) })).toMatch(/ unreadable pool$/)
+    expect(listLine({ prefix: '', row: row({ unreadable: 'x', hasPool: false, flags: 1, orphan: true }) })).toMatch(/unreadable pool  ⚑1  orphan$/)
+  })
+
+  it('counts flags once: from top-level rows, which already include their children', () => {
+    // buildOverview rolls a child's flags up, so the parent's 2 is its own 1 plus the child's 1
+    const rows = [row({ flags: 2, children: [row({ flags: 1 })] }), row({ flags: 1 })]
+    expect(header(rows)).toBe('ORCHESTRATOR  3 live · 3 ⚑ · 0 ended')
+  })
+
+  it('says why a pool cannot be shown', () => {
+    expect(poolLines(row({ name: 'p', unreadable: 'Unexpected token' }))).toEqual(['p', 'unreadable pool: Unexpected token'])
+    expect(poolLines(row({ name: 'p', title: 'Courses', unreadable: 'bad' }))).toEqual(['p — Courses', 'unreadable pool: bad'])
+  })
+
+  it('leaves the title off the pool head when it repeats the name', () => {
+    expect(poolLines(row({ name: 'beginner-courses', title: 'beginner-courses' }))[0]).toBe('beginner-courses')
+    expect(poolLines(row({ name: 'a', title: 'b' }))[0]).toBe('a — b')
+  })
 })
 ```
 
@@ -2732,7 +3126,7 @@ Expected: FAIL, cannot find the two modules.
 `src/overview.ts`:
 
 ```ts
-import { checkKey, describeEvidence, grade, type Check } from './evidence.js'
+import { checkKey, describeEvidence, grade, oneLine, type Check } from './evidence.js'
 import type { Status, Task } from './model.js'
 import type { PoolEntry } from './store.js'
 import type { HerdrAgent } from './sources/herdr.js'
@@ -2740,8 +3134,13 @@ import { sessionLink, type LiveSession } from './sources/sessions.js'
 
 export const DAY = 24 * 60 * 60 * 1000
 
-// Keeps a pool row on one line; the live verdict is appended after clipping so it always shows.
-const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
+// Clips evidence text only, to keep a pool row on one line; the live verdict is appended after clipping so it
+// always shows. A question or a blocked reason is never clipped: /orch needs the whole of it. It cuts by
+// code point, so an emoji at the cut is never split.
+const clip = (s: string, n: number) => {
+  const chars = Array.from(s)
+  return chars.length > n ? `${chars.slice(0, n - 1).join('')}…` : s
+}
 
 export type Mark = '✓' | '~' | '✗' | '?' | '◐' | '·' | '!' | '⚑'
 export type TaskView = { id: string; text: string; status: Status; mark: Mark; detail: string }
@@ -2786,7 +3185,7 @@ function viewTask(t: Task, cwd: string, checks: Map<string, Check>, childDone: (
   let detail = kids.length ? `${kids.length} children: ${kidsDone} ✓ ${kids.length - kidsDone} running` : ''
   if (t.needsInput) {
     mark = '⚑'
-    detail = `"${t.needsInput}"`
+    detail = `"${oneLine(t.needsInput)}"`
   } else if (status === 'done' && kids.length && !t.evidence) {
     mark = '✓'
   } else if (status === 'done') {
@@ -2799,11 +3198,11 @@ function viewTask(t: Task, cwd: string, checks: Map<string, Check>, childDone: (
     mark = '◐'
   } else if (status === 'blocked') {
     mark = '!'
-    detail = t.blockedReason ?? 'blocked'
+    detail = oneLine(t.blockedReason) || 'blocked'
   } else {
     mark = '·'
   }
-  return { id: t.id, text: t.text, status, mark, detail }
+  return { id: t.id, text: oneLine(t.text), status, mark, detail }
 }
 
 const byName = (a: Row, b: Row) => a.name.localeCompare(b.name)
@@ -2831,12 +3230,24 @@ export function buildOverview(input: OverviewInput): Row[] {
   }
 
   const built = new Map<string, Row>()
-  const childDone = (id: string) => {
-    const row = built.get(id)
-    if (row) return row.complete
-    const p = pools.get(id)?.pool
-    return !!p && p.tasks.length > 0 && p.tasks.every(t => t.status === 'done')
+
+  // A session is complete when its pool has tasks and every one is done. A task with children is done
+  // exactly when every child session is complete (viewTask applies the same rule), so this never
+  // depends on which rows happen to be built first. A session met again while it is being worked out
+  // sits on a cycle, which can never finish, and counts as not complete.
+  const memo = new Map<string, boolean>()
+  const completeWalk = (id: string, visiting: Set<string>): boolean => {
+    const known = memo.get(id)
+    if (known !== undefined) return known
+    const tasks = pools.get(id)?.pool?.tasks
+    if (!tasks?.length || visiting.has(id)) return false
+    visiting.add(id)
+    const ok = tasks.every(t => (t.children?.length ? t.children.every(c => completeWalk(c, visiting)) : t.status === 'done'))
+    visiting.delete(id)
+    memo.set(id, ok)
+    return ok
   }
+  const isComplete = (id: string) => completeWalk(id, new Set())
 
   const build = (id: string, path: Set<string>): Row => {
     const inner = new Set(path).add(id)
@@ -2845,26 +3256,26 @@ export function buildOverview(input: OverviewInput): Row[] {
     const pool = e?.pool
     const s = live.get(id)
     const a = agents.get(id)
-    const tasks = (pool?.tasks ?? []).map(t => viewTask(t, pool?.cwd ?? '', input.checks, childDone))
+    const tasks = (pool?.tasks ?? []).map(t => viewTask(t, pool?.cwd ?? '', input.checks, isComplete))
     const done = tasks.filter(t => t.status === 'done').length
     const parent = pool?.parent?.sessionId
     const row: Row = {
       sessionId: id,
-      name: a?.name ?? s?.name ?? (pool?.title || id.slice(0, 8)),
-      title: pool?.title || a?.title || '',
+      name: oneLine(a?.name) || oneLine(s?.name) || oneLine(pool?.title) || oneLine(id.slice(0, 8)),
+      title: oneLine(pool?.title) || oneLine(a?.title),
       cwd: pool?.cwd || s?.cwd || '',
       state: s ? (s.waitingFor ? 'waiting' : s.status) : 'ended',
-      waitingFor: s?.waitingFor,
+      waitingFor: s?.waitingFor ? oneLine(s.waitingFor) : undefined,
       tag: s ? (a ? 'herdr' : 'external') : '—',
       paneId: a?.paneId,
       link: sessionLink(s),
       pid: s?.pid,
       hasPool: tasks.length > 0,
-      unreadable: e?.error,
+      unreadable: e?.error === undefined ? undefined : oneLine(e.error),
       orphan: !!parent && !pools.has(parent) && !live.has(parent),
       done,
       total: tasks.length,
-      complete: tasks.length > 0 && done === tasks.length,
+      complete: isComplete(id),
       flags: (pool?.tasks.filter(t => t.needsInput).length ?? 0) + children.reduce((n, c) => n + c.flags, 0),
       tasks,
       children,
@@ -2878,8 +3289,14 @@ export function buildOverview(input: OverviewInput): Row[] {
     return !p || !ids.has(p)
   })
   const rows = top.map(id => build(id, new Set()))
-  // A parent cycle has no top: show its members at top level rather than lose them.
-  for (const id of ids) if (!built.has(id)) rows.push(build(id, new Set()))
+  // Whatever is still unbuilt hangs off a parent cycle, which has no top. Walk up from it to a member of
+  // the cycle and build from there, so each session shows once, under the cycle, rather than twice.
+  for (const id of ids) {
+    if (built.has(id)) continue
+    let root = id
+    for (const seen = new Set<string>(); !seen.has(root); root = parentOf(root) ?? root) seen.add(root)
+    rows.push(build(root, new Set()))
+  }
   return rows.sort(byPriority)
 }
 ```
@@ -2904,11 +3321,18 @@ export function flatten(rows: Row[]): Line[] {
   return out
 }
 
+// Only the start of a path can be the home directory, so /mnt/home/u/src/x is left alone.
 export function shortCwd(cwd: string, home = homedir()): string {
-  return cwd.replace(`${home}/src/`, '').replace(`${home}/`, '~/').replace('/.worktrees/', '/wt/')
+  const src = `${home}/src/`
+  const short = cwd === home ? '~' : cwd.startsWith(src) ? cwd.slice(src.length) : cwd.startsWith(`${home}/`) ? `~${cwd.slice(home.length)}` : cwd
+  return short.replace('/.worktrees/', '/wt/')
 }
 
-const pad = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s.padEnd(n))
+// Counts and cuts by code point: slicing UTF-16 units could leave half of an emoji.
+const pad = (s: string, n: number) => {
+  const chars = Array.from(s)
+  return chars.length > n ? `${chars.slice(0, n - 1).join('')}…` : s + ' '.repeat(n - chars.length)
+}
 
 export function listLine({ row, prefix }: Line): string {
   const progress = row.unreadable
@@ -2937,7 +3361,8 @@ export function renderList(rows: Row[]): string {
 }
 
 export function poolLines(row: Row): string[] {
-  const head = `${row.name}${row.title ? ` — ${row.title}` : ''}`
+  const head = row.title && row.title !== row.name ? `${row.name} — ${row.title}` : row.name
+  if (row.unreadable) return [head, `unreadable pool: ${row.unreadable}`]
   if (!row.tasks.length) return [head, '(no pool yet)']
   return [head, ...row.tasks.map(t => `${t.mark} ${t.id.padEnd(4)} ${pad(t.text, 34)} ${t.detail}`.trimEnd())]
 }
@@ -3058,10 +3483,20 @@ export function writeSession(ctx: Ctx, o: { pid: number; sessionId: string; cwd?
 ```ts
 import { describe, expect, it } from 'vitest'
 import { run } from '../src/cli.js'
-import { readPool } from '../src/store.js'
+import { doneTask, linkChild, newPool, plan, setParent } from '../src/model.js'
+import { readPool, writePool } from '../src/store.js'
 import { makeCtx, writeSession } from './helpers.js'
 
 describe('orch plan / task / ask / title', () => {
+  it('counts finished children in the pool it prints', async () => {
+    const ctx = makeCtx()
+    await run(['plan', 'fan out'], ctx)
+    writePool(ctx.orchHome, linkChild(readPool(ctx.orchHome, 's-self')!, 't1', 's-kid', ctx.now()))
+    const kid = setParent(plan(newPool('s-kid', '/k', 1), ['write'], 2), { sessionId: 's-self', taskId: 't1' }, undefined, 3)
+    writePool(ctx.orchHome, doneTask(kid, 't1', undefined, 4))
+    expect((await run(['plan', 'next'], ctx)).stdout).toMatch(/^✓ t1 /m)
+  })
+
   it('creates the pool of the calling session', async () => {
     const ctx = makeCtx()
     const out = await run(['plan', 'Create course', 'Run audit'], ctx)
@@ -3151,6 +3586,10 @@ describe('orch status', () => {
     expect(all.stdout).toContain('→ https://claude.ai/code/session_01Me')
     const json = JSON.parse((await run(['status', '--all', '--json'], ctx)).stdout)
     expect(json.map((r: { name: string }) => r.name).sort()).toEqual(['me', 'other'])
+    expect(json.some((r: object) => 'tasks' in r)).toBe(false)
+    const one = JSON.parse((await run(['status', 's-self', '--json'], ctx)).stdout)
+    expect(one.tasks.map((t: { text: string }) => t.text)).toEqual(['a'])
+    expect((await run(['status', 's-nope'], ctx)).stderr).toMatch(/no session s-nope/)
   })
 
   it('grades CI evidence with the live check', async () => {
@@ -3330,7 +3769,7 @@ import { addTask, askTask, blockTask, doneTask, newPool, plan, setTitle, startTa
 import { ok, type Out } from './out.js'
 import { buildOverview } from './overview.js'
 import { resolveSelf } from './self.js'
-import { readPool, update } from './store.js'
+import { listPools, readPool, update } from './store.js'
 
 const HELP = `orch — task pools for Claude Code sessions
 
@@ -3341,7 +3780,8 @@ const HELP = `orch — task pools for Claude Code sessions
   orch task block <id> "why"
   orch task done <id> [--evidence commit:<sha> | pr:<n|url> | ci:<run-url> | cmd:<command> | note:<text>]
   orch ask <id> "question"               flag a question for the person (⚑)
-  orch status [--all] [--json]           this session's pool, or every session
+  orch status [<session-id>] [--json]    this (or that) session's pool
+  orch status --all [--json]             every session
   orch link <child> <parent> <taskId>    attach a session under a parent task
   orch spawn-child <taskId> --name <n> --cwd <dir> --brief <file> [--prompt <text>]
   orch reply <session> "text" [--mark-only]
@@ -3358,13 +3798,17 @@ function mutateSelf(ctx: Ctx, f: (p: Pool) => Pool): Promise<Pool> {
   return update(ctx.orchHome, id, p => f(p ?? newPool(id, ctx.cwd, ctx.now())))
 }
 
-const poolText = (p: Pool, now: number) =>
-  renderPool(buildOverview({ pools: [{ id: p.sessionId, pool: p }], live: [], agents: null, checks: new Map(), now })[0])
+// Built from the whole store, so a task that waits on children shows their real progress.
+function poolText(ctx: Ctx, p: Pool): string {
+  const rows = buildOverview({ pools: listPools(ctx.orchHome), live: [], agents: null, checks: new Map(), now: ctx.now() })
+  const row = flatten(rows).map(l => l.row).find(r => r.sessionId === p.sessionId)
+  return row ? renderPool(row) : ''
+}
 
 async function cmdPlan(ctx: Ctx, args: string[]): Promise<Out> {
   if (!args.length) throw new OrchError('orch plan needs at least one step', 2)
   const p = await mutateSelf(ctx, p => plan(p, args, ctx.now()))
-  return ok(poolText(p, ctx.now()))
+  return ok(poolText(ctx, p))
 }
 
 async function cmdTitle(ctx: Ctx, args: string[]): Promise<Out> {
@@ -3432,12 +3876,14 @@ async function cmdAsk(ctx: Ctx, args: string[]): Promise<Out> {
 }
 
 async function cmdStatus(ctx: Ctx, args: string[]): Promise<Out> {
-  const { values } = parseArgs({ args, options: { all: { type: 'boolean' }, json: { type: 'boolean' } } })
+  const { values, positionals } = parseArgs({ args, options: { all: { type: 'boolean' }, json: { type: 'boolean' } }, allowPositionals: true })
   const rows = await collect(ctx)
-  if (values.all) return ok(values.json ? `${JSON.stringify(rows, null, 2)}\n` : renderList(rows))
-  const id = resolveSelf(ctx)
+  // --all --json drops task lists and indentation so /orch's Bash output stays small; /orch then asks for one session by id
+  if (values.all) return ok(values.json ? `${JSON.stringify(rows, (k, v) => (k === 'tasks' ? undefined : v))}\n` : renderList(rows))
+  const id = positionals[0] ?? resolveSelf(ctx)
   const row = flatten(rows).map(l => l.row).find(r => r.sessionId === id)
-  if (values.json) return ok(`${JSON.stringify(row ?? null, null, 2)}\n`)
+  if (positionals[0] && !row) throw new OrchError(`no session ${id}`)
+  if (values.json) return ok(`${JSON.stringify(row ?? null)}\n`)
   return ok(row?.tasks.length ? renderPool(row) : 'no pool yet: run orch plan "step" "step" …\n')
 }
 
@@ -3785,6 +4231,14 @@ import { readPool, writePool } from '../src/store.js'
 import { makeCtx, writeSession } from './helpers.js'
 
 describe('orch link', () => {
+  it('refuses a link that would make a cycle', async () => {
+    const ctx = makeCtx()
+    writePool(ctx.orchHome, plan(newPool('s-a', '/r', 1), ['a'], ctx.now()))
+    writePool(ctx.orchHome, plan(newPool('s-b', '/r', 1), ['b'], ctx.now()))
+    expect((await run(['link', 's-b', 's-a', 't1'], ctx)).code).toBe(0)
+    expect((await run(['link', 's-a', 's-b', 't1'], ctx)).stderr).toMatch(/cycle/)
+  })
+
   it('attaches a session under a parent task by name and moves it off its old parent', async () => {
     const ctx = makeCtx()
     writeSession(ctx, { pid: 1, sessionId: 's-par', name: 'courses' })
@@ -3938,6 +4392,9 @@ export type LinkOptions = {
 
 export async function linkSessions(ctx: Ctx, childId: string, parentId: string, taskId: string, opts: LinkOptions = {}): Promise<void> {
   if (childId === parentId) throw new OrchError('a session cannot be its own parent')
+  // walking up from the new parent must not reach the child, or the two would form a cycle
+  for (let id = readPool(ctx.orchHome, parentId)?.parent?.sessionId, n = 0; id && n < 64; id = readPool(ctx.orchHome, id)?.parent?.sessionId, n++)
+    if (id === childId) throw new OrchError('that parent sits below this session; linking it would make a cycle')
   if (!readPool(ctx.orchHome, parentId)?.tasks.some(t => t.id === taskId)) throw new OrchError(`the parent has no task ${taskId}`)
   const now = ctx.now()
   const previous = readPool(ctx.orchHome, childId)?.parent
@@ -4529,7 +4986,7 @@ export function App({ initial, actions, interval = 3000 }: { initial: Row[]; act
       {mode.kind === 'list' &&
         (lines.length ? (
           lines.map((l, i) => (
-            <Text key={l.row.sessionId} inverse={i === at}>{`${pointer(i)} ${listLine(l)}`}</Text>
+            <Text key={l.row.sessionId} inverse={i === at} wrap="truncate-end">{`${pointer(i)} ${listLine(l)}`}</Text>
           ))
         ) : (
           <Text dimColor>no sessions</Text>
@@ -4540,7 +4997,7 @@ export function App({ initial, actions, interval = 3000 }: { initial: Row[]; act
         <>
           <Text>{`Attach ${mode.child.name} under which session?`}</Text>
           {parents.map((r, i) => (
-            <Text key={r.sessionId} inverse={i === at}>{`${pointer(i)} ${r.name}  ${shortCwd(r.cwd)}`}</Text>
+            <Text key={r.sessionId} inverse={i === at} wrap="truncate-end">{`${pointer(i)} ${r.name}  ${shortCwd(r.cwd)}`}</Text>
           ))}
         </>
       )}
@@ -4548,7 +5005,7 @@ export function App({ initial, actions, interval = 3000 }: { initial: Row[]; act
         <>
           <Text>{`Which task of ${mode.parent.name}?`}</Text>
           {tasks.map((t, i) => (
-            <Text key={t.id} inverse={i === at}>{`${pointer(i)} ${t.id} ${t.text}`}</Text>
+            <Text key={t.id} inverse={i === at} wrap="truncate-end">{`${pointer(i)} ${t.id} ${t.text}`}</Text>
           ))}
         </>
       )}
@@ -4697,12 +5154,12 @@ allowed-tools: Bash(orch status:*), Bash(orch reply:*), AskUserQuestion, ListAge
 
 Show the person every local Claude session and let them act on one. This is used from a phone over Remote Control, so keep each message short and drive everything through AskUserQuestion.
 
-1. Run `orch status --all --json`. It prints a tree of rows: `name`, `state`, `tag`, `done`/`total`, `flags` (open questions in the subtree), `link`, `tasks` (each with `mark`, `id`, `text`, `detail`) and `children`.
-2. Ask *Which session?* with AskUserQuestion. Options, at most four: sessions with `flags > 0` first, then the most recently active; label each `name done/total` plus ` ⚑` when it has flags. The person can type any other session's name through *Other*. If there are no sessions, say so and stop.
-3. Print the chosen session's pool as a short list (`mark id text — detail`) and its `link` if it has one. Then ask *What now?* with the options **Answer ⚑** (only when one of its tasks has `mark` ⚑; for a parent, offer the child that asks), **Open session** (only when it has a `link`), **Back**.
-4. **Answer ⚑**: ask the person for the answer as free text, then run `orch reply <name> "<answer>"`.
+1. Run `orch status --all --json`. It prints a compact tree of rows without their tasks: `sessionId`, `name`, `state` (busy, idle, waiting, ended), `tag`, `done`/`total`, `flags` (open questions in the subtree), `link` and `children`.
+2. Ask *Which session?* with AskUserQuestion. Options, at most four: sessions with `flags > 0` first, then waiting, then busy ones; label each `name done/total` plus ` ⚑` when it has flags. The person can type any other session's name through *Other*. If there are no sessions, say so and stop.
+3. Run `orch status <sessionId> --json` for the chosen row; it adds `tasks` (each with `mark`, `id`, `text`, `detail`). Print them as a short list (`mark id text — detail`) and the `link` if there is one. Then ask *What now?* with the options **Answer ⚑** (only when one of its tasks has `mark` ⚑; for a parent, offer the child that asks), **Open session** (only when it has a `link`), **Back**.
+4. **Answer ⚑**: ask the person for the answer as free text, then run `orch reply <sessionId> "<answer>"` (always the id: two sessions can share a name).
    - exit 0: say it was delivered.
-   - exit 3: it printed `{"route":"sendmessage","to":…,"text":…}`. Find that session with ListAgents (by name or cwd), send `text` with SendMessage, then run `orch reply <name> --mark-only`.
+   - exit 3: it printed `{"route":"sendmessage","to":…,"text":…}`. Find that session with ListAgents (by name or cwd), send `text` with SendMessage, then run `orch reply <sessionId> --mark-only`.
    - any other exit: show the error line.
 5. **Open session**: print the link alone on its line so it is tappable.
 6. **Back**: return to step 2 with a fresh `orch status --all --json`. Stop when the person picks nothing or says done.
