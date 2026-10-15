@@ -3606,6 +3606,16 @@ describe('width', () => {
     ['한글', 4],
     ['ＡＢ', 4],
     ['🚀', 2],
+    ['⚑', 1],
+    ['✓', 1],
+    ['©', 1],
+    ['❤', 1],
+    ['™', 1],
+    ['✈️', 2],
+    ['⌚', 2],
+    ['⭐', 2],
+    ['👍🏽', 2],
+    ['🇯🇵', 2],
     ['❤️', 2],
     ['👨‍👩‍👧', 2],
     ['é', 1],
@@ -3639,7 +3649,8 @@ describe('width', () => {
 const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
 
 const INVISIBLE = /^[\p{Mn}\p{Me}\p{Cf}]+$/u
-const PICTOGRAPH = /\p{Extended_Pictographic}/u
+// emoji drawn as emoji by default; text-style symbols (⚑ ✓ © ❤) are one column unless U+FE0F asks for emoji
+const EMOJI = /\p{Emoji_Presentation}/u
 
 // East Asian wide and fullwidth blocks
 const WIDE: [number, number][] = [
@@ -3655,7 +3666,7 @@ const WIDE: [number, number][] = [
 
 function graphemeWidth(g: string): number {
   if (INVISIBLE.test(g)) return 0
-  if (PICTOGRAPH.test(g) || g.includes('️')) return 2
+  if (EMOJI.test(g) || g.includes('\ufe0f')) return 2
   const cp = g.codePointAt(0)!
   return WIDE.some(([lo, hi]) => cp >= lo && cp <= hi) ? 2 : 1
 }
@@ -7187,6 +7198,29 @@ describe('modified keys and the highlight after a link', () => {
 })
 
 describe('small terminals', () => {
+  it('scrolls the pool view one line per j and stops at the ends', async () => {
+    const long = buildOverview({
+      pools: [{ id: 'B', pool: pool('B', 'Many', Array.from({ length: 30 }, () => ({}))) }],
+      live: [{ pid: 1, sessionId: 'B', cwd: '/src/B', status: 'idle' }],
+      agents: [],
+      checks: new Map(),
+      now: 1000,
+    })
+    const { app } = mount(long, {}, { rows: 10 })
+    await press(app, '\r')
+    expect(last(app)).toMatch(/· t1 /)
+    await press(app, 'k')
+    expect(last(app)).toMatch(/· t1 /)
+    await press(app, 'j')
+    expect(last(app)).not.toMatch(/· t1 /)
+    expect(last(app)).toMatch(/· t2 /)
+    await press(app, 'k')
+    expect(last(app)).toMatch(/· t1 /)
+    for (let i = 0; i < 60; i++) await press(app, 'j')
+    expect(last(app)).toMatch(/· t30 /)
+    expect(last(app)).not.toMatch(/· t1 /)
+  }, 30000)
+
   it.each([8, 10, 12])('no screen reaches %i lines, in the list, a picker or a pool', async rows => {
     const ids = Array.from({ length: 14 }, (_, i) => `E${i + 1}`)
     const data = world(ids)
@@ -7368,6 +7402,7 @@ export function App({
   const [filter, setFilter] = useState('')
   const [typing, setTyping] = useState(false)
   const [message, setMessage] = useState('')
+  const [poolTop, setPoolTop] = useState(0) // first visible line of the pool view; it has no cursor, j/k scroll it
   const say = (m: unknown) => setMessage(safeLine(m))
 
   // One refresh at a time: a slow herdr or gh call must not stack up a new one every tick.
@@ -7404,7 +7439,7 @@ export function App({
       : mode.kind === 'pick-parent'
         ? parents.map(r => r.sessionId)
         : mode.kind === 'pool'
-          ? body.map((_, i) => String(i))
+          ? []
           : tasks.map(t => t.id)
   const size = ids.length
   const found = selectedId === undefined ? -1 : ids.indexOf(selectedId)
@@ -7420,6 +7455,7 @@ export function App({
     setMode(m)
     setCursor(0)
     setSelectedId(sel)
+    setPoolTop(0)
     setMessage('')
   }
   const quit = (code: number) => {
@@ -7435,7 +7471,9 @@ export function App({
   top.current = Math.max(0, Math.min(top.current, size - room))
   if (at < top.current) top.current = at
   if (at >= top.current + room) top.current = at - room + 1
-  const visible = (i: number) => i >= top.current && i < top.current + room
+  const maxPoolTop = Math.max(0, body.length - room)
+  const shownTop = Math.min(poolTop, maxPoolTop)
+  const visible = (i: number) => (mode.kind === 'pool' ? i >= shownTop && i < shownTop + room : i >= top.current && i < top.current + room)
 
   useInput((input, key) => {
     if (key.ctrl && input === 'c') return quit(130)
@@ -7452,6 +7490,8 @@ export function App({
       return
     }
     if (input === 'q') return quit(0)
+    if (mode.kind === 'pool' && (key.downArrow || input === 'j')) return setPoolTop(Math.min(shownTop + 1, maxPoolTop))
+    if (mode.kind === 'pool' && (key.upArrow || input === 'k')) return setPoolTop(Math.max(shownTop - 1, 0))
     if (key.downArrow || input === 'j') return select(at + 1)
     if (key.upArrow || input === 'k') return select(at - 1)
     if (input === 'r') return void reload()
