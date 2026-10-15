@@ -369,7 +369,27 @@ function writeUnder(home, id, next) {
 function update(home, id, fn) {
   return withLock(home, id, () => writeUnder(home, id, fn(readPool(home, id))));
 }
+function updateIfExists(home, id, fn) {
+  return withLock(home, id, () => {
+    const cur = readPool(home, id);
+    if (!cur) return void 0;
+    return writeUnder(home, id, fn(cur));
+  });
+}
 var LOG_MAX_BYTES = 1024 * 1024;
+function log(home, message) {
+  try {
+    mkdirSync(home, { recursive: true });
+    const file = join2(home, "orch.log");
+    try {
+      if (statSync(file).size > LOG_MAX_BYTES) renameSync(file, `${file}.1`);
+    } catch {
+    }
+    appendFileSync(file, `${(/* @__PURE__ */ new Date()).toISOString()} ${message}
+`);
+  } catch {
+  }
+}
 
 // src/collect.ts
 async function collect(ctx, opts = {}) {
@@ -709,6 +729,9 @@ function poolLines(row) {
 }
 var renderPool = (row) => poolLines(row).join("\n") + "\n";
 
+// src/hooks.ts
+import { appendFileSync as appendFileSync2, closeSync as closeSync2, fstatSync, openSync as openSync2, readSync } from "node:fs";
+
 // src/model.ts
 function newPool(sessionId, cwd, now) {
   return { sessionId, title: "", cwd, tasks: [], seq: 0, createdAt: now, updatedAt: now };
@@ -776,9 +799,121 @@ function askTask(pool, id, question, now) {
   find(p, id).needsInput = question;
   return own(p, now);
 }
+function clearQuestions(pool, now, taskId) {
+  if (!pool.tasks.some((t) => t.needsInput && (!taskId || t.id === taskId))) return void 0;
+  const p = clone(pool);
+  for (const t of p.tasks) if (!taskId || t.id === taskId) delete t.needsInput;
+  p.updatedAt = now;
+  return p;
+}
+function setParent(pool, parent, brief, now) {
+  const p = clone(pool);
+  const moved = p.parent?.sessionId !== parent.sessionId;
+  p.parent = parent;
+  if (brief) p.brief = brief;
+  else if (moved) delete p.brief;
+  p.updatedAt = now;
+  return p;
+}
+function linkChild(pool, taskId, childId, now, byOwner = false) {
+  const p = clone(pool);
+  const t = find(p, taskId);
+  t.children = [.../* @__PURE__ */ new Set([...t.children ?? [], childId])];
+  if (t.status === "pending") t.status = "in_progress";
+  if (byOwner) return own(p, now);
+  p.updatedAt = now;
+  return p;
+}
+function startTurn(pool, now) {
+  const p = clone(pool);
+  p.turnStartedAt = now;
+  p.updatedAt = now;
+  return p;
+}
 
 // src/out.ts
 var ok = (stdout = "") => ({ code: 0, stdout, stderr: "" });
+
+// src/hooks.ts
+var WORK = /* @__PURE__ */ new Set(["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"]);
+var NO_POOL = '[orch] Your last turn changed files or ran commands, and this session has no task pool. If this is multi-step work, run `orch plan "step" "step" \u2026` (see the orch-pool skill).';
+var STALE = "[orch] Your task pool was not updated during your last turn. Run `orch status`, then tick finished tasks with evidence or re-plan.";
+var context = (event, text) => ok(`${JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: text } })}
+`);
+async function runHook(ctx, name) {
+  try {
+    const input = JSON.parse(await ctx.readStdin() || "{}");
+    if (!input.session_id) return ok();
+    if (name === "session-start") return await sessionStart(ctx, input);
+    if (name === "prompt-submit") return await promptSubmit(ctx, input);
+    log(ctx.orchHome, `unknown hook ${name}`);
+  } catch (e) {
+    log(ctx.orchHome, `hook ${name}: ${e instanceof Error ? e.stack : String(e)}`);
+  }
+  return ok();
+}
+async function sessionStart(ctx, input) {
+  const id = input.session_id;
+  const now = ctx.now();
+  const parentId = ctx.env.ORCH_PARENT;
+  const taskId = ctx.env.ORCH_PARENT_TASK;
+  const pool = await update(ctx.orchHome, id, (p) => {
+    const q = p ?? newPool(id, input.cwd ?? ctx.cwd, now);
+    return parentId && taskId && !q.parent ? setParent(q, { sessionId: parentId, taskId }, ctx.env.ORCH_BRIEF, now) : q;
+  });
+  if (ctx.env.CLAUDE_ENV_FILE) appendFileSync2(ctx.env.CLAUDE_ENV_FILE, `export CLAUDE_SESSION_ID=${id}
+`);
+  if (parentId && taskId && pool.parent?.sessionId === parentId)
+    await updateIfExists(ctx.orchHome, parentId, (p) => linkChild(p, taskId, id, now));
+  if (!pool.parent || !pool.brief) return ok();
+  const parent = readPool(ctx.orchHome, pool.parent.sessionId);
+  const task = parent?.tasks.find((t) => t.id === pool.parent.taskId);
+  return context(
+    "SessionStart",
+    `[orch] This session is a child of "${parent?.title || pool.parent.sessionId}" for its task ${pool.parent.taskId}${task ? ` ("${task.text}")` : ""}. Read ${pool.brief} first, then run \`orch plan\` for your part and tick each task with evidence.`
+  );
+}
+async function promptSubmit(ctx, input) {
+  const id = input.session_id;
+  const now = ctx.now();
+  const before = readPool(ctx.orchHome, id);
+  const since = before?.turnStartedAt;
+  const didWork = since !== void 0 && !!input.transcript_path && workedSince(input.transcript_path, since);
+  await update(ctx.orchHome, id, (p) => {
+    const q = p ?? newPool(id, input.cwd ?? ctx.cwd, now);
+    return startTurn(clearQuestions(q, now) ?? q, now);
+  });
+  if (!didWork || !before) return ok();
+  if (!before.tasks.length) return context("UserPromptSubmit", NO_POOL);
+  if ((before.touchedAt ?? 0) < since) return context("UserPromptSubmit", STALE);
+  return ok();
+}
+function workedSince(path, since) {
+  for (const line of readTail(path, 4 << 20).split("\n")) {
+    if (!line.includes('"tool_use"')) continue;
+    let o;
+    try {
+      o = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (o.type !== "assistant" || Date.parse(o.timestamp ?? "") < since) continue;
+    if (o.message?.content?.some((b) => b?.type === "tool_use" && WORK.has(b.name ?? ""))) return true;
+  }
+  return false;
+}
+function readTail(path, max) {
+  const fd = openSync2(path, "r");
+  try {
+    const size = fstatSync(fd).size;
+    const len = Math.min(size, max);
+    const buf = Buffer.alloc(len);
+    readSync(fd, buf, 0, len, size - len);
+    return buf.toString("utf8");
+  } finally {
+    closeSync2(fd);
+  }
+}
 
 // src/self.ts
 function resolveSelf(ctx) {
@@ -964,6 +1099,8 @@ async function run(argv, ctx) {
         return await cmdAsk(ctx, rest);
       case "status":
         return await cmdStatus(ctx, rest);
+      case "hook":
+        return await runHook(ctx, rest[0]);
       case void 0:
       case "help":
       case "--help":

@@ -4,6 +4,7 @@ import { CMD_TIMEOUT_MS, type Ctx } from './ctx.js'
 import { OrchError } from './errors.js'
 import { describeEvidence, parseEvidence } from './evidence.js'
 import { flatten, renderList, renderPool } from './format.js'
+import { runHook } from './hooks.js'
 import { addTask, askTask, blockTask, doneTask, newPool, plan, setTitle, startTask, type Evidence, type Pool } from './model.js'
 import { ok, type Out } from './out.js'
 import { buildOverview } from './overview.js'
@@ -192,6 +193,8 @@ export async function run(argv: string[], ctx: Ctx): Promise<Out> {
         return await cmdAsk(ctx, rest)
       case 'status':
         return await cmdStatus(ctx, rest)
+      case 'hook':
+        return await runHook(ctx, rest[0])
       case undefined:
       case 'help':
       case '--help':
