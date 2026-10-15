@@ -3,7 +3,8 @@
 const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
 
 const INVISIBLE = /^[\p{Mn}\p{Me}\p{Cf}]+$/u
-const PICTOGRAPH = /\p{Extended_Pictographic}/u
+// emoji drawn as emoji by default; text-style symbols (⚑ ✓ © ❤) are one column unless U+FE0F asks for emoji
+const EMOJI = /\p{Emoji_Presentation}/u
 
 // East Asian wide and fullwidth blocks
 const WIDE: [number, number][] = [
@@ -19,7 +20,7 @@ const WIDE: [number, number][] = [
 
 function graphemeWidth(g: string): number {
   if (INVISIBLE.test(g)) return 0
-  if (PICTOGRAPH.test(g) || g.includes('️')) return 2
+  if (EMOJI.test(g) || g.includes('\ufe0f')) return 2
   const cp = g.codePointAt(0)!
   return WIDE.some(([lo, hi]) => cp >= lo && cp <= hi) ? 2 : 1
 }

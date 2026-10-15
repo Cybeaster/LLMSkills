@@ -452,6 +452,29 @@ describe('modified keys and the highlight after a link', () => {
 })
 
 describe('small terminals', () => {
+  it('scrolls the pool view one line per j and stops at the ends', async () => {
+    const long = buildOverview({
+      pools: [{ id: 'B', pool: pool('B', 'Many', Array.from({ length: 30 }, () => ({}))) }],
+      live: [{ pid: 1, sessionId: 'B', cwd: '/src/B', status: 'idle' }],
+      agents: [],
+      checks: new Map(),
+      now: 1000,
+    })
+    const { app } = mount(long, {}, { rows: 10 })
+    await press(app, '\r')
+    expect(last(app)).toMatch(/· t1 /)
+    await press(app, 'k')
+    expect(last(app)).toMatch(/· t1 /)
+    await press(app, 'j')
+    expect(last(app)).not.toMatch(/· t1 /)
+    expect(last(app)).toMatch(/· t2 /)
+    await press(app, 'k')
+    expect(last(app)).toMatch(/· t1 /)
+    for (let i = 0; i < 60; i++) await press(app, 'j')
+    expect(last(app)).toMatch(/· t30 /)
+    expect(last(app)).not.toMatch(/· t1 /)
+  }, 30000)
+
   it.each([8, 10, 12])('no screen reaches %i lines, in the list, a picker or a pool', async rows => {
     const ids = Array.from({ length: 14 }, (_, i) => `E${i + 1}`)
     const data = world(ids)

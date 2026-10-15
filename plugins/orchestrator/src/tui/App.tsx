@@ -68,6 +68,7 @@ export function App({
   const [filter, setFilter] = useState('')
   const [typing, setTyping] = useState(false)
   const [message, setMessage] = useState('')
+  const [poolTop, setPoolTop] = useState(0) // first visible line of the pool view; it has no cursor, j/k scroll it
   const say = (m: unknown) => setMessage(safeLine(m))
 
   // One refresh at a time: a slow herdr or gh call must not stack up a new one every tick.
@@ -104,7 +105,7 @@ export function App({
       : mode.kind === 'pick-parent'
         ? parents.map(r => r.sessionId)
         : mode.kind === 'pool'
-          ? body.map((_, i) => String(i))
+          ? []
           : tasks.map(t => t.id)
   const size = ids.length
   const found = selectedId === undefined ? -1 : ids.indexOf(selectedId)
@@ -120,6 +121,7 @@ export function App({
     setMode(m)
     setCursor(0)
     setSelectedId(sel)
+    setPoolTop(0)
     setMessage('')
   }
   const quit = (code: number) => {
@@ -135,7 +137,9 @@ export function App({
   top.current = Math.max(0, Math.min(top.current, size - room))
   if (at < top.current) top.current = at
   if (at >= top.current + room) top.current = at - room + 1
-  const visible = (i: number) => i >= top.current && i < top.current + room
+  const maxPoolTop = Math.max(0, body.length - room)
+  const shownTop = Math.min(poolTop, maxPoolTop)
+  const visible = (i: number) => (mode.kind === 'pool' ? i >= shownTop && i < shownTop + room : i >= top.current && i < top.current + room)
 
   useInput((input, key) => {
     if (key.ctrl && input === 'c') return quit(130)
@@ -152,6 +156,8 @@ export function App({
       return
     }
     if (input === 'q') return quit(0)
+    if (mode.kind === 'pool' && (key.downArrow || input === 'j')) return setPoolTop(Math.min(shownTop + 1, maxPoolTop))
+    if (mode.kind === 'pool' && (key.upArrow || input === 'k')) return setPoolTop(Math.max(shownTop - 1, 0))
     if (key.downArrow || input === 'j') return select(at + 1)
     if (key.upArrow || input === 'k') return select(at - 1)
     if (input === 'r') return void reload()

@@ -21681,7 +21681,7 @@ var checkKey = (ev, cwd2) => `${cwd2}\0${ev.kind}:${ev.ref}`;
 // src/width.ts
 var graphemes = new Intl.Segmenter(void 0, { granularity: "grapheme" });
 var INVISIBLE = /^[\p{Mn}\p{Me}\p{Cf}]+$/u;
-var PICTOGRAPH = new RegExp("\\p{Extended_Pictographic}", "u");
+var EMOJI = new RegExp("\\p{Emoji_Presentation}", "u");
 var WIDE = [
   [4352, 4447],
   [11904, 42191],
@@ -21694,7 +21694,7 @@ var WIDE = [
 ];
 function graphemeWidth(g) {
   if (INVISIBLE.test(g)) return 0;
-  if (PICTOGRAPH.test(g) || g.includes("\uFE0F")) return 2;
+  if (EMOJI.test(g) || g.includes("\uFE0F")) return 2;
   const cp = g.codePointAt(0);
   return WIDE.some(([lo, hi]) => cp >= lo && cp <= hi) ? 2 : 1;
 }
@@ -22236,6 +22236,7 @@ function App2({
   const [filter, setFilter] = (0, import_react29.useState)("");
   const [typing, setTyping] = (0, import_react29.useState)(false);
   const [message, setMessage] = (0, import_react29.useState)("");
+  const [poolTop, setPoolTop] = (0, import_react29.useState)(0);
   const say = (m) => setMessage(safeLine(m));
   const loading = (0, import_react29.useRef)(false);
   const reload = () => {
@@ -22259,7 +22260,7 @@ function App2({
   const tasks = mode.kind === "pick-task" ? mode.parent.tasks : [];
   const selectedRow = mode.kind === "list" ? void 0 : mode.kind === "pool" ? all.find((r) => r.sessionId === mode.id) : void 0;
   const body = selectedRow ? poolLines(selectedRow).slice(1) : [];
-  const ids = mode.kind === "list" ? lines.map((l) => l.row.sessionId) : mode.kind === "pick-parent" ? parents.map((r) => r.sessionId) : mode.kind === "pool" ? body.map((_, i) => String(i)) : tasks.map((t) => t.id);
+  const ids = mode.kind === "list" ? lines.map((l) => l.row.sessionId) : mode.kind === "pick-parent" ? parents.map((r) => r.sessionId) : mode.kind === "pool" ? [] : tasks.map((t) => t.id);
   const size = ids.length;
   const found = selectedId === void 0 ? -1 : ids.indexOf(selectedId);
   const at = found >= 0 ? found : Math.min(cursor, Math.max(0, size - 1));
@@ -22273,6 +22274,7 @@ function App2({
     setMode(m);
     setCursor(0);
     setSelectedId(sel);
+    setPoolTop(0);
     setMessage("");
   };
   const quit = (code) => {
@@ -22285,7 +22287,9 @@ function App2({
   top.current = Math.max(0, Math.min(top.current, size - room));
   if (at < top.current) top.current = at;
   if (at >= top.current + room) top.current = at - room + 1;
-  const visible = (i) => i >= top.current && i < top.current + room;
+  const maxPoolTop = Math.max(0, body.length - room);
+  const shownTop = Math.min(poolTop, maxPoolTop);
+  const visible = (i) => mode.kind === "pool" ? i >= shownTop && i < shownTop + room : i >= top.current && i < top.current + room;
   use_input_default((input, key) => {
     if (key.ctrl && input === "c") return quit(130);
     if (typing) {
@@ -22301,6 +22305,8 @@ function App2({
       return;
     }
     if (input === "q") return quit(0);
+    if (mode.kind === "pool" && (key.downArrow || input === "j")) return setPoolTop(Math.min(shownTop + 1, maxPoolTop));
+    if (mode.kind === "pool" && (key.upArrow || input === "k")) return setPoolTop(Math.max(shownTop - 1, 0));
     if (key.downArrow || input === "j") return select(at + 1);
     if (key.upArrow || input === "k") return select(at - 1);
     if (input === "r") return void reload();
