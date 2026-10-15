@@ -1,7 +1,8 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { run } from '../src/cli.js'
+import { linkSessions } from '../src/link.js'
 import { newPool, plan } from '../src/model.js'
 import { readPool, writePool } from '../src/store.js'
 import { makeCtx, writeSession } from './helpers.js'
@@ -165,5 +166,33 @@ describe('orch link', () => {
       // a short query is never a prefix
       expect((await run(['link', 's-ab', 'Big Plan', 't1'], ctx)).stderr).toMatch(/no session matches/)
     })
+  })
+
+  it('fails and leaves the child alone when the parent pool vanishes after the pre-check', async () => {
+    let gone = false
+    const ctx = makeCtx({
+      // the first clock read in linkSessions comes right after its check of the parent
+      now: () => {
+        if (!gone) {
+          gone = true
+          rmSync(join(ctx.orchHome, 's-par.json'))
+        }
+        return 5000
+      },
+    })
+    writePool(ctx.orchHome, plan(newPool('s-par', '/r', 1), ['a'], 2))
+    await expect(linkSessions(ctx, 's-kid', 's-par', 't1')).rejects.toThrow(/the parent has no pool; rerun orch link/)
+    expect(readPool(ctx.orchHome, 's-kid')).toBeUndefined()
+  })
+
+  it('does not fall back to herdr when the name is ambiguous', async () => {
+    const ctx = makeCtx()
+    writeSession(ctx, { pid: 1, sessionId: 's-a', name: 'dup' })
+    writeSession(ctx, { pid: 2, sessionId: 's-b', name: 'dup' })
+    writePool(ctx.orchHome, plan(newPool('s-par', '/r', 1), ['a'], 2))
+    ctx.herdr.agents.push({ name: 'dup', paneId: 'w1:p1', status: 'idle', sessionId: 's-h' })
+    const out = await run(['link', 'dup', 's-par', 't1'], ctx)
+    expect(out.stderr).toMatch(/matches several/)
+    expect(readPool(ctx.orchHome, 's-h')).toBeUndefined()
   })
 })

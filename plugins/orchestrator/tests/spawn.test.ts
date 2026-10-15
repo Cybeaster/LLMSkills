@@ -50,7 +50,7 @@ describe('orch spawn-child', () => {
     parent(ctx)
     const out = await run(['spawn-child', 't2', '--name', 'go', '--cwd', '.', '--brief', 'brief.md'], ctx)
     expect(out.code).toBe(1)
-    expect(out.stderr).toMatch(/agent_not_ready.*trust this folder.*orch link go s-self t2/s)
+    expect(out.stderr).toMatch(/agent_not_ready.*trust this folder.*orch link go s-self t2.*herdr agent prompt w9:p1 /s)
 
     // any other failure still says how to link the child, without the trust hint
     ctx.herdr.startClaude = async () => {
@@ -156,7 +156,7 @@ describe('orch spawn-child', () => {
     }
     const out = await spawn(ctx)
     expect(out.stderr).toMatch(/orch link go s-self t2 --brief '[^']*brief\.md'/)
-    expect(out.stderr).toMatch(/herdr agent prompt go 'You are a child session of "Courses"/)
+    expect(out.stderr).toMatch(/herdr agent prompt w9:p1 'You are a child session of "Courses"/)
     expect(out.stderr).toMatch(/no id yet.*orch status --all/)
   })
 
@@ -184,7 +184,7 @@ describe('orch spawn-child', () => {
     writeFileSync(join(ctx.orchHome, 's-child.json'), '{broken')
     const out = await spawn(ctx)
     expect(out.code).toBe(1)
-    expect(out.stderr).toMatch(/linking failed.*orch link s-child s-self t2 --brief .*herdr agent prompt go /s)
+    expect(out.stderr).toMatch(/linking failed.*orch link 's-child' s-self t2 --brief .*herdr agent prompt go /s)
     expect(ctx.herdr.calls.some(c => c[0] === 'prompt')).toBe(false)
   })
 
@@ -200,5 +200,16 @@ describe('orch spawn-child', () => {
     expect(out.stderr).toMatch(/is linked under s-self t2.*herdr agent prompt go 'You are a child/s)
     expect(readPool(ctx.orchHome, 's-child')!.parent).toEqual({ sessionId: 's-self', taskId: 't2' })
     expect(readPool(ctx.orchHome, 's-self')!.tasks[1].children).toEqual(['s-child'])
+  })
+
+  it('strips control characters from the folder and brief paths it prints, still quoted', async () => {
+    const ctx = makeCtx()
+    parent(ctx)
+    const dir = 'a\x07b'
+    mkdirSync(join(ctx.cwd, dir))
+    writeFileSync(join(ctx.cwd, dir, 'brief.md'), 'x')
+    const out = await run(['spawn-child', 't2', '--name', 'go', '--cwd', dir, '--brief', `${dir}/brief.md`], ctx)
+    expect(out.stdout).not.toMatch(/[\x00-\x08\x0b-\x1f]/)
+    expect(out.stdout).toMatch(/cd '[^']*a b' && ORCH_PARENT=s-self ORCH_PARENT_TASK=t2 ORCH_BRIEF='[^']*a b\/brief\.md'/)
   })
 })
