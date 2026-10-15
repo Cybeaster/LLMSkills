@@ -1757,22 +1757,31 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
 `tests/herdr.test.ts`:
 
 ```ts
-import { readFileSync } from 'node:fs'
-import { describe, expect, it } from 'vitest'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
 import { OrchError } from '../src/errors.js'
-import { cliHerdr, type Run } from '../src/sources/herdr.js'
+import { cliHerdr, HerdrError, runHerdr, type Run } from '../src/sources/herdr.js'
 
 const listJson = readFileSync(new URL('./fixtures/herdr-agent-list.json', import.meta.url), 'utf8')
 
-function fakeRun(replies: Record<string, { code?: number; stdout?: string; stderr?: string }>) {
+type Reply = { code?: number; stdout?: string; stderr?: string; error?: string }
+
+function fakeRun(replies: Record<string, Reply>) {
   const calls: string[][] = []
-  const run: Run = async args => {
+  const timeouts: (number | undefined)[] = []
+  const run: Run = async (args, timeoutMs) => {
     calls.push(args)
+    timeouts.push(timeoutMs)
     const r = replies[args.slice(0, 2).join(' ')] ?? {}
-    return { code: r.code ?? 0, stdout: r.stdout ?? '', stderr: r.stderr ?? '' }
+    return { code: r.code ?? 0, stdout: r.stdout ?? '', stderr: r.stderr ?? '', error: r.error }
   }
-  return { run, calls }
+  return { run, calls, timeouts }
 }
+
+const agentOf = (session: unknown, status = 'idle') =>
+  JSON.stringify({ result: { agent: { agent_status: status, agent_session: session } } })
 
 describe('cliHerdr', () => {
   it('lists claude agents only', async () => {
@@ -1799,7 +1808,7 @@ describe('cliHerdr', () => {
   })
 
   it('reads a session id, or undefined when the agent is unknown', async () => {
-    const get = JSON.stringify({ result: { agent: { agent_status: 'idle', agent_session: { value: 's-new' } } } })
+    const get = agentOf({ kind: 'id', value: 's-new' })
     expect(await cliHerdr(fakeRun({ 'agent get': { stdout: get } }).run).sessionIdOf('go')).toBe('s-new')
     expect(await cliHerdr(fakeRun({ 'agent get': { code: 1 } }).run).sessionIdOf('go')).toBeUndefined()
   })
@@ -1819,62 +1828,445 @@ describe('cliHerdr', () => {
     expect(calls).toEqual([['agent', 'prompt', 'w1:p1', 'hello'], ['agent', 'focus', 'w1:p1']])
   })
 })
+
+describe('cliHerdr failures', () => {
+  // orch reply clears a flag only after prompt resolves, so a failed send must reject
+  it.each([
+    ['prompt', (h: ReturnType<typeof cliHerdr>) => h.prompt('w1:p1', 'hi')],
+    ['wait', (h: ReturnType<typeof cliHerdr>) => h.waitIdle('w1:p1', 5000)],
+    ['focus', (h: ReturnType<typeof cliHerdr>) => h.focus('w1:p1')],
+    ['start', (h: ReturnType<typeof cliHerdr>) => h.startClaude({ name: 'go', paneId: 'w1:p1', args: [] })],
+  ])('rejects with OrchError when agent %s exits non-zero', async (sub, call) => {
+    // agent get answers fine, so only the failing call itself can make the promise reject
+    const { run } = fakeRun({ [`agent ${sub}`]: { code: 1, stderr: 'nope' }, 'agent get': { stdout: agentOf(undefined) } })
+    const e = await call(cliHerdr(run)).catch(x => x)
+    expect(e).toBeInstanceOf(OrchError)
+    expect(e.message).toBe(`herdr agent ${sub} failed: nope`)
+  })
+
+  it('turns the JSON error form into a HerdrError with its code', async () => {
+    const stderr = JSON.stringify({ error: { code: 'agent_blocked', message: 'agent is waiting for input' } })
+    const e = await cliHerdr(fakeRun({ 'agent prompt': { code: 1, stderr } }).run).prompt('w1:p1', 'hi').catch(x => x)
+    expect(e).toBeInstanceOf(HerdrError)
+    expect(e).toBeInstanceOf(OrchError)
+    expect(e.message).toBe('herdr agent prompt failed: agent is waiting for input (agent_blocked)')
+    expect(e.herdrCode).toBe('agent_blocked')
+  })
+
+  it('reads the JSON error from stdout when stderr is empty', async () => {
+    const stdout = JSON.stringify({ error: { code: 'agent_not_ready', message: 'pane is not at a prompt' } })
+    const e = await cliHerdr(fakeRun({ 'agent start': { code: 1, stdout } }).run)
+      .startClaude({ name: 'go', paneId: 'w1:p1', args: [] })
+      .catch(x => x)
+    expect(e).toBeInstanceOf(HerdrError)
+    expect(e.herdrCode).toBe('agent_not_ready')
+    expect(e.message).toBe('herdr agent start failed: pane is not at a prompt (agent_not_ready)')
+  })
+
+  it('falls back to trimmed stderr, then stdout, then the exec error', async () => {
+    const msg = async (r: Reply) => {
+      const e = await cliHerdr(fakeRun({ 'agent list': { code: 1, ...r } }).run).list().catch(x => x)
+      expect(e).toBeInstanceOf(HerdrError)
+      expect(e.herdrCode).toBeUndefined()
+      return e.message
+    }
+    expect(await msg({ stderr: '  server not running\n', stdout: 'ignored', error: 'ignored too' })).toBe('herdr agent list failed: server not running')
+    expect(await msg({ stdout: ' only stdout \n', error: 'ignored' })).toBe('herdr agent list failed: only stdout')
+    expect(await msg({ error: 'spawn herdr ENOENT' })).toBe('herdr agent list failed: spawn herdr ENOENT')
+    // JSON that is not the error form is just text
+    expect(await msg({ stderr: '{"oops":1}' })).toBe('herdr agent list failed: {"oops":1}')
+  })
+
+  it.each([
+    ['output that is not JSON', 'herdr: oops'],
+    ['JSON null', 'null'],
+    ['a reply without result', '{}'],
+    ['a reply without an agents array', '{"result":{}}'],
+    ['agents that is not an array', '{"result":{"agents":{}}}'],
+  ])('rejects agent list with %s as an OrchError', async (_what, stdout) => {
+    await expect(cliHerdr(fakeRun({ 'agent list': { stdout } }).run).list()).rejects.toThrow(OrchError)
+  })
+
+  it('skips list entries that are not agents with a pane', async () => {
+    const stdout = JSON.stringify({ result: { agents: [null, 'x', { agent: 'claude' }, { agent: 'claude', pane_id: 'w1:p1', agent_status: 'idle' }] } })
+    const agents = await cliHerdr(fakeRun({ 'agent list': { stdout } }).run).list()
+    expect(agents.map(a => a.paneId)).toEqual(['w1:p1'])
+  })
+
+  it('rejects a tab create reply without a pane id, or without JSON', async () => {
+    const make = (stdout: string) => cliHerdr(fakeRun({ 'tab create': { stdout } }).run).createTab({ workspace: 'w1', cwd: '/r', label: 'go' })
+    await expect(make('{"result":{"root_pane":{}}}')).rejects.toThrow(OrchError)
+    await expect(make('{"result":{}}')).rejects.toThrow(OrchError)
+    await expect(make('not json')).rejects.toThrow(OrchError)
+  })
+
+  it('rejects a wait whose follow-up get has no status, or no JSON', async () => {
+    const wait = (stdout: string) => cliHerdr(fakeRun({ 'agent get': { stdout } }).run).waitIdle('w1:p1', 5000)
+    await expect(wait('{"result":{"agent":{}}}')).rejects.toThrow(OrchError)
+    await expect(wait('not json')).rejects.toThrow(OrchError)
+  })
+})
+
+describe('session ids', () => {
+  const claude = (agent_session: unknown) => ({ agent: 'claude', pane_id: 'w1:p1', agent_status: 'idle', agent_session })
+
+  it('only counts an agent_session of kind id', async () => {
+    const stdout = JSON.stringify({
+      result: { agents: [claude({ kind: 'path', value: '/x/s.jsonl' }), claude({ value: 's-nokind' }), claude({ kind: 'id', value: 's-ok' })] },
+    })
+    const agents = await cliHerdr(fakeRun({ 'agent list': { stdout } }).run).list()
+    expect(agents.map(a => a.sessionId)).toEqual([undefined, undefined, 's-ok'])
+  })
+
+  it('gives sessionIdOf undefined for a path kind, no kind, or an empty value', async () => {
+    const of = (s: unknown) => cliHerdr(fakeRun({ 'agent get': { stdout: agentOf(s) } }).run).sessionIdOf('go')
+    expect(await of({ kind: 'path', value: '/x/s.jsonl' })).toBeUndefined()
+    expect(await of({ value: 's-nokind' })).toBeUndefined()
+    expect(await of({ kind: 'id', value: '' })).toBeUndefined()
+    expect(await of(undefined)).toBeUndefined()
+  })
+
+  it('gives list an undefined sessionId for an empty id value', async () => {
+    const stdout = JSON.stringify({ result: { agents: [claude({ kind: 'id', value: '' })] } })
+    const agents = await cliHerdr(fakeRun({ 'agent list': { stdout } }).run).list()
+    expect(agents[0].sessionId).toBeUndefined()
+  })
+})
+
+describe('timeouts', () => {
+  it('bounds start and wait, and leaves every other call on the default', async () => {
+    const { run, calls, timeouts } = fakeRun({
+      'agent list': { stdout: listJson },
+      'tab create': { stdout: JSON.stringify({ result: { root_pane: { pane_id: 'w1:p9' } } }) },
+      'agent get': { stdout: agentOf({ kind: 'id', value: 's-1' }) },
+    })
+    const h = cliHerdr(run)
+    await h.list()
+    await h.focus('w1:p1')
+    await h.createTab({ workspace: 'w1', cwd: '/r', label: 'go' })
+    await h.startClaude({ name: 'go', paneId: 'w1:p9', args: [] })
+    await h.prompt('w1:p9', 'hi')
+    await h.waitIdle('w1:p9', 5000)
+    await h.sessionIdOf('go')
+    expect(calls.map((c, i) => [c.slice(0, 2).join(' '), timeouts[i]])).toEqual([
+      ['agent list', undefined],
+      ['agent focus', undefined],
+      ['tab create', undefined],
+      ['agent start', 75_000],
+      ['agent prompt', undefined],
+      ['agent wait', 15_000],
+      ['agent get', undefined],
+      ['agent get', undefined],
+    ])
+  })
+})
+
+describe('runHerdr', () => {
+  const savedPath = process.env.PATH
+  const dirs: string[] = []
+  afterEach(() => {
+    process.env.PATH = savedPath
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
+  })
+
+  // PATH points at a throwaway dir, so the real herdr is never reached
+  function fakeHerdr(script?: string) {
+    const dir = mkdtempSync(join(tmpdir(), 'fake-herdr-'))
+    dirs.push(dir)
+    if (script) {
+      writeFileSync(join(dir, 'herdr'), `#!/bin/sh\n${script}\n`)
+      chmodSync(join(dir, 'herdr'), 0o755)
+    }
+    process.env.PATH = `${dir}:/usr/bin:/bin`
+  }
+
+  it('hands back exit code, stdout and stderr', async () => {
+    fakeHerdr('echo "args: $*"; echo bad >&2; exit 3')
+    const r = await runHerdr(['agent', 'list'])
+    expect(r.code).toBe(3)
+    expect(r.stdout).toBe('args: agent list\n')
+    expect(r.stderr).toBe('bad\n')
+  })
+
+  it('reports why when the binary is missing', async () => {
+    fakeHerdr()
+    const r = await runHerdr(['agent', 'list'])
+    expect(r.code).not.toBe(0)
+    expect(r.error).toMatch(/ENOENT/)
+  })
+
+  it('kills a call that outlives its timeout and says so', async () => {
+    fakeHerdr('exec sleep 3')
+    const t0 = Date.now()
+    const r = await runHerdr(['agent', 'list'], 100)
+    expect(Date.now() - t0).toBeLessThan(2500)
+    expect(r.code).not.toBe(0)
+    expect(r.error).toBe('timed out after 100ms')
+  })
+})
 ```
 
 `tests/gh.test.ts`:
 
 ```ts
-import { describe, expect, it } from 'vitest'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, describe, expect, it } from 'vitest'
+import type { Check } from '../src/evidence.js'
 import { cliGh, type GhRun } from '../src/sources/gh.js'
 
+// bare PR and run numbers are only checked from a cwd that exists, so the fixtures need real directories
+const repoA = mkdtempSync(join(tmpdir(), 'gh-test-a-'))
+const repoB = mkdtempSync(join(tmpdir(), 'gh-test-b-'))
+afterAll(() => {
+  for (const d of [repoA, repoB]) rmSync(d, { recursive: true, force: true })
+})
+
+// a string is stdout as is, anything else is sent as JSON
 function fakeRun(stdout: unknown, code = 0) {
   const calls: string[][] = []
-  const run: GhRun = async args => {
+  const cwds: string[] = []
+  const run: GhRun = async (args, cwd) => {
     calls.push(args)
-    return { code, stdout: JSON.stringify(stdout) }
+    cwds.push(cwd)
+    return { code, stdout: typeof stdout === 'string' ? stdout : JSON.stringify(stdout) }
   }
-  return { run, calls }
+  return { run, calls, cwds }
 }
+
+const ci = (ref: string) => ({ kind: 'ci' as const, ref })
+const pr = (ref: string) => ({ kind: 'pr' as const, ref })
+const done = (conclusion: unknown) => ({ status: 'completed', conclusion })
 
 describe('cliGh', () => {
   it('reads a CI run from its URL', async () => {
     const { run, calls } = fakeRun({ status: 'completed', conclusion: 'failure' })
-    expect(await cliGh(run).check({ kind: 'ci', ref: 'https://github.com/o/r/actions/runs/77' }, '/r')).toBe('fail')
+    expect(await cliGh(run).check(ci('https://github.com/o/r/actions/runs/77'), repoA)).toBe('fail')
     expect(calls[0]).toEqual(['run', 'view', '77', '-R', 'o/r', '--json', 'status,conclusion'])
   })
 
+  it('reads a bare CI id from the repo in cwd', async () => {
+    const { run, calls, cwds } = fakeRun(done('success'))
+    expect(await cliGh(run).check(ci('77'), repoA)).toBe('pass')
+    expect(calls[0]).toEqual(['run', 'view', '77', '--json', 'status,conclusion'])
+    expect(cwds[0]).toBe(repoA)
+  })
+
   it('reports a running CI run as pending', async () => {
-    expect(await cliGh(fakeRun({ status: 'in_progress', conclusion: '' }).run).check({ kind: 'ci', ref: '77' }, '/r')).toBe('pending')
+    expect(await cliGh(fakeRun({ status: 'in_progress', conclusion: '' }).run).check(ci('77'), repoA)).toBe('pending')
+    expect(await cliGh(fakeRun({ status: 'queued', conclusion: null }).run).check(ci('77'), repoA)).toBe('pending')
+  })
+
+  it.each<[unknown, Check]>([
+    ['success', 'pass'],
+    ['skipped', 'pass'],
+    ['neutral', 'pass'],
+    ['failure', 'fail'],
+    ['cancelled', 'fail'],
+    ['timed_out', 'fail'],
+    ['startup_failure', 'fail'],
+    ['stale', 'unknown'],
+    ['something_new', 'unknown'],
+    ['', 'unknown'],
+    [null, 'unknown'],
+  ])('grades a completed CI run with conclusion %j as %s', async (conclusion, want) => {
+    expect(await cliGh(fakeRun(done(conclusion)).run).check(ci('77'), repoA)).toBe(want)
   })
 
   it('grades PRs by state and checks', async () => {
-    const pr = (o: unknown) => cliGh(fakeRun(o).run).check({ kind: 'pr', ref: '41' }, '/r')
-    expect(await pr({ state: 'MERGED', statusCheckRollup: [] })).toBe('pass')
-    expect(await pr({ state: 'CLOSED', statusCheckRollup: [] })).toBe('fail')
-    expect(await pr({ state: 'OPEN', statusCheckRollup: [{ conclusion: 'FAILURE' }] })).toBe('fail')
-    expect(await pr({ state: 'OPEN', statusCheckRollup: [{ conclusion: 'SUCCESS' }, { conclusion: 'SKIPPED' }] })).toBe('pass')
-    expect(await pr({ state: 'OPEN', statusCheckRollup: [{ status: 'IN_PROGRESS' }] })).toBe('pending')
+    const grade = (o: unknown) => cliGh(fakeRun(o).run).check(pr('41'), repoA)
+    expect(await grade({ state: 'MERGED', statusCheckRollup: [] })).toBe('pass')
+    expect(await grade({ state: 'CLOSED', statusCheckRollup: [] })).toBe('fail')
+    expect(await grade({ state: 'OPEN', statusCheckRollup: [{ conclusion: 'FAILURE' }] })).toBe('fail')
+    expect(await grade({ state: 'OPEN', statusCheckRollup: [{ conclusion: 'STARTUP_FAILURE' }] })).toBe('fail')
+    expect(await grade({ state: 'OPEN', statusCheckRollup: [{ conclusion: 'SUCCESS' }, { conclusion: 'SKIPPED' }] })).toBe('pass')
+    expect(await grade({ state: 'OPEN', statusCheckRollup: [{ status: 'IN_PROGRESS' }] })).toBe('pending')
+  })
+
+  it('reads commit statuses by their state', async () => {
+    const grade = (state: string) => cliGh(fakeRun({ state: 'OPEN', statusCheckRollup: [{ state }] }).run).check(pr('41'), repoA)
+    expect(await grade('ERROR')).toBe('fail')
+    expect(await grade('FAILURE')).toBe('fail')
+    expect(await grade('PENDING')).toBe('pending')
+    expect(await grade('SUCCESS')).toBe('pass')
+  })
+
+  it('keeps an open PR without checks pending', async () => {
+    expect(await cliGh(fakeRun({ state: 'OPEN', statusCheckRollup: [] }).run).check(pr('41'), repoA)).toBe('pending')
+    expect(await cliGh(fakeRun({ state: 'OPEN', statusCheckRollup: null }).run).check(pr('41'), repoA)).toBe('pending')
   })
 
   it('says unknown when gh fails and ignores other kinds', async () => {
-    expect(await cliGh(fakeRun({}, 1).run).check({ kind: 'ci', ref: '1' }, '/r')).toBe('unknown')
-    expect(await cliGh(fakeRun({}).run).check({ kind: 'commit', ref: 'a' }, '/r')).toBe('unknown')
+    expect(await cliGh(fakeRun({}, 1).run).check(ci('1'), repoA)).toBe('unknown')
+    expect(await cliGh(fakeRun({}, 1).run).check(pr('1'), repoA)).toBe('unknown')
+    const other = fakeRun({})
+    const gh = cliGh(other.run)
+    expect(await gh.check({ kind: 'commit', ref: 'a' }, repoA)).toBe('unknown')
+    expect(await gh.check({ kind: 'note', ref: 'a' }, repoA)).toBe('unknown')
+    expect(other.calls).toHaveLength(0)
   })
 
+  it('says unknown when gh prints something that is not JSON', async () => {
+    expect(await cliGh(fakeRun('HTTP 502 bad gateway').run).check(pr('41'), repoA)).toBe('unknown')
+    expect(await cliGh(fakeRun('').run).check(ci('77'), repoA)).toBe('unknown')
+  })
+
+  it('says unknown when the runner itself rejects', async () => {
+    const run: GhRun = async () => {
+      throw new Error('spawn gh ENOENT')
+    }
+    expect(await cliGh(run).check(ci('77'), repoA)).toBe('unknown')
+  })
+})
+
+describe('cliGh cache', () => {
+  const passed = done('success')
+
   it('caches answers for 60 s per repo', async () => {
-    const { run, calls } = fakeRun({ status: 'completed', conclusion: 'success' })
+    const { run, calls } = fakeRun(passed)
     let now = 0
     const gh = cliGh(run, () => now)
-    const ev = { kind: 'ci' as const, ref: '1' }
-    await gh.check(ev, '/r')
+    const ev = ci('1')
+    await gh.check(ev, repoA)
     now = 59_000
-    await gh.check(ev, '/r')
+    await gh.check(ev, repoA)
     expect(calls).toHaveLength(1)
     now = 61_000
-    await gh.check(ev, '/r')
+    await gh.check(ev, repoA)
     expect(calls).toHaveLength(2)
-    await gh.check(ev, '/other')
+    await gh.check(ev, repoB)
     expect(calls).toHaveLength(3)
+  })
+
+  it('asks again about an unknown after 15 s', async () => {
+    const calls: string[][] = []
+    let reply = { code: 1, stdout: '' }
+    const run: GhRun = async args => {
+      calls.push(args)
+      return reply
+    }
+    let now = 0
+    const gh = cliGh(run, () => now)
+    expect(await gh.check(ci('1'), repoA)).toBe('unknown')
+    reply = { code: 0, stdout: JSON.stringify(passed) }
+    now = 14_000
+    expect(await gh.check(ci('1'), repoA)).toBe('unknown')
+    expect(calls).toHaveLength(1)
+    now = 16_000
+    expect(await gh.check(ci('1'), repoA)).toBe('pass')
+    expect(calls).toHaveLength(2)
+  })
+
+  it('keeps a pass for 60 s, not the 15 s an unknown gets', async () => {
+    const { run, calls } = fakeRun(passed)
+    let now = 0
+    const gh = cliGh(run, () => now)
+    await gh.check(ci('1'), repoA)
+    now = 20_000
+    await gh.check(ci('1'), repoA)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('runs gh once for two checks of the same key at the same time', async () => {
+    const { run, calls } = fakeRun(passed)
+    const gh = cliGh(run)
+    const got = await Promise.all([gh.check(ci('1'), repoA), gh.check(ci('1'), repoA)])
+    expect(got).toEqual(['pass', 'pass'])
+    expect(calls).toHaveLength(1)
+  })
+
+  it('does not share a check across repos while it is in flight', async () => {
+    const { run, calls } = fakeRun(passed)
+    const gh = cliGh(run)
+    await Promise.all([gh.check(ci('1'), repoA), gh.check(ci('1'), repoB)])
+    expect(calls).toHaveLength(2)
+  })
+
+  it('lets a late asker join a check that is still in flight', async () => {
+    const calls: string[][] = []
+    let open!: () => void
+    const gate = new Promise<void>(r => (open = r))
+    const run: GhRun = async args => {
+      calls.push(args)
+      await gate
+      return { code: 0, stdout: JSON.stringify(passed) }
+    }
+    let now = 0
+    const gh = cliGh(run, () => now)
+    const first = gh.check(ci('1'), repoA)
+    now = 1_000_000
+    const second = gh.check(ci('1'), repoA)
+    open()
+    expect(await Promise.all([first, second])).toEqual(['pass', 'pass'])
+    expect(calls).toHaveLength(1)
+  })
+
+  it('measures freshness from when the answer arrived, not from when gh was asked', async () => {
+    const calls: string[][] = []
+    let open!: () => void
+    const gate = new Promise<void>(r => (open = r))
+    let first = true
+    const run: GhRun = async args => {
+      calls.push(args)
+      if (first) {
+        first = false
+        await gate
+      }
+      return { code: 0, stdout: JSON.stringify(passed) }
+    }
+    let now = 0
+    const gh = cliGh(run, () => now)
+    const pending = gh.check(ci('1'), repoA)
+    now = 50_000
+    open()
+    await pending
+    now = 100_000 // 100 s after the ask, but only 50 s after the answer
+    await gh.check(ci('1'), repoA)
+    expect(calls).toHaveLength(1)
+    now = 111_000
+    await gh.check(ci('1'), repoA)
+    expect(calls).toHaveLength(2)
+  })
+
+  it('turns a rejection into unknown for everyone waiting, and asks again after 15 s', async () => {
+    let calls = 0
+    const run: GhRun = async () => {
+      calls++
+      throw new Error('boom')
+    }
+    let now = 0
+    const gh = cliGh(run, () => now)
+    expect(await Promise.all([gh.check(ci('1'), repoA), gh.check(ci('1'), repoA)])).toEqual(['unknown', 'unknown'])
+    expect(calls).toBe(1)
+    now = 16_000
+    expect(await gh.check(ci('1'), repoA)).toBe('unknown')
+    expect(calls).toBe(2)
+  })
+})
+
+describe('cliGh when the cwd is gone', () => {
+  const gone = [join(tmpdir(), 'orch-gh-test-no-such-dir'), '']
+
+  it.each(gone)('runs a URL ref from an existing directory, not orch\'s own (cwd %j)', async cwd => {
+    const ciRun = fakeRun(done('success'))
+    expect(await cliGh(ciRun.run).check(ci('https://github.com/o/r/actions/runs/77'), cwd)).toBe('pass')
+    expect(ciRun.calls).toEqual([['run', 'view', '77', '-R', 'o/r', '--json', 'status,conclusion']])
+    expect(ciRun.cwds[0]).toBe(tmpdir())
+    expect(existsSync(ciRun.cwds[0])).toBe(true)
+
+    const prRun = fakeRun({ state: 'MERGED', statusCheckRollup: [] })
+    expect(await cliGh(prRun.run).check(pr('https://github.com/o/r/pull/41'), cwd)).toBe('pass')
+    expect(prRun.calls).toEqual([['pr', 'view', 'https://github.com/o/r/pull/41', '--json', 'state,statusCheckRollup']])
+    expect(prRun.cwds[0]).toBe(tmpdir())
+  })
+
+  it.each(gone)('says unknown for a bare number without running gh (cwd %j)', async cwd => {
+    const { run, calls } = fakeRun(done('success'))
+    const gh = cliGh(run)
+    expect(await gh.check(ci('77'), cwd)).toBe('unknown')
+    expect(await gh.check(pr('41'), cwd)).toBe('unknown')
+    expect(calls).toHaveLength(0)
   })
 })
 ```
@@ -1904,66 +2296,117 @@ export interface Herdr {
   prompt(target: string, text: string): Promise<void>
 }
 
-export type Run = (args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>
+export type Run = (args: string[], timeoutMs?: number) => Promise<{ code: number; stdout: string; stderr: string; error?: string }>
 
-export const runHerdr: Run = args =>
-  new Promise(resolve => {
-    execFile('herdr', args, { timeout: 15 * 60_000, maxBuffer: 16 << 20 }, (err, stdout, stderr) => {
-      const code = err ? (typeof (err as { code?: unknown }).code === 'number' ? (err as { code: number }).code : 127) : 0
-      resolve({ code, stdout: String(stdout), stderr: String(stderr) })
+// herdr failed. herdrCode is the code from its {error:{code,message}} reply (agent_not_ready, agent_blocked, ...), when it sent one
+export class HerdrError extends OrchError {
+  override name = 'HerdrError'
+
+  constructor(message: string, readonly herdrCode?: string) {
+    super(message)
+  }
+}
+
+const DEFAULT_TIMEOUT_MS = 10_000
+const START_TIMEOUT_MS = 75_000 // herdr's own --timeout 60000 plus slack
+const WAIT_SLACK_MS = 10_000
+
+export const runHerdr: Run = (args, timeoutMs) => {
+  const limit = timeoutMs ?? DEFAULT_TIMEOUT_MS
+  return new Promise(resolve => {
+    execFile('herdr', args, { timeout: limit, maxBuffer: 16 << 20 }, (err, stdout, stderr) => {
+      // a kill by the timeout has no exit code and killed set; a maxBuffer kill has a string code
+      const timedOut = err?.killed === true && typeof err.code !== 'string'
+      const code = err ? (typeof err.code === 'number' ? err.code : 127) : 0
+      const error = err ? (timedOut ? `timed out after ${limit}ms` : err.message) : undefined
+      resolve({ code, stdout: String(stdout), stderr: String(stderr), error })
     })
   })
+}
 
-type RawAgent = {
-  agent: string
-  name?: string
-  pane_id: string
-  agent_status: string
-  agent_session?: { value?: string }
-  terminal_title_stripped?: string
+const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
+const str = (v: unknown) => (typeof v === 'string' ? v : undefined)
+const agentIn = (reply: unknown) => (isObj(reply) && isObj(reply.result) && isObj(reply.result.agent) ? reply.result.agent : undefined)
+const snippet = (v: unknown) => JSON.stringify(v).slice(0, 200)
+// only a session of kind id is a Claude sessionId; a path kind points at a transcript file instead
+const sessionIdIn = (s: unknown) => (isObj(s) && s.kind === 'id' && typeof s.value === 'string' && s.value ? s.value : undefined)
+
+function herdrErrorIn(text: string): { code?: string; message?: string } | undefined {
+  try {
+    const e: unknown = JSON.parse(text)?.error
+    if (isObj(e) && (typeof e.code === 'string' || typeof e.message === 'string')) return { code: str(e.code), message: str(e.message) }
+  } catch {
+    // not JSON, so it is plain text
+  }
+  return undefined
+}
+
+function failure(args: string[], r: { stdout: string; stderr: string; error?: string }): HerdrError {
+  const what = `herdr ${args.slice(0, 2).join(' ')} failed`
+  const e = herdrErrorIn(r.stderr) ?? herdrErrorIn(r.stdout)
+  if (e) return new HerdrError(`${what}: ${e.message ?? e.code}${e.message && e.code ? ` (${e.code})` : ''}`, e.code)
+  return new HerdrError(`${what}: ${r.stderr.trim() || r.stdout.trim() || (r.error ?? '').trim()}`)
 }
 
 export function cliHerdr(run: Run = runHerdr): Herdr {
-  const ok = async (args: string[]) => {
-    const r = await run(args)
-    if (r.code !== 0) throw new OrchError(`herdr ${args.slice(0, 2).join(' ')} failed: ${(r.stderr || r.stdout).trim()}`)
+  const ok = async (args: string[], timeoutMs?: number) => {
+    const r = await run(args, timeoutMs)
+    if (r.code !== 0) throw failure(args, r)
     return r.stdout
   }
-  const json = async (args: string[]) => JSON.parse(await ok(args))
+  const json = async (args: string[], timeoutMs?: number): Promise<unknown> => {
+    const out = await ok(args, timeoutMs)
+    try {
+      return JSON.parse(out)
+    } catch {
+      throw new HerdrError(`herdr ${args.slice(0, 2).join(' ')} did not answer with JSON: ${out.trim().slice(0, 200)}`)
+    }
+  }
 
   return {
     async list() {
       const o = await json(['agent', 'list'])
-      return (o.result.agents as RawAgent[])
-        .filter(a => a.agent === 'claude')
-        .map(a => ({ name: a.name, paneId: a.pane_id, status: a.agent_status, sessionId: a.agent_session?.value, title: a.terminal_title_stripped }))
+      const agents = isObj(o) && isObj(o.result) ? o.result.agents : undefined
+      if (!Array.isArray(agents)) throw new HerdrError(`unexpected herdr agent list reply: ${snippet(o)}`)
+      return agents
+        .filter((a): a is Record<string, unknown> & { pane_id: string } => isObj(a) && a.agent === 'claude' && typeof a.pane_id === 'string')
+        .map(a => ({
+          name: str(a.name),
+          paneId: a.pane_id,
+          status: str(a.agent_status) ?? 'unknown',
+          sessionId: sessionIdIn(a.agent_session),
+          title: str(a.terminal_title_stripped),
+        }))
     },
     async focus(target) {
       await ok(['agent', 'focus', target])
     },
     async createTab({ workspace, cwd, label }) {
       const o = await json(['tab', 'create', '--workspace', workspace, '--cwd', cwd, '--label', label, '--no-focus'])
-      const paneId = o.result?.root_pane?.pane_id
-      if (!paneId) throw new OrchError(`unexpected herdr tab create reply: ${JSON.stringify(o)}`)
+      const root = isObj(o) && isObj(o.result) ? o.result.root_pane : undefined
+      const paneId = isObj(root) ? str(root.pane_id) : undefined
+      if (!paneId) throw new HerdrError(`unexpected herdr tab create reply: ${snippet(o)}`)
       return { paneId }
     },
     async startClaude({ name, paneId, args }) {
-      await ok(['agent', 'start', name, '--kind', 'claude', '--pane', paneId, '--timeout', '60000', '--', ...args])
+      await ok(['agent', 'start', name, '--kind', 'claude', '--pane', paneId, '--timeout', '60000', '--', ...args], START_TIMEOUT_MS)
     },
     async sessionIdOf(name) {
       try {
-        const o = await json(['agent', 'get', name])
-        return o.result?.agent?.agent_session?.value || undefined
+        return sessionIdIn(agentIn(await json(['agent', 'get', name]))?.agent_session)
       } catch {
         return undefined
       }
     },
     async waitIdle(target, timeoutMs) {
-      await ok(['agent', 'wait', target, '--until', 'idle', '--until', 'done', '--until', 'blocked', '--timeout', String(timeoutMs)])
+      await ok(['agent', 'wait', target, '--until', 'idle', '--until', 'done', '--until', 'blocked', '--timeout', String(timeoutMs)], timeoutMs + WAIT_SLACK_MS)
       const o = await json(['agent', 'get', target])
-      return o.result.agent.agent_status
+      const status = str(agentIn(o)?.agent_status)
+      if (!status) throw new HerdrError(`unexpected herdr agent get reply: ${snippet(o)}`)
+      return status
     },
     async prompt(target, text) {
+      // no --wait; don't retry a failure, herdr says a timeout does not prove the prompt was not delivered
       await ok(['agent', 'prompt', target, text])
     },
   }
@@ -1974,6 +2417,8 @@ export function cliHerdr(run: Run = runHerdr): Herdr {
 
 ```ts
 import { execFile } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { checkKey, type Check } from '../evidence.js'
 import type { Evidence } from '../model.js'
 
@@ -1988,8 +2433,11 @@ const runGh: GhRun = (args, cwd) =>
     execFile('gh', args, { cwd, timeout: 20_000 }, (err, stdout) => resolve({ code: err ? 1 : 0, stdout: String(stdout) }))
   })
 
-const FAILED = ['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED']
+const FAILED = ['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE']
 const PASSED = ['SUCCESS', 'NEUTRAL', 'SKIPPED']
+
+const ANSWER_TTL_MS = 60_000
+const UNKNOWN_TTL_MS = 15_000
 
 async function ciCheck(run: GhRun, ref: string, cwd: string): Promise<Check> {
   const m = ref.match(/github\.com\/([^/]+\/[^/]+)\/actions\/runs\/(\d+)/)
@@ -1998,7 +2446,8 @@ async function ciCheck(run: GhRun, ref: string, cwd: string): Promise<Check> {
   if (r.code !== 0) return 'unknown'
   const o = JSON.parse(r.stdout)
   if (o.status !== 'completed') return 'pending'
-  return o.conclusion === 'success' ? 'pass' : 'fail'
+  const c = String(o.conclusion ?? '').toUpperCase()
+  return PASSED.includes(c) ? 'pass' : FAILED.includes(c) ? 'fail' : 'unknown'
 }
 
 async function prCheck(run: GhRun, ref: string, cwd: string): Promise<Check> {
@@ -2013,22 +2462,43 @@ async function prCheck(run: GhRun, ref: string, cwd: string): Promise<Check> {
   return 'pending'
 }
 
+// A finished child's worktree is deleted, and gh must never fall back to orch's own cwd:
+// a URL names its repo, so it runs from the temp dir; a bare number means nothing without its repo.
+function runDir(ref: string, cwd: string): string | undefined {
+  if (cwd && existsSync(cwd)) return cwd
+  return /^https?:\/\//i.test(ref) ? tmpdir() : undefined
+}
+
+async function ask(run: GhRun, ev: Evidence, cwd: string): Promise<Check> {
+  const dir = runDir(ev.ref, cwd)
+  if (dir === undefined) return 'unknown'
+  return ev.kind === 'ci' ? ciCheck(run, ev.ref, dir) : prCheck(run, ev.ref, dir)
+}
+
+type Entry = { promise: Promise<Check>; value?: Check; arrivedAt?: number }
+
 export function cliGh(run: GhRun = runGh, now: () => number = Date.now): Gh {
-  const cache = new Map<string, { at: number; value: Check }>()
+  // the promise is cached, not the answer, so two checks of one key while gh runs spawn it once
+  const cache = new Map<string, Entry>()
   return {
     async check(ev, cwd) {
       if (ev.kind !== 'ci' && ev.kind !== 'pr') return 'unknown'
       const key = checkKey(ev, cwd)
       const hit = cache.get(key)
-      if (hit && now() - hit.at < 60_000) return hit.value
-      let value: Check
-      try {
-        value = ev.kind === 'ci' ? await ciCheck(run, ev.ref, cwd) : await prCheck(run, ev.ref, cwd)
-      } catch {
-        value = 'unknown'
+      if (hit && (hit.arrivedAt === undefined || now() - hit.arrivedAt < (hit.value === 'unknown' ? UNKNOWN_TTL_MS : ANSWER_TTL_MS))) {
+        return hit.promise
       }
-      cache.set(key, { at: now(), value })
-      return value
+      const entry: Entry = {
+        promise: ask(run, ev, cwd)
+          .catch((): Check => 'unknown')
+          .then(value => {
+            entry.value = value
+            entry.arrivedAt = now()
+            return value
+          }),
+      }
+      cache.set(key, entry)
+      return entry.promise
     },
   }
 }
@@ -3323,10 +3793,11 @@ describe('orch link', () => {
   })
 
   it('counts the parent linking a child under its own task as its own write', async () => {
-    const parents = new Map([[4242, 1]])
+    // no CLAUDE_SESSION_ID: orch (pid 4242) finds the parent Claude process (pid 11) by walking up
+    const parents = new Map([[4242, 11]])
     const ctx = makeCtx({ env: {}, ppidOf: pid => parents.get(pid) })
-    writeSession(ctx, { pid: 1, sessionId: 's-par', name: 'courses' })
-    writeSession(ctx, { pid: 2, sessionId: 's-kid', name: 'kid' })
+    writeSession(ctx, { pid: 11, sessionId: 's-par', name: 'courses' })
+    writeSession(ctx, { pid: 12, sessionId: 's-kid', name: 'kid' })
     writePool(ctx.orchHome, plan(newPool('s-par', '/r', 1), ['fan out'], 2))
     await run(['link', 'kid', 'courses', 't1'], ctx)
     expect(readPool(ctx.orchHome, 's-par')!.touchedAt).toBeGreaterThan(1000)
@@ -3353,6 +3824,7 @@ import { describe, expect, it } from 'vitest'
 import { run } from '../src/cli.js'
 import { OrchError } from '../src/errors.js'
 import { newPool, plan } from '../src/model.js'
+import { HerdrError } from '../src/sources/herdr.js'
 import { readPool, writePool } from '../src/store.js'
 import { makeCtx, type TestCtx } from './helpers.js'
 
@@ -3393,12 +3865,20 @@ describe('orch spawn-child', () => {
     const ctx = makeCtx()
     Object.assign(ctx.env, { HERDR_ENV: '1', HERDR_WORKSPACE_ID: 'w1' })
     ctx.herdr.startClaude = async () => {
-      throw new OrchError('herdr agent start failed: agent_not_ready')
+      throw new HerdrError('herdr agent start failed: agent not ready (agent_not_ready)', 'agent_not_ready')
     }
     parent(ctx)
     const out = await run(['spawn-child', 't2', '--name', 'go', '--cwd', '.', '--brief', 'brief.md'], ctx)
     expect(out.code).toBe(1)
     expect(out.stderr).toMatch(/agent_not_ready.*trust this folder.*orch link go s-self t2/s)
+
+    // any other failure still says how to link the child, without the trust hint
+    ctx.herdr.startClaude = async () => {
+      throw new OrchError('herdr agent start failed: name taken')
+    }
+    const other = await run(['spawn-child', 't2', '--name', 'go2', '--cwd', '.', '--brief', 'brief.md'], ctx)
+    expect(other.stderr).toMatch(/name taken.*orch link go2 s-self t2/s)
+    expect(other.stderr).not.toMatch(/trust this folder/)
   })
 
   it('needs the brief to exist and the task to be real', async () => {
@@ -3471,6 +3951,7 @@ import { OrchError } from './errors.js'
 import { linkSessions } from './link.js'
 import { ok, type Out } from './out.js'
 import { resolveSelf } from './self.js'
+import { HerdrError } from './sources/herdr.js'
 import { readPool } from './store.js'
 
 export type SpawnOptions = { taskId: string; name: string; cwd: string; brief: string; prompt?: string }
@@ -3511,9 +3992,11 @@ export async function spawnChild(ctx: Ctx, o: SpawnOptions): Promise<Out> {
   } catch (e) {
     // Observed in the Task 0 spike: in a folder Claude has never opened, the new session stops at
     // "Do you trust this folder?" and herdr reports agent_not_ready.
+    const trust = e instanceof HerdrError && e.herdrCode === 'agent_not_ready'
     throw new OrchError(
       `${name} did not become ready in ${paneId} (${e instanceof Error ? e.message : String(e)}). ` +
-        `If that pane asks "Do you trust this folder?", ${cwd} has never been opened in Claude: answer it there, then run: orch link ${name} ${parentId} ${task.id}`,
+        (trust ? `If that pane asks "Do you trust this folder?", ${cwd} has never been opened in Claude: answer it there, then run: ` : 'Once it runs, link it: ') +
+        `orch link ${name} ${parentId} ${task.id}`,
     )
   }
   let childId: string | undefined
@@ -3607,6 +4090,7 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
 import { describe, expect, it } from 'vitest'
 import { run } from '../src/cli.js'
 import { askTask, newPool, plan } from '../src/model.js'
+import { HerdrError } from '../src/sources/herdr.js'
 import { readPool, writePool } from '../src/store.js'
 import { makeCtx, writeSession, type TestCtx } from './helpers.js'
 
@@ -3627,6 +4111,18 @@ describe('orch reply', () => {
       ['prompt', 'p-course-go', '[orch reply to: "Strict or lenient?"] strict'],
     ])
     expect(readPool(ctx.orchHome, 's-go')!.tasks[0].needsInput).toBeUndefined()
+  })
+
+  it('keeps the question open when herdr refuses the prompt', async () => {
+    const ctx = makeCtx()
+    asking(ctx, 's-go', 'course-go', true)
+    ctx.herdr.prompt = async () => {
+      throw new HerdrError('herdr agent prompt failed: agent is blocked (agent_blocked)', 'agent_blocked')
+    }
+    const out = await run(['reply', 'course-go', 'strict'], ctx)
+    expect(out.code).toBe(1)
+    expect(out.stderr).toMatch(/permission prompt/)
+    expect(readPool(ctx.orchHome, 's-go')!.tasks[0].needsInput).toBe('Strict or lenient?')
   })
 
   it('hands sessions outside herdr back to /orch with exit 3', async () => {
@@ -3677,6 +4173,7 @@ import type { Ctx } from './ctx.js'
 import { OrchError } from './errors.js'
 import { clearQuestions } from './model.js'
 import { ok, type Out } from './out.js'
+import { HerdrError } from './sources/herdr.js'
 import { readPool, updateIfExists } from './store.js'
 import { resolveTarget } from './targets.js'
 
@@ -3696,9 +4193,14 @@ export async function reply(ctx: Ctx, query: string, text: string | undefined, m
       // Not in herdr: /orch delivers it with SendMessage, then runs orch reply --mark-only.
       return { code: EXIT_SENDMESSAGE, stdout: `${JSON.stringify({ route: 'sendmessage', to: row.name, text: message })}\n`, stderr: '' }
     }
-    const state = await ctx.herdr.waitIdle(row.paneId, 10 * 60_000)
-    if (state === 'blocked') throw new OrchError(`${row.name} is waiting on a permission prompt; answer that in its pane first`)
-    await ctx.herdr.prompt(row.paneId, message)
+    const blocked = new OrchError(`${row.name} is waiting on a permission prompt; answer that in its pane first`)
+    if ((await ctx.herdr.waitIdle(row.paneId, 10 * 60_000)) === 'blocked') throw blocked
+    try {
+      await ctx.herdr.prompt(row.paneId, message)
+    } catch (e) {
+      // the agent can block between the wait and the prompt; herdr then refuses with agent_blocked
+      throw e instanceof HerdrError && e.herdrCode === 'agent_blocked' ? blocked : e
+    }
   }
   await updateIfExists(ctx.orchHome, row.sessionId, p => clearQuestions(p, ctx.now(), task.id) ?? p)
   return ok(`answered ${row.name} ${task.id}\n`)
@@ -3886,7 +4388,7 @@ Expected: FAIL, `Cannot find module '../src/tui/App.js'`.
 
 ```tsx
 import { Box, Text, useApp, useInput } from 'ink'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { flatten, header, listLine, poolLines, shortCwd } from '../format.js'
 import type { Row } from '../overview.js'
 
@@ -3917,7 +4419,18 @@ export function App({ initial, actions, interval = 3000 }: { initial: Row[]; act
   const [typing, setTyping] = useState(false)
   const [message, setMessage] = useState('')
 
-  const reload = () => actions.load().then(setRows, e => setMessage(`refresh failed: ${e}`))
+  // One refresh at a time: a slow herdr or gh call must not stack up a new one every tick.
+  const loading = useRef(false)
+  const reload = () => {
+    if (loading.current) return
+    loading.current = true
+    actions
+      .load()
+      .then(setRows, e => setMessage(`refresh failed: ${e}`))
+      .finally(() => {
+        loading.current = false
+      })
+  }
   useEffect(() => {
     if (!interval) return
     const t = setInterval(reload, interval)
