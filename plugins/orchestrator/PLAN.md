@@ -3619,9 +3619,14 @@ describe('orch plan / task / ask / title', () => {
   it('finds its session through the parent pid chain', async () => {
     const parents = new Map([[4242, 300], [300, 77]])
     const ctx = makeCtx({ env: {}, ppidOf: pid => parents.get(pid) })
+    // other live sessions on both sides, so only the pid chain can pick s-77
+    writeSession(ctx, { pid: 76, sessionId: 's-76' })
     writeSession(ctx, { pid: 77, sessionId: 's-77' })
+    writeSession(ctx, { pid: 78, sessionId: 's-78' })
     await run(['plan', 'a'], ctx)
     expect(readPool(ctx.orchHome, 's-77')).toBeDefined()
+    expect(readPool(ctx.orchHome, 's-76')).toBeUndefined()
+    expect(readPool(ctx.orchHome, 's-78')).toBeUndefined()
   })
 
   it('fails clearly outside a Claude session', async () => {
