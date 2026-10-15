@@ -3819,13 +3819,24 @@ describe('orch task done --evidence', () => {
     expect(ctx.exec.calls).toEqual([])
   })
 
-  it('refuses a command that timed out and says how to prove long work', async () => {
-    const ctx = makeCtx({ exec: fakeExec(() => ({ code: 1, out: 'building…\n', signal: 'SIGTERM', timedOut: true })) })
+  it('refuses a command that timed out, shows what it printed and says how to prove long work', async () => {
+    const ctx = makeCtx({ exec: fakeExec(() => ({ code: 1, out: 'building…\nwaiting for lock\n', signal: 'SIGTERM', timedOut: true })) })
     await run(['plan', 'a'], ctx)
     const out = await run(['task', 'done', 't1', '--evidence', 'cmd:make all'], ctx)
     expect(out.code).toBe(1)
-    expect(out.stderr).toBe(`orch: refused: \`make all\` timed out after 110 s in ${ctx.cwd}, so t1 stays open; run long commands yourself and tick with commit:, ci: or note:\n`)
+    expect(out.stderr).toBe(`orch: refused: \`make all\` timed out after 110 s in ${ctx.cwd}, so t1 stays open; run long commands yourself and tick with commit:, ci: or note:\nbuilding…\nwaiting for lock\n`)
     expect(readPool(ctx.orchHome, 's-self')!.tasks[0].status).toBe('pending')
+  })
+
+  it('leaves no blank line when a refused command printed nothing', async () => {
+    const ctx = makeCtx({ exec: fakeExec(() => ({ code: 1, out: '', timedOut: true })) })
+    await run(['plan', 'a'], ctx)
+    const out = await run(['task', 'done', 't1', '--evidence', 'cmd:make all'], ctx)
+    expect(out.stderr).toMatch(/or note:\n$/)
+    expect(out.stderr).not.toMatch(/\n\n/)
+    const quiet = makeCtx({ exec: fakeExec(() => ({ code: 2, out: '' })) })
+    await run(['plan', 'a'], quiet)
+    expect((await run(['task', 'done', 't1', '--evidence', 'cmd:true'], quiet)).stderr).toMatch(/stays open\n$/)
   })
 
   it('names the signal that killed the command instead of calling it an exit', async () => {
@@ -3837,16 +3848,22 @@ describe('orch task done --evidence', () => {
     expect(out.stderr).not.toMatch(/exited/)
   })
 
-  it('shows a cleaned tail of a failing command: no control characters, 20 lines, about 4 KB', async () => {
+  it('shows a cleaned tail of a failing command: no escape sequences or control characters, 20 lines, about 4 KB', async () => {
     const lines = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`).join('\n')
-    const dirty = makeCtx({ exec: fakeExec(() => ({ code: 1, out: `${lines}\nprogress 1\rprogress 2\r\n\x1b]0;evil\x07tab\there\x00\x7f\n` })) })
+    const dirty = makeCtx({
+      exec: fakeExec(() => ({
+        code: 1,
+        // a title (OSC ended by BEL), a colour (CSI), a hyperlink (OSC ended by ESC \), a tab, NUL and DEL
+        out: `${lines}\nprogress 1\rprogress 2\r\n\x1b]0;evil\x07\x1b[31mred\x1b[0m \x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\ tab\there\x00\x7f\n`,
+      })),
+    })
     await run(['plan', 'a'], dirty)
     const out = await run(['task', 'done', 't1', '--evidence', 'cmd:build'], dirty)
     // eslint-disable-next-line no-control-regex
     expect(out.stderr.replace(/\n/g, '').replace(/\t/g, '')).not.toMatch(/[\x00-\x1f\x7f]/)
     expect(out.stderr).toContain('progress 1\nprogress 2\n')
-    expect(out.stderr).toContain(']0;evil')
-    expect(out.stderr).toContain('tab\there')
+    expect(out.stderr).toContain('red link tab\there')
+    for (const left of ['evil', '[31m', '[0m', 'http://x', ']8;;', ']0;']) expect(out.stderr, left).not.toContain(left)
     // 33 cleaned lines, so the last 20 start at line 14
     expect(out.stderr).toContain('line 14\n')
     expect(out.stderr).not.toMatch(/line 13\n/)
@@ -4042,6 +4059,15 @@ describe('execShell', () => {
     await waitFor(() => pidGone(child), 'the background sleep to die')
   })
 
+  it('does not call a success a timeout when a background child holds the pipe past the deadline', async () => {
+    // the shell exits 0 at ~0.1 s, the deadline is 0.6 s, and close is awaited until 0.9 s after the exit
+    const r = await execShell('sleep 30 & echo $!; sleep 0.1', tempDir(), { timeoutMs: 600, closeWaitMs: 900 })
+    expect(r.code).toBe(0)
+    expect(r.timedOut).toBeUndefined()
+    expect(r.signal).toBeUndefined()
+    await waitFor(() => pidGone(Number(r.out.trim().split('\n')[0])), 'the background sleep to die')
+  })
+
   it('escalates to SIGKILL when the command ignores SIGTERM', async () => {
     const r = await execShell("trap '' TERM; echo ready; sleep 30", tempDir(), { timeoutMs: 400, graceMs: 200 })
     expect(r.timedOut).toBe(true)
@@ -4061,10 +4087,12 @@ describe('execShell', () => {
   })
 
   it('leaves no signal listeners behind', async () => {
-    const before = [process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')]
+    const signals = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'] as const
+    const count = () => signals.map(s => process.listenerCount(s))
+    const before = count()
     await execShell('true', tempDir())
     await execShell('sleep 30', tempDir(), { timeoutMs: 100 })
-    expect([process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')]).toEqual(before)
+    expect(count()).toEqual(before)
   })
 })
 
@@ -4089,6 +4117,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { describeFailure } from '../src/cli.js'
+import { readPool } from '../src/store.js'
 import { pidGone, waitFor } from './helpers.js'
 
 // These run the built bin/orch, so `npm run build` has to come first (check:bundle keeps it current).
@@ -4099,10 +4128,13 @@ afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
 })
 
+// Inside Claude Code these are set to the real session, which would win over the test's own id.
 function sandbox() {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'orch-main-')))
   dirs.push(dir)
-  const env = { ...process.env, ORCH_HOME: join(dir, 'orch'), ORCH_CLAUDE_HOME: join(dir, 'claude'), CLAUDE_SESSION_ID: 's-main' }
+  const env: NodeJS.ProcessEnv = { ...process.env, ORCH_HOME: join(dir, 'orch'), ORCH_CLAUDE_HOME: join(dir, 'claude'), CLAUDE_SESSION_ID: 's-main' }
+  delete env.CLAUDE_CODE_SESSION_ID
+  delete env.CLAUDE_PID
   return { dir, env }
 }
 
@@ -4125,9 +4157,12 @@ describe('bin/orch', () => {
     expect(r.stderr).not.toMatch(/\n\s+at |Node\.js v|node:internal/)
   })
 
-  it('kills the command and its group when orch is terminated mid-command', async () => {
+  // The command's group is detached from orch's, so a signal to orch alone would leave it running.
+  // Whatever orch is sent, the command is stopped with SIGTERM and the tick is refused.
+  it.each(['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGQUIT'] as const)('kills the command and its group when orch gets %s mid-command', async signal => {
     const { dir, env } = sandbox()
     expect(spawnSync(process.execPath, [BIN, 'plan', 'a'], { env }).status).toBe(0)
+    expect(readPool(env.ORCH_HOME!, 's-main')).toBeDefined()
     const pidFile = join(dir, 'pid')
     const child = spawn(process.execPath, [BIN, 'task', 'done', 't1', '--evidence', `cmd:echo $$ > ${pidFile}; exec sleep 30`], { env, cwd: dir })
     let stderr = ''
@@ -4137,7 +4172,7 @@ describe('bin/orch', () => {
     let pid = 0
     try {
       pid = await waitFor(() => Number((() => { try { return readFileSync(pidFile, 'utf8') } catch { return '' } })().trim()) || undefined, 'the command to start')
-      child.kill('SIGTERM')
+      child.kill(signal)
       expect(await closed).toBe(1)
       expect(stderr).toMatch(/killed by SIGTERM/)
       await waitFor(() => pidGone(pid), 'the command to die')
@@ -4209,7 +4244,8 @@ import { pidAlive } from './sources/sessions.js'
 // signal: the command was killed by it (code is then 1). timedOut: orch killed it at CMD_TIMEOUT_MS.
 export type ExecResult = { code: number; out: string; signal?: string; timedOut?: boolean }
 
-// Under the Bash tool's 2-minute default, so orch answers before the tool gives up on it.
+// A cmd: proof should be a quick check, not a long suite. This cap stops one from hanging a session
+// or leaving work running (Claude Code's Bash tool backgrounds a slow call rather than ending it).
 export const CMD_TIMEOUT_MS = 110_000
 const OUT_KEEP = 64 * 1024
 
@@ -4239,6 +4275,9 @@ export function ppidOf(pid: number): number | undefined {
     return undefined
   }
 }
+
+// The command's group is detached from orch's, so these are forwarded to it. SIGKILL cannot be forwarded.
+const FORWARDED = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'] as const
 
 export type ExecOptions = { timeoutMs?: number; graceMs?: number; closeWaitMs?: number }
 
@@ -4278,14 +4317,12 @@ export function execShell(command: string, cwd: string, opts: ExecOptions = {}):
       settled = true
       clearTimeout(deadline)
       clearTimeout(killTimer)
-      process.off('SIGINT', terminate)
-      process.off('SIGTERM', terminate)
+      for (const sig of FORWARDED) process.off(sig, terminate)
       killGroup('SIGKILL')
       resolve({ ...r, out, ...(timedOut ? { timedOut } : {}) })
     }
     // listening before the shell exists, so a signal can never arrive while nobody would forward it
-    process.on('SIGINT', terminate)
-    process.on('SIGTERM', terminate)
+    for (const sig of FORWARDED) process.on(sig, terminate)
 
     let child: ChildProcessByStdio<null, Readable, Readable>
     try {
@@ -4306,6 +4343,8 @@ export function execShell(command: string, cwd: string, opts: ExecOptions = {}):
     })
     let exited: ExecResult | undefined
     child.on('exit', (code, signal) => {
+      // the shell finished in time: whatever still holds the pipes is bounded by closeWaitMs, not the deadline
+      clearTimeout(deadline)
       exited = { code: code ?? 1, out, ...(signal ? { signal } : {}) }
       setTimeout(() => settle(exited!), closeWaitMs).unref()
     })
@@ -4493,10 +4532,13 @@ async function cmdTitle(ctx: Ctx, args: string[]): Promise<Out> {
   return ok(`title: ${title}\n`)
 }
 
-// What a failing command printed, safe to show: no control characters but newline and tab (\r becomes a
-// line break), the last 20 lines, about 4 KB.
+// What a failing command printed, safe to show: whole escape sequences (CSI such as colours, OSC such as
+// titles and links) gone, then every other control character but newline and tab (\r becomes a line
+// break), the last 20 lines, about 4 KB.
 function tailOf(out: string): string {
   const clean = out
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
     .replace(/\r\n?/g, '\n')
     .replace(/\p{Cc}/gu, c => (c === '\n' || c === '\t' ? c : ''))
     .trimEnd()
@@ -4504,6 +4546,12 @@ function tailOf(out: string): string {
     .slice(-20)
     .join('\n')
   return clean.length > 4096 ? `…${clean.slice(-4096)}` : clean
+}
+
+// A refusal, followed by the tail of what the command printed when it printed anything.
+function refusal(message: string, out: string): OrchError {
+  const tail = tailOf(out)
+  return new OrchError(tail ? `${message}\n${tail}` : message)
 }
 
 async function cmdDone(ctx: Ctx, args: string[]): Promise<Out> {
@@ -4519,11 +4567,11 @@ async function cmdDone(ctx: Ctx, args: string[]): Promise<Out> {
       // where the session is (the Bash tool's current directory), which is not always where its pool began
       const r = await ctx.exec(e.ref, ctx.cwd)
       if (r.timedOut) {
-        throw new OrchError(`refused: \`${e.ref}\` timed out after ${CMD_TIMEOUT_MS / 1000} s in ${ctx.cwd}, so ${id} stays open; run long commands yourself and tick with commit:, ci: or note:`)
+        throw refusal(`refused: \`${e.ref}\` timed out after ${CMD_TIMEOUT_MS / 1000} s in ${ctx.cwd}, so ${id} stays open; run long commands yourself and tick with commit:, ci: or note:`, r.out)
       }
       if (r.signal || r.code !== 0) {
         const how = r.signal ? `was killed by ${r.signal}` : `exited ${r.code}`
-        throw new OrchError(`refused: \`${e.ref}\` ${how} in ${ctx.cwd}, so ${id} stays open\n${tailOf(r.out)}`)
+        throw refusal(`refused: \`${e.ref}\` ${how} in ${ctx.cwd}, so ${id} stays open`, r.out)
       }
       evidence = { kind: 'cmd', ref: e.ref, exit: 0 }
     } else {
@@ -5318,10 +5366,28 @@ describe('orch reply', () => {
     const ctx = makeCtx()
     asking(ctx, 's-go', 'course-go', true)
     ctx.herdr.waitIdle = async () => {
-      throw new HerdrError('herdr agent wait failed: timed out after 100000ms')
+      throw new HerdrError('herdr agent wait failed: wait timed out (timeout)', 'timeout')
     }
     const out = await run(['reply', 'course-go', 'strict'], ctx)
     expect(out.stderr).toMatch(/still busy after 90 s/)
+    expect(readPool(ctx.orchHome, 's-go')!.tasks[0].needsInput).toBe('Strict or lenient?')
+
+    ctx.herdr.waitIdle = async () => {
+      throw new HerdrError('herdr agent wait failed: timed out after 100000ms')
+    }
+    expect((await run(['reply', 'course-go', 'strict'], ctx)).stderr).toMatch(/still busy after 90 s/)
+  })
+
+  it('reports a pane that closed during the wait with herdr\'s reason', async () => {
+    const ctx = makeCtx()
+    asking(ctx, 's-go', 'course-go', true)
+    ctx.herdr.waitIdle = async () => {
+      throw new HerdrError('herdr agent wait failed: no such agent (agent_not_found)', 'agent_not_found')
+    }
+    const out = await run(['reply', 'course-go', 'strict'], ctx)
+    expect(out.code).toBe(1)
+    expect(out.stderr).toMatch(/agent_not_found/)
+    expect(out.stderr).not.toMatch(/still busy/)
     expect(readPool(ctx.orchHome, 's-go')!.tasks[0].needsInput).toBe('Strict or lenient?')
   })
 
@@ -5413,11 +5479,14 @@ export async function reply(ctx: Ctx, query: string, text: string | undefined, m
       return { code: EXIT_SENDMESSAGE, stdout: `${JSON.stringify({ route: 'sendmessage', to: row.name, text: message })}\n`, stderr: '' }
     }
     const blocked = new OrchError(`${row.name} is waiting on a permission prompt; answer that in its pane first`)
-    // /orch runs this through Bash (2-minute default timeout), so wait at most 90 s for the session to rest
+    // a reply from the phone should answer within one Bash call, so wait at most 90 s for the session to rest
     let state: string
     try {
       state = await ctx.herdr.waitIdle(row.paneId, 90_000)
-    } catch {
+    } catch (e) {
+      // only a timeout means busy; a closed pane or a bad reply keeps herdr's own reason
+      const timedOut = e instanceof HerdrError && (e.herdrCode === 'timeout' || /timed out/.test(e.message))
+      if (!timedOut) throw e
       throw new OrchError(`${row.name} is still busy after 90 s; its question stays open, try again later`)
     }
     if (state === 'blocked') throw blocked

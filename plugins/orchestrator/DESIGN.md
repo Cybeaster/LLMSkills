@@ -198,7 +198,7 @@ The TUI lives in a terminal pane and cannot be seen from a phone. Remote use goe
 
 | Target | Route |
 | --- | --- |
-| herdr pane | `herdr agent prompt <pane_id> "<text>"`; if the agent is working, `herdr agent wait` for idle up to 90 s first (`/orch` runs it through Bash, whose default timeout is 2 min); still busy: refused, the ⚑ stays open |
+| herdr pane | `herdr agent prompt <pane_id> "<text>"`; if the agent is working, `herdr agent wait` for idle up to 90 s first, so a reply from the phone answers within one Bash call; still busy: refused, the ⚑ stays open; a pane that closed meanwhile: refused with herdr's reason |
 | not in herdr | `orch reply` exits with code 3 and prints the session's name; `/orch` then sends the text with Claude's SendMessage to that session |
 
 The text is prefixed `[orch reply to: "<question>"]` so the receiving session knows which ⚑ it answers. `orch reply` refuses a session with no open ⚑; free-form prompting stays out of scope.
