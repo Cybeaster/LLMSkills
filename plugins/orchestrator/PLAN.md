@@ -1892,7 +1892,7 @@ import { cliHerdr, HerdrError, runHerdr, type Run } from '../src/sources/herdr.j
 
 const listJson = readFileSync(new URL('./fixtures/herdr-agent-list.json', import.meta.url), 'utf8')
 
-type Reply = { code?: number; stdout?: string; stderr?: string; error?: string }
+type Reply = { code?: number; stdout?: string; stderr?: string; error?: string; timedOut?: boolean }
 
 function fakeRun(replies: Record<string, Reply>) {
   const calls: string[][] = []
@@ -1901,7 +1901,7 @@ function fakeRun(replies: Record<string, Reply>) {
     calls.push(args)
     timeouts.push(timeoutMs)
     const r = replies[args.slice(0, 2).join(' ')] ?? {}
-    return { code: r.code ?? 0, stdout: r.stdout ?? '', stderr: r.stderr ?? '', error: r.error }
+    return { code: r.code ?? 0, stdout: r.stdout ?? '', stderr: r.stderr ?? '', error: r.error, timedOut: r.timedOut }
   }
   return { run, calls, timeouts }
 }
@@ -1977,6 +1977,21 @@ describe('cliHerdr failures', () => {
     expect(e).toBeInstanceOf(OrchError)
     expect(e.message).toBe('herdr agent prompt failed: agent is waiting for input (agent_blocked)')
     expect(e.herdrCode).toBe('agent_blocked')
+  })
+
+  it('codes a killed herdr call as timeout, and keeps the code of wait\'s own timeout error', async () => {
+    const killed = await cliHerdr(fakeRun({ 'agent wait': { code: 127, error: 'timed out after 15000ms', timedOut: true } }).run)
+      .waitIdle('w1:p1', 5000)
+      .catch(x => x)
+    expect(killed).toBeInstanceOf(HerdrError)
+    expect(killed.herdrCode).toBe('timeout')
+
+    const stderr = JSON.stringify({ error: { code: 'timeout', message: 'condition not met' } })
+    const own = await cliHerdr(fakeRun({ 'agent wait': { code: 1, stderr } }).run).waitIdle('w1:p1', 5000).catch(x => x)
+    expect(own.herdrCode).toBe('timeout')
+
+    const other = await cliHerdr(fakeRun({ 'agent wait': { code: 127, error: 'spawn herdr ENOENT' } }).run).waitIdle('w1:p1', 5000).catch(x => x)
+    expect(other.herdrCode).toBeUndefined()
   })
 
   it('reads the JSON error from stdout when stderr is empty', async () => {
@@ -2120,6 +2135,7 @@ describe('runHerdr', () => {
     const r = await runHerdr(['agent', 'list'])
     expect(r.code).not.toBe(0)
     expect(r.error).toMatch(/ENOENT/)
+    expect(r.timedOut).toBeFalsy()
   })
 
   it('kills a call that outlives its timeout and says so', async () => {
@@ -2129,6 +2145,7 @@ describe('runHerdr', () => {
     expect(Date.now() - t0).toBeLessThan(2500)
     expect(r.code).not.toBe(0)
     expect(r.error).toBe('timed out after 100ms')
+    expect(r.timedOut).toBe(true)
   })
 })
 ```
@@ -2423,7 +2440,7 @@ export interface Herdr {
   prompt(target: string, text: string): Promise<void>
 }
 
-export type Run = (args: string[], timeoutMs?: number) => Promise<{ code: number; stdout: string; stderr: string; error?: string }>
+export type Run = (args: string[], timeoutMs?: number) => Promise<{ code: number; stdout: string; stderr: string; error?: string; timedOut?: boolean }>
 
 // herdr failed. herdrCode is the code from its {error:{code,message}} reply (agent_not_ready, agent_blocked, ...), when it sent one
 export class HerdrError extends OrchError {
@@ -2446,7 +2463,7 @@ export const runHerdr: Run = (args, timeoutMs) => {
       const timedOut = err?.killed === true && typeof err.code !== 'string'
       const code = err ? (typeof err.code === 'number' ? err.code : 127) : 0
       const error = err ? (timedOut ? `timed out after ${limit}ms` : err.message) : undefined
-      resolve({ code, stdout: String(stdout), stderr: String(stderr), error })
+      resolve({ code, stdout: String(stdout), stderr: String(stderr), error, timedOut })
     })
   })
 }
@@ -2468,11 +2485,12 @@ function herdrErrorIn(text: string): { code?: string; message?: string } | undef
   return undefined
 }
 
-function failure(args: string[], r: { stdout: string; stderr: string; error?: string }): HerdrError {
+function failure(args: string[], r: { stdout: string; stderr: string; error?: string; timedOut?: boolean }): HerdrError {
   const what = `herdr ${args.slice(0, 2).join(' ')} failed`
   const e = herdrErrorIn(r.stderr) ?? herdrErrorIn(r.stdout)
   if (e) return new HerdrError(`${what}: ${e.message ?? e.code}${e.message && e.code ? ` (${e.code})` : ''}`, e.code)
-  return new HerdrError(`${what}: ${r.stderr.trim() || r.stdout.trim() || (r.error ?? '').trim()}`)
+  // a call killed by its exec timeout gets the same code as herdr's own {error:{code:'timeout'}}
+  return new HerdrError(`${what}: ${r.stderr.trim() || r.stdout.trim() || (r.error ?? '').trim()}`, r.timedOut ? 'timeout' : undefined)
 }
 
 export function cliHerdr(run: Run = runHerdr): Herdr {
@@ -3476,13 +3494,14 @@ import type { Evidence } from '../src/model.js'
 import type { Gh } from '../src/sources/gh.js'
 import type { Herdr, HerdrAgent } from '../src/sources/herdr.js'
 
-export type FakeHerdr = Herdr & { calls: string[][]; agents: HerdrAgent[] }
+export type FakeHerdr = Herdr & { calls: string[][]; agents: HerdrAgent[]; waitTimeouts: number[] }
 
 export function fakeHerdr(agents: HerdrAgent[] = []): FakeHerdr {
   const calls: string[][] = []
   const h: FakeHerdr = {
     calls,
     agents,
+    waitTimeouts: [],
     async list() {
       return h.agents
     },
@@ -3500,8 +3519,9 @@ export function fakeHerdr(agents: HerdrAgent[] = []): FakeHerdr {
     async sessionIdOf(name) {
       return h.agents.find(a => a.name === name)?.sessionId
     },
-    async waitIdle(target) {
+    async waitIdle(target, timeoutMs) {
       calls.push(['waitIdle', target])
+      h.waitTimeouts.push(timeoutMs)
       return h.agents.find(a => a.paneId === target)?.status === 'blocked' ? 'blocked' : 'idle'
     },
     async prompt(target, text) {
@@ -4497,9 +4517,13 @@ const HELP = `orch — task pools for Claude Code sessions
   orch ask <id> "question"               flag a question for the person (⚑)
   orch status [<session-id>] [--json]    this (or that) session's pool
   orch status --all [--json]             every session
-  orch link <child> <parent> <taskId>    attach a session under a parent task
+  orch link <child> <parent> <taskId> [--brief <file>]
+                                         attach a session under a parent task
   orch spawn-child <taskId> --name <n> --cwd <dir> --brief <file> [--prompt <text>]
-  orch reply <session> "text" [--mark-only]
+  orch reply <session> [--task <id>] -- "text"
+                                         answer a session's open question (the -- keeps a text that starts with a dash)
+  orch reply <session> [--task <id>] --mark-only
+                                         mark it answered after delivering the text yourself
   orch tui
 `
 
@@ -5892,12 +5916,7 @@ import { spawnChild } from './spawn.js'
 import { resolveSession } from './targets.js'
 ```
 
-and change the existing `import { resolveSelf } from './self.js'` line to `import { resolveSelf, trySelf } from './self.js'`, and in `HELP` replace the `orch link` line with:
-
-```
-  orch link <child> <parent> <taskId> [--brief <file>]
-                                         attach a session under a parent task
-```
+and change the existing `import { resolveSelf } from './self.js'` line to `import { resolveSelf, trySelf } from './self.js'`, (`HELP` already lists `link --brief`).
 
 
 add these two command functions above `run`:
@@ -5990,6 +6009,7 @@ describe('orch reply', () => {
       ['waitIdle', 'p-course-go'],
       ['prompt', 'p-course-go', '[orch reply to: "Strict or lenient?"] strict'],
     ])
+    expect(ctx.herdr.waitTimeouts).toEqual([90000])
     expect(readPool(ctx.orchHome, 's-go')!.tasks[0].needsInput).toBeUndefined()
   })
 
@@ -6004,7 +6024,7 @@ describe('orch reply', () => {
     expect(readPool(ctx.orchHome, 's-go')!.tasks[0].needsInput).toBe('Strict or lenient?')
 
     ctx.herdr.waitIdle = async () => {
-      throw new HerdrError('herdr agent wait failed: timed out after 100000ms')
+      throw new HerdrError('herdr agent wait failed: killed', 'timeout')
     }
     expect((await run(['reply', 'course-go', 'strict'], ctx)).stderr).toMatch(/still busy after 90 s/)
   })
@@ -6037,7 +6057,7 @@ describe('orch reply', () => {
       throw new HerdrError('herdr agent prompt failed: timed out after 10000ms')
     }
     const lost = await run(['reply', 'course-go', 'strict'], ctx)
-    expect(lost.stderr).toMatch(/may not have got the reply.*timed out.*orch reply course-go --mark-only/s)
+    expect(lost.stderr).toMatch(/may not have got the reply.*timed out.*orch reply course-go --task t1 --mark-only/s)
     expect(readPool(ctx.orchHome, 's-go')!.tasks[0].needsInput).toBe('Strict or lenient?')
   })
 
@@ -6046,7 +6066,14 @@ describe('orch reply', () => {
     asking(ctx, 's-ext', 'api-fix', false)
     const out = await run(['reply', 'api-fix', 'lenient'], ctx)
     expect(out.code).toBe(3)
-    expect(JSON.parse(out.stdout)).toEqual({ route: 'sendmessage', to: 'api-fix', text: '[orch reply to: "Strict or lenient?"] lenient' })
+    expect(JSON.parse(out.stdout)).toEqual({
+      route: 'sendmessage',
+      sessionId: 's-ext',
+      name: 'api-fix',
+      cwd: '/r',
+      taskId: 't1',
+      text: '[orch reply to: "Strict or lenient?"] lenient',
+    })
     expect(readPool(ctx.orchHome, 's-ext')!.tasks[0].needsInput).toBe('Strict or lenient?')
     expect((await run(['reply', 'api-fix', '--mark-only'], ctx)).code).toBe(0)
     expect(readPool(ctx.orchHome, 's-ext')!.tasks[0].needsInput).toBeUndefined()
@@ -6071,6 +6098,136 @@ describe('orch reply', () => {
     writePool(ctx.orchHome, askTask(plan(newPool('s-gone', '/r', 1), ['a'], ctx.now()), 't1', 'q', ctx.now()))
     expect((await run(['reply', 's-gone', 'x'], ctx)).stderr).toMatch(/has ended/)
   })
+
+  it('refuses to send when the question was answered during the wait', async () => {
+    const ctx = makeCtx()
+    asking(ctx, 's-go', 'course-go', true)
+    ctx.herdr.waitIdle = async () => {
+      writePool(ctx.orchHome, plan(newPool('s-go', '/r', 1), ['pick curve'], 5))
+      return 'idle'
+    }
+    const out = await run(['reply', 'course-go', 'strict'], ctx)
+    expect(out.code).toBe(1)
+    expect(out.stderr).toMatch(/course-go already answered that question in the session; nothing sent/)
+    expect(ctx.herdr.calls.filter(c => c[0] === 'prompt')).toEqual([])
+  })
+
+  describe('several questions', () => {
+    function two(ctx: TestCtx, inHerdr = false) {
+      writeSession(ctx, { pid: 12, sessionId: 's-two', name: 'two' })
+      writePool(ctx.orchHome, askTask(askTask(plan(newPool('s-two', '/r', 1), ['a', 'b', 'c'], 2), 't1', 'first?', 3), 't3', 'third?', 4))
+      if (inHerdr) ctx.herdr.agents.push({ name: 'two', paneId: 'p-two', status: 'idle', sessionId: 's-two' })
+    }
+
+    it('asks for --task when more than one is open', async () => {
+      const ctx = makeCtx()
+      two(ctx)
+      const out = await run(['reply', 'two', '--', 'x'], ctx)
+      expect(out.code).toBe(1)
+      expect(out.stderr).toMatch(/two has 2 open questions \(t1, t3\); pass --task <id>/)
+      expect((await run(['reply', 'two', '--mark-only'], ctx)).stderr).toMatch(/pass --task/)
+    })
+
+    it('answers and clears only the chosen one', async () => {
+      const ctx = makeCtx()
+      two(ctx, true)
+      expect((await run(['reply', 'two', '--task', 't3', '--', 'yes'], ctx)).code).toBe(0)
+      expect(ctx.herdr.calls[1]).toEqual(['prompt', 'p-two', '[orch reply to: "third?"] yes'])
+      const tasks = readPool(ctx.orchHome, 's-two')!.tasks
+      expect(tasks.find(t => t.id === 't1')!.needsInput).toBe('first?')
+      expect(tasks.find(t => t.id === 't3')!.needsInput).toBeUndefined()
+
+      const ext = makeCtx()
+      two(ext)
+      expect(JSON.parse((await run(['reply', 'two', '--task', 't1', '--', 'ok'], ext)).stdout).taskId).toBe('t1')
+      expect((await run(['reply', 'two', '--task', 't1', '--mark-only'], ext)).code).toBe(0)
+      const left = readPool(ext.orchHome, 's-two')!.tasks
+      expect(left.find(t => t.id === 't1')!.needsInput).toBeUndefined()
+      expect(left.find(t => t.id === 't3')!.needsInput).toBe('third?')
+    })
+
+    it('refuses a --task with no question', async () => {
+      const ctx = makeCtx()
+      two(ctx)
+      expect((await run(['reply', 'two', '--task', 't2', '--', 'x'], ctx)).stderr).toMatch(/t2 has no open question/)
+      expect((await run(['reply', 'two', '--task', 'nope', '--mark-only'], ctx)).code).toBe(1)
+    })
+  })
+
+  describe('the message', () => {
+    it('quotes a one-line, capped question and strips control characters from the text', async () => {
+      const ctx = makeCtx()
+      writeSession(ctx, { pid: 13, sessionId: 's-q', name: 'q' })
+      const q = `line one\nline "two" ${'x'.repeat(300)}`
+      writePool(ctx.orchHome, askTask(plan(newPool('s-q', '/r', 1), ['a'], 2), 't1', q, 3))
+      ctx.herdr.agents.push({ name: 'q', paneId: 'p-q', status: 'idle', sessionId: 's-q' })
+      await run(['reply', 'q', '--', 'a\x1b[31mb\x00c\r\nd\te'], ctx)
+      const sent = ctx.herdr.calls[1][2]
+      const quoted = JSON.stringify(`line one line "two" ${'x'.repeat(300)}`.slice(0, 200))
+      expect(sent).toBe(`[orch reply to: ${quoted}] a[31mbc\nd\te`)
+    })
+
+    it('refuses a reply over 4000 characters instead of cutting it', async () => {
+      const ctx = makeCtx()
+      asking(ctx, 's-go', 'course-go', true)
+      const out = await run(['reply', 'course-go', '--', 'y'.repeat(4001)], ctx)
+      expect(out.code).toBe(2)
+      expect(out.stderr).toMatch(/4000/)
+      expect(ctx.herdr.calls).toEqual([])
+      expect((await run(['reply', 'course-go', '--', 'y'.repeat(4000)], ctx)).code).toBe(0)
+    })
+  })
+
+  it('treats a coded timeout as busy whatever the message says', async () => {
+    const ctx = makeCtx()
+    asking(ctx, 's-go', 'course-go', true)
+    ctx.herdr.waitIdle = async () => {
+      throw new HerdrError('herdr agent get failed: killed', 'timeout')
+    }
+    expect((await run(['reply', 'course-go', 'x'], ctx)).stderr).toMatch(/still busy after 90 s/)
+  })
+
+  it('sends only after idle or done; blocked and other states keep the question open', async () => {
+    for (const state of ['idle', 'done']) {
+      const ctx = makeCtx()
+      asking(ctx, 's-go', 'course-go', true)
+      ctx.herdr.waitIdle = async () => state
+      expect((await run(['reply', 'course-go', 'x'], ctx)).code).toBe(0)
+    }
+    const ctx = makeCtx()
+    asking(ctx, 's-go', 'course-go', true)
+    ctx.herdr.waitIdle = async () => 'blocked'
+    expect((await run(['reply', 'course-go', 'x'], ctx)).stderr).toMatch(/permission prompt/)
+    ctx.herdr.waitIdle = async () => 'working'
+    const out = await run(['reply', 'course-go', 'x'], ctx)
+    expect(out.stderr).toMatch(/course-go is working; its question stays open, try again later/)
+    expect(ctx.herdr.calls.filter(c => c[0] === 'prompt')).toEqual([])
+    expect(readPool(ctx.orchHome, 's-go')!.tasks[0].needsInput).toBe('Strict or lenient?')
+  })
+
+  it('takes text that starts with a dash after --', async () => {
+    const ctx = makeCtx()
+    asking(ctx, 's-go', 'course-go', true)
+    await run(['reply', 'course-go', '--', '-1 is fine'], ctx)
+    expect(ctx.herdr.calls[1]).toEqual(['prompt', 'p-course-go', '[orch reply to: "Strict or lenient?"] -1 is fine'])
+  })
+
+  it('refuses --mark-only with text, and missing text, with exit 2 and no herdr calls', async () => {
+    const ctx = makeCtx()
+    asking(ctx, 's-go', 'course-go', true)
+    const both = await run(['reply', 'course-go', '--mark-only', 'x'], ctx)
+    expect(both.code).toBe(2)
+    expect((await run(['reply', 'course-go'], ctx)).code).toBe(2)
+    expect(ctx.herdr.calls).toEqual([])
+    expect(readPool(ctx.orchHome, 's-go')!.tasks[0].needsInput).toBe('Strict or lenient?')
+  })
+
+  it('can still mark an ended session by its id', async () => {
+    const ctx = makeCtx()
+    writePool(ctx.orchHome, askTask(plan(newPool('s-old', '/r', 1), ['a'], ctx.now()), 't1', 'q', ctx.now()))
+    expect((await run(['reply', 's-old', '--mark-only'], ctx)).code).toBe(0)
+    expect(readPool(ctx.orchHome, 's-old')!.tasks[0].needsInput).toBeUndefined()
+  })
 })
 ```
 
@@ -6087,40 +6244,67 @@ Expected: FAIL, `unknown command reply`.
 import { collect } from './collect.js'
 import type { Ctx } from './ctx.js'
 import { OrchError } from './errors.js'
+import { oneLine } from './evidence.js'
+import { flatten } from './format.js'
 import { clearQuestions } from './model.js'
 import { ok, type Out } from './out.js'
 import { HerdrError } from './sources/herdr.js'
 import { readPool, updateIfExists } from './store.js'
-import { resolveTarget } from './targets.js'
+import { resolveSession } from './targets.js'
 
 export const EXIT_SENDMESSAGE = 3
+export const MAX_REPLY = 4000
 
-export async function reply(ctx: Ctx, query: string, text: string | undefined, markOnly: boolean): Promise<Out> {
-  const row = resolveTarget(await collect(ctx), query)
-  const task = readPool(ctx.orchHome, row.sessionId)?.tasks.find(t => t.needsInput)
-  if (!task) throw new OrchError(`${row.name} has no open question`)
+// everything but newline and tab: a reply is typed into a pane, so an escape sequence must not get through
+const cleanText = (s: string) => s.replace(/(?![\n\t])\p{Cc}/gu, '')
 
+export async function reply(ctx: Ctx, query: string, text: string | undefined, markOnly: boolean, taskId?: string): Promise<Out> {
+  const rows = await collect(ctx)
+  const { sessionId, name } = await resolveSession(ctx, rows, query)
+  const pool = readPool(ctx.orchHome, sessionId)
+  const open = (pool?.tasks ?? []).filter(t => t.needsInput)
+  let task
+  if (taskId) {
+    task = open.find(t => t.id === taskId)
+    if (!task) throw new OrchError(`${name} ${taskId} has no open question`)
+  } else {
+    if (!open.length) throw new OrchError(`${name} has no open question`)
+    if (open.length > 1) throw new OrchError(`${name} has ${open.length} open questions (${open.map(t => t.id).join(', ')}); pass --task <id>`)
+    task = open[0]
+  }
+  const asked = task.needsInput
+
+  if (markOnly && text) throw new OrchError('--mark-only takes no reply text', 2)
   if (!markOnly) {
-    if (!text) throw new OrchError('missing reply text', 2)
-    if (row.state === 'ended') throw new OrchError(`${row.name} has ended; its question stays open`)
-    if (row.state === 'waiting') throw new OrchError(`${row.name} is waiting on a dialog (${row.waitingFor}); answer that in the session first`)
-    const message = `[orch reply to: "${task.needsInput}"] ${text}`
+    const body = cleanText(text ?? '').trim()
+    if (!body) throw new OrchError('missing reply text', 2)
+    if (body.length > MAX_REPLY) throw new OrchError(`the reply is ${body.length} characters; the limit is ${MAX_REPLY}, shorten it`, 2)
+    const row = flatten(rows).map(l => l.row).find(r => r.sessionId === sessionId)
+    if (!row || row.state === 'ended') throw new OrchError(`${name} has ended; its question stays open`)
+    if (row.state === 'waiting') throw new OrchError(`${name} is waiting on a dialog (${row.waitingFor}); answer that in the session first`)
+    const message = `[orch reply to: ${JSON.stringify(oneLine(asked).slice(0, 200))}] ${body}`
     if (!row.paneId) {
-      // Not in herdr: /orch delivers it with SendMessage, then runs orch reply --mark-only.
-      return { code: EXIT_SENDMESSAGE, stdout: `${JSON.stringify({ route: 'sendmessage', to: row.name, text: message })}\n`, stderr: '' }
+      // Not in herdr: /orch delivers it with SendMessage, then runs orch reply --mark-only --task.
+      const payload = { route: 'sendmessage', sessionId, name, cwd: pool?.cwd ?? row.cwd, taskId: task.id, text: message }
+      return { code: EXIT_SENDMESSAGE, stdout: `${JSON.stringify(payload)}\n`, stderr: '' }
     }
-    const blocked = new OrchError(`${row.name} is waiting on a permission prompt; answer that in its pane first`)
+    const blocked = new OrchError(`${name} is waiting on a permission prompt; answer that in its pane first`)
     // a reply from the phone should answer within one Bash call, so wait at most 90 s for the session to rest
     let state: string
     try {
       state = await ctx.herdr.waitIdle(row.paneId, 90_000)
     } catch (e) {
-      // only a timeout means busy; a closed pane or a bad reply keeps herdr's own reason
-      const timedOut = e instanceof HerdrError && (e.herdrCode === 'timeout' || /timed out/.test(e.message))
-      if (!timedOut) throw e
-      throw new OrchError(`${row.name} is still busy after 90 s; its question stays open, try again later`)
+      // only a timeout means busy; a closed pane or a bad reply keeps herdr's own reason.
+      // A timeout of the agent get that follows a successful wait lands here too, which is fine.
+      if (!(e instanceof HerdrError && e.herdrCode === 'timeout')) throw e
+      throw new OrchError(`${name} is still busy after 90 s; its question stays open, try again later`)
     }
     if (state === 'blocked') throw blocked
+    if (state !== 'idle' && state !== 'done') throw new OrchError(`${name} is ${state}; its question stays open, try again later`)
+    // the person may have answered in the session while we waited
+    if (readPool(ctx.orchHome, sessionId)?.tasks.find(t => t.id === task.id)?.needsInput !== asked) {
+      throw new OrchError(`${name} already answered that question in the session; nothing sent`)
+    }
     try {
       await ctx.herdr.prompt(row.paneId, message)
     } catch (e) {
@@ -6128,13 +6312,13 @@ export async function reply(ctx: Ctx, query: string, text: string | undefined, m
       if (e instanceof HerdrError && e.herdrCode === 'agent_blocked') throw blocked
       // herdr says a failed or timed-out prompt may still have arrived: never invite a blind resend
       throw new OrchError(
-        `${row.name} may not have got the reply (${e instanceof Error ? e.message : String(e)}); ` +
-          `check its pane, then run orch reply ${row.name} --mark-only if it arrived`,
+        `${name} may not have got the reply (${e instanceof Error ? e.message : String(e)}); ` +
+          `check its pane, then run orch reply ${name} --task ${task.id} --mark-only if it arrived`,
       )
     }
   }
-  await updateIfExists(ctx.orchHome, row.sessionId, p => clearQuestions(p, ctx.now(), task.id) ?? p)
-  return ok(`answered ${row.name} ${task.id}\n`)
+  await updateIfExists(ctx.orchHome, sessionId, p => clearQuestions(p, ctx.now(), task.id) ?? p)
+  return ok(`answered ${name} ${task.id}\n`)
 }
 ```
 
@@ -6148,9 +6332,13 @@ add this command function above `run`:
 
 ```ts
 async function cmdReply(ctx: Ctx, args: string[]): Promise<Out> {
-  const { values, positionals } = parseArgs({ args, options: { 'mark-only': { type: 'boolean' } }, allowPositionals: true })
+  const { values, positionals } = parseArgs({
+    args,
+    options: { 'mark-only': { type: 'boolean' }, task: { type: 'string' } },
+    allowPositionals: true,
+  })
   const session = need(positionals[0], 'session')
-  return reply(ctx, session, positionals.slice(1).join(' ').trim() || undefined, !!values['mark-only'])
+  return reply(ctx, session, positionals.slice(1).join(' ').trim() || undefined, !!values['mark-only'], values.task)
 }
 ```
 
@@ -6616,9 +6804,9 @@ Show the person every local Claude session and let them act on one. This is used
 1. Run `orch status --all --json`. It prints a compact tree of rows without their tasks: `sessionId`, `name`, `state` (busy, idle, waiting, ended), `tag`, `done`/`total`, `flags` (open questions in the subtree), `link` and `children`.
 2. Ask *Which session?* with AskUserQuestion. Options, at most four: sessions with `flags > 0` first, then waiting, then busy ones; label each `name done/total` plus ` ⚑` when it has flags. The person can type any other session's name through *Other*. If there are no sessions, say so and stop.
 3. Run `orch status <sessionId> --json` for the chosen row; it adds `tasks` (each with `mark`, `id`, `text`, `detail`). Print them as a short list (`mark id text — detail`) and the `link` if there is one. Then ask *What now?* with the options **Answer ⚑** (only when one of its tasks has `mark` ⚑; for a parent, offer the child that asks), **Open session** (only when it has a `link`), **Back**.
-4. **Answer ⚑**: ask the person for the answer as free text, then run `orch reply <sessionId> "<answer>"` (always the id: two sessions can share a name).
+4. **Answer ⚑**: if the session has more than one ⚑ task, ask which one first. Ask the person for the answer as free text, then run `orch reply <sessionId> --task <taskId> -- "<answer>"` (always the id, since two sessions can share a name; always `--`, since an answer may start with a dash).
    - exit 0: say it was delivered.
-   - exit 3: it printed `{"route":"sendmessage","to":…,"text":…}`. Find that session with ListAgents (by name or cwd), send `text` with SendMessage, then run `orch reply <sessionId> --mark-only`.
+   - exit 3: it printed `{"route":"sendmessage","sessionId":…,"name":…,"cwd":…,"taskId":…,"text":…}`. Find that session with ListAgents: by `sessionId` if the listing shows it, else by `cwd`, else by `name`. Send `text` with SendMessage, then run `orch reply <sessionId> --task <taskId> --mark-only`. If no listed session matches, say so and leave the ⚑ open.
    - any other exit: show the error line.
 5. **Open session**: print the link alone on its line so it is tappable.
 6. **Back**: return to step 2 with a fresh `orch status --all --json`. Stop when the person picks nothing or says done.

@@ -121,7 +121,7 @@ orch spawn-child t1 --name course-go --cwd .worktrees/course-go --brief docs/cou
 orch link <child> <parent> <taskId>                  # attach a session under a parent task by hand
 orch status                                           # this session's pool as text
 orch status --all [--json]                            # every session, as text or JSON (§8)
-orch reply <session> "text"                           # answer a session's ⚑ (§8)
+orch reply <session> [--task <id>] -- "text"          # answer a session's ⚑ (§8)
 orch tui                                              # the viewer (§7)
 ```
 
@@ -199,9 +199,9 @@ The TUI lives in a terminal pane and cannot be seen from a phone. Remote use goe
 | Target | Route |
 | --- | --- |
 | herdr pane | `herdr agent prompt <pane_id> "<text>"`; if the agent is working, `herdr agent wait` for idle up to 90 s first, so a reply from the phone answers within one Bash call; still busy: refused, the ⚑ stays open; a pane that closed meanwhile: refused with herdr's reason |
-| not in herdr | `orch reply` exits with code 3 and prints the session's name; `/orch` then sends the text with Claude's SendMessage to that session |
+| not in herdr | `orch reply` exits with code 3 and prints the session's id, name, cwd, task and the framed text; `/orch` finds it with ListAgents, sends the text with SendMessage, then runs `orch reply --mark-only` for that task |
 
-The text is prefixed `[orch reply to: "<question>"]` so the receiving session knows which ⚑ it answers. `orch reply` refuses a session with no open ⚑; free-form prompting stays out of scope.
+The text is prefixed `[orch reply to: "<question>"]` (the question on one line, at most 200 characters) so the receiving session knows which ⚑ it answers. `orch reply` refuses a session with no open ⚑, asks for `--task` when several are open, and sends nothing if the question was answered in the session while it waited; free-form prompting stays out of scope.
 
 ## 9. Failure handling
 
