@@ -129,7 +129,7 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 export const lockTiming = { staleMs: 5_000, deadlineMs: 7_000 }
 
 // waitMs: how long this caller waits for the lock; hooks pass a short one so they never stall a prompt.
-async function withLock<T>(home: string, id: string, fn: () => T, waitMs = lockTiming.deadlineMs): Promise<T> {
+export async function withLock<T>(home: string, id: string, fn: () => T, waitMs = lockTiming.deadlineMs): Promise<T> {
   const lock = `${poolPath(home, id)}.lock`
   mkdirSync(home, { recursive: true })
   const deadline = Date.now() + waitMs

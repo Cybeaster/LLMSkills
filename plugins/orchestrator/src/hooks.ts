@@ -2,6 +2,7 @@ import { appendFileSync, closeSync, fstatSync, openSync, readSync } from 'node:f
 import type { Ctx } from './ctx.js'
 import { OrchError } from './errors.js'
 import { oneLine } from './evidence.js'
+import { findFrame, frameQuestion } from './frame.js'
 import { clearQuestions, linkChild, newPool, setParent, startTurn, type Pool } from './model.js'
 import { ok, type Out } from './out.js'
 import { pruneEmptyPools } from './prune.js'
@@ -82,7 +83,7 @@ async function sessionStart(ctx: Ctx, input: Input): Promise<Out> {
   }
 
   try {
-    pruneEmptyPools(ctx, id)
+    await pruneEmptyPools(ctx, id)
   } catch (e) {
     log(ctx.orchHome, `hook session-start: prune: ${e instanceof Error ? e.message : String(e)}`)
   }
@@ -103,22 +104,11 @@ async function sessionStart(ctx: Ctx, input: Input): Promise<Out> {
   )
 }
 
-const REPLY_FRAME = '[orch reply to: '
-
-// An orch reply answers one question; the frame quotes it. Any other prompt answers everything.
+// An orch reply answers one question, and its frame says which. Any other prompt answers everything.
 function clearAnswered(pool: Pool, prompt: string | undefined, now: number): Pool | undefined {
-  if (typeof prompt !== 'string' || !prompt.startsWith(REPLY_FRAME)) return clearQuestions(pool, now)
-  // JSON.stringify escapes the closing quote, so the quoted string ends at the first unescaped one
-  const m = /^"(?:[^"\\]|\\.)*"/.exec(prompt.slice(REPLY_FRAME.length))
-  let asked: unknown
-  try {
-    asked = m && JSON.parse(m[0])
-  } catch {
-    return undefined
-  }
-  // the frame holds a one-line, 200-character form of the question
-  const quoted = (s: string) => Array.from(oneLine(s)).slice(0, 200).join('')
-  const task = typeof asked === 'string' ? pool.tasks.find(t => t.needsInput && quoted(t.needsInput) === asked) : undefined
+  const frame = typeof prompt === 'string' ? findFrame(prompt) : undefined
+  if (!frame) return clearQuestions(pool, now)
+  const task = pool.tasks.find(t => t.needsInput && frameQuestion(t.needsInput) === frame)
   return task ? clearQuestions(pool, now, task.id) : undefined
 }
 

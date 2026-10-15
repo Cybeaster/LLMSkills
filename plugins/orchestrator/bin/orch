@@ -199,7 +199,7 @@ function buildOverview(input) {
   const parents = new Set(input.pools.map((e) => e.pool?.parent?.sessionId));
   const blank = (id) => {
     const p = pools.get(id)?.pool;
-    return !live2.has(id) && !!p && !p.tasks.length && !p.title && !parents.has(id);
+    return !live2.has(id) && !!p && !p.tasks.length && !p.title && !p.parent && !p.brief && !parents.has(id);
   };
   for (const [id, e] of pools) if (e.error || e.pool && input.now - e.pool.updatedAt < DAY && !blank(id)) ids.add(id);
   for (let grew = true; grew; ) {
@@ -795,6 +795,11 @@ var renderPool = (row) => poolLines(row).join("\n") + "\n";
 // src/hooks.ts
 import { appendFileSync as appendFileSync2, closeSync as closeSync2, fstatSync, openSync as openSync2, readSync } from "node:fs";
 
+// src/frame.ts
+var frameQuestion = (question) => `[orch reply to: ${JSON.stringify(Array.from(oneLine(question)).slice(0, 200).join(""))}]`;
+var FRAME = /\[orch reply to: "(?:[^"\\]|\\.)*"\]/;
+var findFrame = (prompt) => FRAME.exec(prompt)?.[0];
+
 // src/model.ts
 function newPool(sessionId, cwd, now) {
   return { sessionId, title: "", cwd, tasks: [], seq: 0, createdAt: now, updatedAt: now };
@@ -912,26 +917,40 @@ import { existsSync as existsSync3, statSync as statSync2, unlinkSync, utimesSyn
 import { join as join4 } from "node:path";
 var MAX_AGE_MS = 7 * DAY;
 var EVERY_MS = 60 * 60 * 1e3;
-function pruneEmptyPools(ctx, keep) {
+var LOCK_WAIT_MS = 200;
+var referencedIds = (ctx) => {
+  const ids = /* @__PURE__ */ new Set();
+  for (const e of listPools(ctx.orchHome)) {
+    if (e.pool?.parent) ids.add(e.pool.parent.sessionId);
+    for (const t of e.pool?.tasks ?? []) for (const c of t.children ?? []) ids.add(c);
+  }
+  return ids;
+};
+var stale = (pool, now) => !!pool && !pool.tasks.length && !pool.parent && now - Math.max(pool.updatedAt, pool.touchedAt ?? 0) >= MAX_AGE_MS;
+var alive = (ctx, id) => readLiveSessions(ctx.claudeHome, ctx.isAlive).some((s) => s.sessionId === id);
+async function pruneEmptyPools(ctx, keep) {
   const marker = join4(ctx.orchHome, ".pruned");
   const now = ctx.now();
   if (existsSync3(marker) && now - statSync2(marker).mtimeMs < EVERY_MS) return [];
   writeFileSync2(marker, "");
   utimesSync(marker, now / 1e3, now / 1e3);
   const pools = listPools(ctx.orchHome);
-  const alive = new Set(readLiveSessions(ctx.claudeHome, ctx.isAlive).map((s) => s.sessionId));
-  const referenced = /* @__PURE__ */ new Set();
-  for (const e of pools) {
-    if (e.pool?.parent) referenced.add(e.pool.parent.sessionId);
-    for (const t of e.pool?.tasks ?? []) for (const c of t.children ?? []) referenced.add(c);
-  }
+  const live2 = new Set(readLiveSessions(ctx.claudeHome, ctx.isAlive).map((s) => s.sessionId));
+  const referenced = referencedIds(ctx);
   const removed = [];
   for (const { id, pool } of pools) {
-    if (!pool || id === keep || alive.has(id) || referenced.has(id) || pool.parent || pool.tasks.length) continue;
-    if (now - Math.max(pool.updatedAt, pool.touchedAt ?? 0) < MAX_AGE_MS) continue;
+    if (id === keep || live2.has(id) || referenced.has(id) || !stale(pool, now)) continue;
     try {
-      unlinkSync(poolPath(ctx.orchHome, id));
-      removed.push(id);
+      await withLock(
+        ctx.orchHome,
+        id,
+        () => {
+          if (!stale(readPool(ctx.orchHome, id), now) || alive(ctx, id) || referencedIds(ctx).has(id)) return;
+          unlinkSync(poolPath(ctx.orchHome, id));
+          removed.push(id);
+        },
+        LOCK_WAIT_MS
+      );
     } catch {
     }
   }
@@ -944,7 +963,7 @@ var NO_POOL = '[orch] Your last turn changed files or ran commands, and this ses
 var STALE = "[orch] Your task pool was not updated during your last turn. Run `orch status`, then tick finished tasks with evidence or re-plan.";
 var context = (event, text) => ok(`${JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: text } })}
 `);
-var LOCK_WAIT_MS = 1500;
+var LOCK_WAIT_MS2 = 1500;
 async function runHook(ctx, name) {
   try {
     const input = JSON.parse(await ctx.readStdin() || "{}");
@@ -988,17 +1007,17 @@ ${unset}`);
       if (linkable) return setParent(q2, { sessionId: parentId, taskId }, brief, now);
       return brief ? { ...q2, brief, updatedAt: now } : q2;
     },
-    LOCK_WAIT_MS
+    LOCK_WAIT_MS2
   );
   if (linkable && pool.parent?.sessionId === parentId && pool.parent?.taskId === taskId) {
     try {
-      await updateIfExists(ctx.orchHome, parentId, (p) => linkChild(p, taskId, id, now), LOCK_WAIT_MS);
+      await updateIfExists(ctx.orchHome, parentId, (p) => linkChild(p, taskId, id, now), LOCK_WAIT_MS2);
     } catch (e) {
       log(ctx.orchHome, `hook session-start: cannot link ${id} under ${parentId}: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
   try {
-    pruneEmptyPools(ctx, id);
+    await pruneEmptyPools(ctx, id);
   } catch (e) {
     log(ctx.orchHome, `hook session-start: prune: ${e instanceof Error ? e.message : String(e)}`);
   }
@@ -1016,18 +1035,10 @@ ${unset}`);
     `[orch] This session is a child of "${oneLine(parent?.title) || pool.parent.sessionId}" for its task ${pool.parent.taskId}${task ? ` ("${oneLine(task.text)}")` : ""}. Read ${pool.brief} first, ${next}.`
   );
 }
-var REPLY_FRAME = "[orch reply to: ";
 function clearAnswered(pool, prompt, now) {
-  if (typeof prompt !== "string" || !prompt.startsWith(REPLY_FRAME)) return clearQuestions(pool, now);
-  const m = /^"(?:[^"\\]|\\.)*"/.exec(prompt.slice(REPLY_FRAME.length));
-  let asked;
-  try {
-    asked = m && JSON.parse(m[0]);
-  } catch {
-    return void 0;
-  }
-  const quoted = (s) => Array.from(oneLine(s)).slice(0, 200).join("");
-  const task = typeof asked === "string" ? pool.tasks.find((t) => t.needsInput && quoted(t.needsInput) === asked) : void 0;
+  const frame = typeof prompt === "string" ? findFrame(prompt) : void 0;
+  if (!frame) return clearQuestions(pool, now);
+  const task = pool.tasks.find((t) => t.needsInput && frameQuestion(t.needsInput) === frame);
   return task ? clearQuestions(pool, now, task.id) : void 0;
 }
 async function promptSubmit(ctx, input) {
@@ -1042,7 +1053,7 @@ async function promptSubmit(ctx, input) {
       const q2 = p ?? newPool(id, input.cwd ?? ctx.cwd, now);
       return startTurn(clearAnswered(q2, input.prompt, now) ?? q2, now);
     },
-    LOCK_WAIT_MS
+    LOCK_WAIT_MS2
   );
   let didWork = false;
   if (since !== void 0 && input.transcript_path) {
@@ -1214,8 +1225,7 @@ async function reply(ctx, query, text, markOnly, taskId) {
     const row = flatten(rows).map((l) => l.row).find((r) => r.sessionId === sessionId);
     if (!row || row.state === "ended") throw new OrchError(`${name} has ended; its question stays open`);
     if (row.state === "waiting") throw new OrchError(`${name} is waiting on a dialog (${row.waitingFor}); answer that in the session first`);
-    const quoted = JSON.stringify(Array.from(oneLine(asked)).slice(0, 200).join(""));
-    const frame = (t) => `[orch reply to: ${quoted}] ${t}`;
+    const frame = (t) => `${frameQuestion(asked)} ${t}`;
     if (!row.paneId) {
       const payload = { route: "sendmessage", sessionId, name, cwd: pool?.cwd ?? row.cwd, taskId: task.id, text: frame(body) };
       return { code: EXIT_SENDMESSAGE, stdout: `${JSON.stringify(payload)}
@@ -1423,8 +1433,9 @@ async function cmdDone(ctx, args) {
     } else {
       evidence = e;
       if (e.kind === "ci" || e.kind === "pr") {
-        if (!readPool(ctx.orchHome, resolveSelf(ctx))?.tasks.some((t) => t.id === id)) throw new OrchError(`no task ${id} in this pool`);
-        const verdict = await ctx.gh.check(e, ctx.cwd);
+        const self = readPool(ctx.orchHome, resolveSelf(ctx));
+        if (!self?.tasks.some((t) => t.id === id)) throw new OrchError(`no task ${id} in this pool`);
+        const verdict = await ctx.gh.check(e, self.cwd || ctx.cwd);
         if (verdict === "fail") throw new OrchError(`refused: ${describeEvidence(e)} is failing, so ${id} stays open`);
         if (verdict !== "pass") unsettled = `${id} done; ${describeEvidence(e)} is ${verdict}, orch will keep checking it
 `;

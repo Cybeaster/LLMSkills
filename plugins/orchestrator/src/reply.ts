@@ -3,6 +3,7 @@ import type { Ctx } from './ctx.js'
 import { OrchError } from './errors.js'
 import { oneLine } from './evidence.js'
 import { flatten } from './format.js'
+import { frameQuestion } from './frame.js'
 import { clearQuestions } from './model.js'
 import { ok, type Out } from './out.js'
 import { HerdrError } from './sources/herdr.js'
@@ -40,8 +41,7 @@ export async function reply(ctx: Ctx, query: string, text: string | undefined, m
     const row = flatten(rows).map(l => l.row).find(r => r.sessionId === sessionId)
     if (!row || row.state === 'ended') throw new OrchError(`${name} has ended; its question stays open`)
     if (row.state === 'waiting') throw new OrchError(`${name} is waiting on a dialog (${row.waitingFor}); answer that in the session first`)
-    const quoted = JSON.stringify(Array.from(oneLine(asked)).slice(0, 200).join(''))
-    const frame = (t: string) => `[orch reply to: ${quoted}] ${t}`
+    const frame = (t: string) => `${frameQuestion(asked!)} ${t}`
     if (!row.paneId) {
       // Not in herdr: /orch delivers it with SendMessage, then runs orch reply --mark-only --task.
       const payload = { route: 'sendmessage', sessionId, name, cwd: pool?.cwd ?? row.cwd, taskId: task.id, text: frame(body) }

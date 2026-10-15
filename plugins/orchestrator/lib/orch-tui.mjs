@@ -21819,7 +21819,7 @@ function buildOverview(input) {
   const parents = new Set(input.pools.map((e) => e.pool?.parent?.sessionId));
   const blank = (id) => {
     const p = pools.get(id)?.pool;
-    return !live.has(id) && !!p && !p.tasks.length && !p.title && !parents.has(id);
+    return !live.has(id) && !!p && !p.tasks.length && !p.title && !p.parent && !p.brief && !parents.has(id);
   };
   for (const [id, e] of pools) if (e.error || e.pool && input.now - e.pool.updatedAt < DAY && !blank(id)) ids.add(id);
   for (let grew = true; grew; ) {

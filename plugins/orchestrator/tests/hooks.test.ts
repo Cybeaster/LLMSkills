@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { run } from '../src/cli.js'
+import { findFrame, frameQuestion } from '../src/frame.js'
 import { askTask, linkChild, newPool, plan } from '../src/model.js'
 import { poolPath, readPool, writePool } from '../src/store.js'
 import { makeCtx, writeSession, type TestCtx } from './helpers.js'
@@ -29,8 +30,21 @@ describe('hook prompt-submit and orch reply', () => {
   it('clears only the question an orch reply frame quotes', async () => {
     const ctx = makeCtx()
     twoQuestions(ctx)
-    await hook(ctx, 'prompt-submit', { session_id: 's-self', prompt: `[orch reply to: ${JSON.stringify('Strict or "lenient"?')}] lenient` })
+    await hook(ctx, 'prompt-submit', { session_id: 's-self', prompt: `${frameQuestion('Strict or "lenient"?')} lenient` })
     expect(asked(ctx)).toEqual([undefined, undefined, 'Which curve?'])
+  })
+
+  it('finds the frame after a prefix SendMessage may add', async () => {
+    const ctx = makeCtx()
+    twoQuestions(ctx)
+    await hook(ctx, 'prompt-submit', { session_id: 's-self', prompt: `Message from the coordinator:\n${frameQuestion('Which curve?')} the second` })
+    expect(asked(ctx)).toEqual([undefined, 'Strict or "lenient"?', undefined])
+  })
+
+  it('frames and finds a question the way the reply does', () => {
+    const q = 'long\nquestion ' + 'x'.repeat(300)
+    expect(findFrame(`pre ${frameQuestion(q)} body`)).toBe(frameQuestion(q))
+    expect(findFrame('no frame [orch reply to: oops')).toBeUndefined()
   })
 
   it('clears nothing when the quoted question matches no task', async () => {
@@ -71,6 +85,34 @@ describe('pruning empty pools at session start', () => {
     await start(ctx)
     expect(['old-empty'].every(id => gone(ctx, id))).toBe(true)
     for (const id of ['recent-empty', 'old-tasks', 'old-touched', 'old-live', 'old-parent', 'old-kid', 'old-listed', 's-new']) expect(gone(ctx, id), id).toBe(false)
+  })
+
+  it('keeps a pool that gets a task between the scan and the delete', async () => {
+    let raced = false
+    const ctx = makeCtx({ now: () => NOW })
+    writePool(ctx.orchHome, empty('racy', NOW - 8 * D))
+    writePool(ctx.orchHome, empty('quiet', NOW - 8 * D))
+    writeSession(ctx, { pid: 9, sessionId: 'other' })
+    // the first registry read happens after the pools were listed: that is the window
+    ctx.isAlive = () => {
+      if (!raced) {
+        raced = true
+        writePool(ctx.orchHome, plan(readPool(ctx.orchHome, 'racy')!, ['late task'], NOW))
+      }
+      return true
+    }
+    await start(ctx)
+    expect(raced).toBe(true)
+    expect(readPool(ctx.orchHome, 'racy')!.tasks).toHaveLength(1)
+    expect(gone(ctx, 'quiet')).toBe(true)
+  })
+
+  it('skips a pool whose lock is held', async () => {
+    const ctx = makeCtx({ now: () => NOW })
+    writePool(ctx.orchHome, empty('busy', NOW - 8 * D))
+    mkdirSync(`${poolPath(ctx.orchHome, 'busy')}.lock`)
+    await start(ctx)
+    expect(gone(ctx, 'busy')).toBe(false)
   })
 
   it('prunes at most once an hour', async () => {

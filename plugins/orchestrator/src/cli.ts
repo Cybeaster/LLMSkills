@@ -114,13 +114,15 @@ async function cmdDone(ctx: Ctx, args: string[]): Promise<Out> {
       }
       evidence = { kind: 'cmd', ref: e.ref, exit: 0 }
     } else {
-      evidence = e as Evidence
+      evidence = e
       if (e.kind === 'ci' || e.kind === 'pr') {
-        if (!readPool(ctx.orchHome, resolveSelf(ctx))?.tasks.some(t => t.id === id)) throw new OrchError(`no task ${id} in this pool`)
+        const self = readPool(ctx.orchHome, resolveSelf(ctx))
+        if (!self?.tasks.some(t => t.id === id)) throw new OrchError(`no task ${id} in this pool`)
+        // from the pool's cwd, where collect and the TUI recheck it: a bare number means that repo
         // an answer someone acts on waits for gh: no stale verdict
-        const verdict = await ctx.gh.check(e as Evidence, ctx.cwd)
-        if (verdict === 'fail') throw new OrchError(`refused: ${describeEvidence(e as Evidence)} is failing, so ${id} stays open`)
-        if (verdict !== 'pass') unsettled = `${id} done; ${describeEvidence(e as Evidence)} is ${verdict}, orch will keep checking it\n`
+        const verdict = await ctx.gh.check(e, self.cwd || ctx.cwd)
+        if (verdict === 'fail') throw new OrchError(`refused: ${describeEvidence(e)} is failing, so ${id} stays open`)
+        if (verdict !== 'pass') unsettled = `${id} done; ${describeEvidence(e)} is ${verdict}, orch will keep checking it\n`
       }
     }
   }

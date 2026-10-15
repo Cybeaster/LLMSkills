@@ -337,6 +337,15 @@ describe('orch task done with ci: and pr: evidence', () => {
     expect(readPool(ctx.orchHome, 's-self')!.tasks[0].status).toBe('pending')
   })
 
+  it('asks gh from the pool cwd, where it is rechecked later', async () => {
+    const gh = fakeGh('pass')
+    const ctx = makeCtx({ gh })
+    await run(['plan', 'a'], ctx)
+    writePool(ctx.orchHome, { ...readPool(ctx.orchHome, 's-self')!, cwd: '/work/tree' })
+    await run(['task', 'done', 't1', '--evidence', 'pr:41'], ctx)
+    expect(gh.calls.map(([, cwd]) => cwd)).toEqual(['/work/tree'])
+  })
+
   it('accepts evidence that passes', async () => {
     const { out, ctx } = await doneWith('pass', 'pr:41')
     expect(out).toMatchObject({ code: 0, stdout: 't1 done (pr 41)\n' })

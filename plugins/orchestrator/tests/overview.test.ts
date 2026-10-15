@@ -124,6 +124,18 @@ describe('buildOverview', () => {
     expect(rows[0].cwd).toBe('/src/a?b?c d')
   })
 
+  it('keeps an ended child that never planned, so it can be relinked', () => {
+    const rows = buildOverview(input({
+      pools: [
+        { id: 'P', pool: pool('P', [{ children: ['kid'] }]) },
+        { id: 'kid', pool: pool('kid', [], { parent: { sessionId: 'P', taskId: 't1' } }) },
+        { id: 'briefed', pool: pool('briefed', [], { brief: '/r/b.md' }) },
+      ],
+      live: [live('P')],
+    }))
+    expect(flatten(rows).map(l => l.row.sessionId).sort()).toEqual(['P', 'briefed', 'kid'])
+  })
+
   it('carries when a pool was last touched', () => {
     const rows = buildOverview(input({
       pools: [
