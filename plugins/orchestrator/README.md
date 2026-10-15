@@ -8,6 +8,12 @@ One view over every Claude Code session running on this machine.
 
 Design: [DESIGN.md](DESIGN.md). Plan: [PLAN.md](PLAN.md).
 
+## Requirements
+
+- Node 18+ for `bin/orch` and the hooks; Node 20+ for `orch tui` (`package.json` `engines` says `>=20`, but the CLI is deliberately kept runnable on 18).
+- `gh` for `pr:` and `ci:` evidence.
+- herdr for the TUI's `f` key, for in-pane replies, and for `spawn-child` in a tab.
+
 ## Install
 
 ```bash
@@ -15,17 +21,19 @@ claude plugin marketplace add ~/src/ClaudeSkills     # once
 claude plugin install orchestrator@claude-skills
 ```
 
-Then start (or restart) sessions; each registers itself. `orch` is on PATH only inside Claude's own shell, so for the overview pane add an alias once and run `orch tui` in a herdr pane of its own:
+Then start (or restart) sessions; each registers itself. `orch` is on PATH only inside Claude's own shell, so for the overview pane add a shell function once (it resolves the highest installed version at call time) and run `orch tui` in a herdr pane of its own:
 
 ```bash
-alias orch="$(ls -d ~/.claude/plugins/cache/claude-skills/orchestrator/*/ | tail -1)bin/orch"
+orch() { "$(ls -d ~/.claude/plugins/cache/claude-skills/orchestrator/*/ | sort -V | tail -1)bin/orch" "$@"; }
 ```
 
-If Claude Code's Bash sandbox is on, `orch` inside it cannot see other sessions or write its store: every session shows as ended and `orch plan` fails. Exclude it in your user settings (`~/.claude/settings.json`; project settings are ignored for this key):
+If Claude Code's Bash sandbox is on, `orch` inside it cannot see other sessions or write its store: every session shows as ended and `orch plan` fails. `orch` needs to read other sessions' process info and write its store, so it has to be excluded from the sandbox. Be aware of what that means: `orch task done … --evidence cmd:"…"` runs any command, and an excluded `orch *` runs it outside the sandbox, so this opens the sandbox for every session. Put it in your user settings (`~/.claude/settings.json`); project settings are ignored for this key when the sandbox is admin-required:
 
 ```json
 { "sandbox": { "excludedCommands": ["orch *"] } }
 ```
+
+The exclusion does not cover compound calls like `cd x && orch …`.
 
 ## TUI keys
 

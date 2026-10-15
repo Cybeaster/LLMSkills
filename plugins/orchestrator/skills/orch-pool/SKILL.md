@@ -20,7 +20,7 @@ The person runs many Claude sessions at once and follows them through one overvi
 
 ## When you need the person
 
-Run `orch ask <taskId> "the question"`, then send a push notification naming this session and the question. The person may answer from their phone; the answer arrives as your next prompt, prefixed `[orch reply to: "…"]`.
+Run `orch ask <taskId> "the question"`, then send a push notification with the PushNotification tool naming this session and the question. The person may answer from their phone; the answer arrives as your next prompt, prefixed `[orch reply to: "…"]`.
 
 ## If you are a child
 
