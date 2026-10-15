@@ -68,6 +68,22 @@ describe('readLiveSessions', () => {
     expect(s.map(x => x.waitingFor)).toEqual([undefined, undefined, undefined, 'input'])
   })
 
+  it('falls back to input when a waiting session names nothing readable, and cleans what it names', () => {
+    const waiting = (pid: number, waitingFor: unknown) =>
+      `${JSON.stringify({ pid, sessionId: `s-${pid}`, cwd: '/tmp', status: 'waiting', waitingFor })}`
+    const home = homeWith({
+      '231.json': waiting(231, '  '),
+      '232.json': waiting(232, ''),
+      '233.json': waiting(233, '\n\u001b\u0007'),
+      '234.json': waiting(234, 7),
+      '235.json': waiting(235, 'dialog\nopen\u001b]0;x\u0007'),
+      '236.json': waiting(236, 'permission prompt'),
+    })
+    const s = readLiveSessions(home, alive).sort((a, b) => a.pid - b.pid)
+    expect(s.map(x => x.waitingFor)).toEqual(['input', 'input', 'input', 'input', 'dialog open ]0;x', 'permission prompt'])
+    expect(s.every(x => x.status === 'idle')).toBe(true)
+  })
+
   it('falls back to an empty cwd and no name when they are not strings', () => {
     const home = homeWith({
       '221.json': '{"pid":221,"sessionId":"s-bare","status":"idle"}',

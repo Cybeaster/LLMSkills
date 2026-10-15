@@ -7,8 +7,12 @@ import { sessionLink, type LiveSession } from './sources/sessions.js'
 export const DAY = 24 * 60 * 60 * 1000
 
 // Clips evidence text only, to keep a pool row on one line; the live verdict is appended after clipping so it
-// always shows. A question or a blocked reason is never clipped: /orch needs the whole of it.
-const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
+// always shows. A question or a blocked reason is never clipped: /orch needs the whole of it. It cuts by
+// code point, so an emoji at the cut is never split.
+const clip = (s: string, n: number) => {
+  const chars = Array.from(s)
+  return chars.length > n ? `${chars.slice(0, n - 1).join('')}…` : s
+}
 
 export type Mark = '✓' | '~' | '✗' | '?' | '◐' | '·' | '!' | '⚑'
 export type TaskView = { id: string; text: string; status: Status; mark: Mark; detail: string }
@@ -139,7 +143,7 @@ export function buildOverview(input: OverviewInput): Row[] {
       link: sessionLink(s),
       pid: s?.pid,
       hasPool: tasks.length > 0,
-      unreadable: e?.error,
+      unreadable: e?.error === undefined ? undefined : oneLine(e.error),
       orphan: !!parent && !pools.has(parent) && !live.has(parent),
       done,
       total: tasks.length,

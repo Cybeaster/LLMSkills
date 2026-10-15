@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { checkKey, type Check } from '../src/evidence.js'
 import { header, flatten } from '../src/format.js'
@@ -5,6 +8,7 @@ import { newPool, type Pool, type Task } from '../src/model.js'
 import { buildOverview, DAY, type OverviewInput, type Row } from '../src/overview.js'
 import type { HerdrAgent } from '../src/sources/herdr.js'
 import type { LiveSession } from '../src/sources/sessions.js'
+import { listPools } from '../src/store.js'
 
 const NOW = 10 * DAY
 
@@ -202,6 +206,40 @@ describe('buildOverview', () => {
       const [row] = buildOverview(input(over))
       expect(row[field]).toBe('a b ]0;x')
     })
+  })
+
+  it('keeps the reason a pool is unreadable on one line', () => {
+    const rows = buildOverview(input({
+      pools: [{ id: 'B', error: 'bad\njson\u001b]0;x\u0007 here' }, { id: 'G', pool: pool('G', [{}]) }],
+      live: [live('B'), live('G')],
+    }))
+    expect(rows.find(r => r.sessionId === 'B')!.unreadable).toBe('bad json ]0;x here')
+    expect(rows.find(r => r.sessionId === 'G')!.unreadable).toBeUndefined()
+  })
+
+  it('keeps the error of a real broken pool file on one line', () => {
+    // V8 quotes the start of the bad JSON in its message, so a session can get its own bytes into it
+    const home = mkdtempSync(join(tmpdir(), 'orch-overview-'))
+    try {
+      writeFileSync(join(home, 's1.json'), '{"a":\n\u001b]0;x\u0007')
+      const [entry] = listPools(home)
+      expect(entry.error).toMatch(/[\u0000-\u001f]/)
+      const [row] = buildOverview(input({ pools: [entry], live: [live('s1')] }))
+      expect(row.unreadable).toContain('is not valid JSON')
+      expect(row.unreadable).not.toMatch(/[\u0000-\u001f\u007f]/)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('clips evidence by code point, so an emoji at the cut is not split', () => {
+    // 'note: ' + 32 x is 38 characters, so the emoji starts at the 39th; the clip keeps 39 and adds the ellipsis
+    const [row] = buildOverview(input({
+      pools: [{ id: 'S', pool: pool('S', [{ status: 'done', evidence: { kind: 'note', ref: `${'x'.repeat(32)}😀tail` } }]) }],
+      live: [live('S')],
+    }))
+    expect(row.tasks[0].detail).toBe(`note: ${'x'.repeat(32)}😀…`)
+    expect(row.tasks[0].detail).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/)
   })
 
   it('does not clip a question or a blocked reason', () => {

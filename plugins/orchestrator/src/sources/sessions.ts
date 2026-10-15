@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { oneLine } from '../evidence.js'
 
 export type LiveSession = {
   pid: number
@@ -61,7 +62,8 @@ export function readLiveSessions(
         cwd: typeof o.cwd === 'string' ? o.cwd : '',
         name: typeof o.name === 'string' ? o.name : undefined,
         status: o.status === 'busy' ? 'busy' : 'idle',
-        waitingFor: o.status === 'waiting' ? (typeof o.waitingFor === 'string' ? o.waitingFor : 'input') : undefined,
+        // a blank or unprintable reason still means the session is waiting, so it falls back to 'input'
+        waitingFor: o.status === 'waiting' ? oneLine(typeof o.waitingFor === 'string' ? o.waitingFor : '') || 'input' : undefined,
         bridgeSessionId: typeof o.bridgeSessionId === 'string' ? o.bridgeSessionId : undefined,
       })
     } catch {
