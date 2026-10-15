@@ -1258,6 +1258,7 @@ describe('parseEvidence', () => {
 
   it('accepts every kind', () => {
     expect(parseEvidence('commit:9f3e2a1')).toEqual({ kind: 'commit', ref: '9f3e2a1' })
+    expect(parseEvidence(`commit:${'a'.repeat(64)}`)).toEqual({ kind: 'commit', ref: 'a'.repeat(64) })
     expect(parseEvidence('pr:41')).toEqual({ kind: 'pr', ref: '41' })
     expect(parseEvidence('note: looked fine ')).toEqual({ kind: 'note', ref: 'looked fine' })
   })
@@ -1983,6 +1984,21 @@ describe('buildOverview', () => {
     expect(row.tasks[3].detail).toBe('needs key')
   })
 
+  it('clips long evidence but keeps the live verdict', () => {
+    const url = 'https://github.com/kvalitskii/ClaudeSkills/actions/runs/12345678901'
+    const [row] = buildOverview(input({
+      pools: [{ id: 'S', pool: pool('S', [
+        { status: 'done', evidence: { kind: 'ci', ref: url } },
+        { status: 'done', evidence: { kind: 'note', ref: 'x'.repeat(80) } },
+      ]) }],
+      live: [live('S')],
+      checks: new Map<string, Check>([[checkKey({ kind: 'ci', ref: url }, '/src/S'), 'fail']]),
+    }))
+    expect(row.tasks[0].detail).toMatch(/… ✗ failing \(live\)$/)
+    expect(row.tasks[1].detail).toHaveLength(40)
+    expect(row.tasks[1].detail).toMatch(/x…$/)
+  })
+
   it('tags sessions outside herdr as external and links Remote Control sessions', () => {
     const [row] = buildOverview(input({ live: [live('S', { name: 'api-fix', bridgeSessionId: 'session_01X', pid: 77 })], agents: [] }))
     expect(row).toMatchObject({ name: 'api-fix', tag: 'external', hasPool: false, link: 'https://claude.ai/code/session_01X', pid: 77 })
@@ -2063,9 +2079,6 @@ describe('format', () => {
     const lines = poolLines(row({ name: 'p', title: 'Courses', tasks: [{ id: 't1', text: 'Write brief', status: 'done', mark: '✓', detail: 'commit 9f3e2a1' }] }))
     expect(lines[0]).toBe('p — Courses')
     expect(lines[1]).toMatch(/^✓ t1\s+Write brief\s+commit 9f3e2a1$/)
-    const long = poolLines(row({ name: 'p', tasks: [{ id: 't1', text: 'a', status: 'done', mark: '~', detail: `note: ${'x'.repeat(80)}` }] }))
-    expect(long[1]).toMatch(/x…$/)
-    expect(long[1].length).toBeLessThanOrEqual(92)
     expect(poolLines(row({ name: 'p', tasks: [] }))).toEqual(['p', '(no pool yet)'])
   })
 })
@@ -2088,6 +2101,9 @@ import type { HerdrAgent } from './sources/herdr.js'
 import { sessionLink, type LiveSession } from './sources/sessions.js'
 
 export const DAY = 24 * 60 * 60 * 1000
+
+// Keeps a pool row on one line; the live verdict is appended after clipping so it always shows.
+const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
 
 export type Mark = '✓' | '~' | '✗' | '?' | '◐' | '·' | '!' | '⚑'
 export type TaskView = { id: string; text: string; status: Status; mark: Mark; detail: string }
@@ -2137,7 +2153,7 @@ function viewTask(t: Task, cwd: string, checks: Map<string, Check>, childDone: (
   } else if (status === 'done') {
     const g = grade(t.evidence, t.evidence ? checks.get(checkKey(t.evidence, cwd)) : undefined)
     mark = g === 'proven' ? '✓' : g === 'claimed' ? '~' : g === 'contradicted' ? '✗' : '?'
-    detail = t.evidence ? describeEvidence(t.evidence) : 'claimed, no evidence'
+    detail = t.evidence ? clip(describeEvidence(t.evidence), 40) : 'claimed, no evidence'
     if (g === 'contradicted') detail += ' ✗ failing (live)'
     if (g === 'unverified') detail += ' (unverified)'
   } else if (status === 'in_progress') {
@@ -2283,7 +2299,7 @@ export function renderList(rows: Row[]): string {
 export function poolLines(row: Row): string[] {
   const head = `${row.name}${row.title ? ` — ${row.title}` : ''}`
   if (!row.tasks.length) return [head, '(no pool yet)']
-  return [head, ...row.tasks.map(t => `${t.mark} ${t.id.padEnd(4)} ${pad(t.text, 34)} ${pad(t.detail, 50)}`.trimEnd())]
+  return [head, ...row.tasks.map(t => `${t.mark} ${t.id.padEnd(4)} ${pad(t.text, 34)} ${t.detail}`.trimEnd())]
 }
 
 export const renderPool = (row: Row) => poolLines(row).join('\n') + '\n'
@@ -2497,6 +2513,13 @@ describe('orch status', () => {
     expect(json.map((r: { name: string }) => r.name).sort()).toEqual(['me', 'other'])
   })
 
+  it('grades CI evidence with the live check', async () => {
+    const ctx = makeCtx({ gh: { check: async () => 'fail' } })
+    await run(['plan', 'a'], ctx)
+    await run(['task', 'done', 't1', '--evidence', 'ci:https://github.com/o/r/actions/runs/1'], ctx)
+    expect((await run(['status'], ctx)).stdout).toMatch(/^✗ t1 /m)
+  })
+
   it('prints help and rejects unknown commands', async () => {
     expect((await run([], makeCtx())).stdout).toMatch(/orch plan/)
     expect((await run(['frob'], makeCtx())).code).toBe(2)
@@ -2637,7 +2660,7 @@ export async function collect(ctx: Ctx): Promise<Row[]> {
     pools.flatMap(e =>
       (e.pool?.tasks ?? [])
         .filter(t => t.status === 'done' && (t.evidence?.kind === 'ci' || t.evidence?.kind === 'pr'))
-        .map(async t => checks.set(checkKey(t.evidence!, e.pool!.cwd), await ctx.gh.check(t.evidence!, e.pool!.cwd))),
+        .map(async t => checks.set(checkKey(t.evidence!, e.pool!.cwd ?? ''), await ctx.gh.check(t.evidence!, e.pool!.cwd))),
     ),
   )
   return buildOverview({ pools, live, agents, checks, now: ctx.now() })

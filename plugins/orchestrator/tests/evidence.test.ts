@@ -20,6 +20,7 @@ describe('parseEvidence', () => {
 
   it('accepts every kind', () => {
     expect(parseEvidence('commit:9f3e2a1')).toEqual({ kind: 'commit', ref: '9f3e2a1' })
+    expect(parseEvidence(`commit:${'a'.repeat(64)}`)).toEqual({ kind: 'commit', ref: 'a'.repeat(64) })
     expect(parseEvidence('pr:41')).toEqual({ kind: 'pr', ref: '41' })
     expect(parseEvidence('note: looked fine ')).toEqual({ kind: 'note', ref: 'looked fine' })
   })
