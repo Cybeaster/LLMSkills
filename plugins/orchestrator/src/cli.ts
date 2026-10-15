@@ -5,11 +5,14 @@ import { OrchError } from './errors.js'
 import { describeEvidence, parseEvidence } from './evidence.js'
 import { flatten, renderList, renderPool } from './format.js'
 import { runHook } from './hooks.js'
+import { linkSessions } from './link.js'
 import { addTask, askTask, blockTask, doneTask, newPool, plan, setTitle, startTask, type Evidence, type Pool } from './model.js'
 import { ok, type Out } from './out.js'
 import { buildOverview } from './overview.js'
-import { resolveSelf } from './self.js'
+import { resolveSelf, trySelf } from './self.js'
+import { spawnChild } from './spawn.js'
 import { listPools, readPool, update } from './store.js'
+import { resolveTarget } from './targets.js'
 
 const HELP = `orch — task pools for Claude Code sessions
 
@@ -176,6 +179,30 @@ export function describeFailure(e: unknown): string {
   return `orch: ${message}\n${sandbox ? `if Claude Code's Bash sandbox is on, add "orch *" to sandbox.excludedCommands in ~/.claude/settings.json\n` : ''}`
 }
 
+async function cmdLink(ctx: Ctx, args: string[]): Promise<Out> {
+  const [child, parent, taskId] = [need(args[0], 'child session'), need(args[1], 'parent session'), need(args[2], 'parent task id')]
+  const rows = await collect(ctx)
+  const c = resolveTarget(rows, child)
+  const p = resolveTarget(rows, parent)
+  await linkSessions(ctx, c.sessionId, p.sessionId, taskId, { byParent: trySelf(ctx) === p.sessionId })
+  return ok(`${c.name} is now under ${p.name} ${taskId}\n`)
+}
+
+async function cmdSpawn(ctx: Ctx, args: string[]): Promise<Out> {
+  const { values, positionals } = parseArgs({
+    args,
+    options: { name: { type: 'string' }, cwd: { type: 'string' }, brief: { type: 'string' }, prompt: { type: 'string' } },
+    allowPositionals: true,
+  })
+  return spawnChild(ctx, {
+    taskId: need(positionals[0], 'task id'),
+    name: need(values.name, '--name'),
+    cwd: need(values.cwd, '--cwd'),
+    brief: need(values.brief, '--brief'),
+    prompt: values.prompt,
+  })
+}
+
 export async function run(argv: string[], ctx: Ctx): Promise<Out> {
   const [cmd, ...rest] = argv
   // --help or -h anywhere before a `--` is a request for help, never task text
@@ -195,6 +222,10 @@ export async function run(argv: string[], ctx: Ctx): Promise<Out> {
         return await cmdStatus(ctx, rest)
       case 'hook':
         return await runHook(ctx, rest[0])
+      case 'link':
+        return await cmdLink(ctx, rest)
+      case 'spawn-child':
+        return await cmdSpawn(ctx, rest)
       case undefined:
       case 'help':
       case '--help':

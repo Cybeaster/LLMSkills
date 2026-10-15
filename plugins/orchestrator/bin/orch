@@ -423,8 +423,8 @@ import { join as join3 } from "node:path";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-var runGh = (args, cwd) => new Promise((resolve) => {
-  execFile("gh", args, { cwd, timeout: 2e4 }, (err, stdout) => resolve({ code: err ? 1 : 0, stdout: String(stdout) }));
+var runGh = (args, cwd) => new Promise((resolve2) => {
+  execFile("gh", args, { cwd, timeout: 2e4 }, (err, stdout) => resolve2({ code: err ? 1 : 0, stdout: String(stdout) }));
 });
 var FAILED = ["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"];
 var PASSED = ["SUCCESS", "NEUTRAL", "SKIPPED"];
@@ -497,12 +497,12 @@ var START_TIMEOUT_MS = 75e3;
 var WAIT_SLACK_MS = 1e4;
 var runHerdr = (args, timeoutMs) => {
   const limit = timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  return new Promise((resolve) => {
+  return new Promise((resolve2) => {
     execFile2("herdr", args, { timeout: limit, maxBuffer: 16 << 20 }, (err, stdout, stderr) => {
       const timedOut = err?.killed === true && typeof err.code !== "string";
       const code = err ? typeof err.code === "number" ? err.code : 127 : 0;
       const error = err ? timedOut ? `timed out after ${limit}ms` : err.message : void 0;
-      resolve({ code, stdout: String(stdout), stderr: String(stderr), error });
+      resolve2({ code, stdout: String(stdout), stderr: String(stderr), error });
     });
   });
 };
@@ -601,7 +601,7 @@ var FORWARDED = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"];
 function execShell(command, cwd, opts = {}) {
   const { timeoutMs = CMD_TIMEOUT_MS, graceMs = 2e3, closeWaitMs = 1e3 } = opts;
   if (!existsSync2(cwd)) return Promise.resolve({ code: 127, out: `directory ${cwd} does not exist` });
-  return new Promise((resolve) => {
+  return new Promise((resolve2) => {
     let out = "";
     let pid;
     let timedOut = false;
@@ -631,7 +631,7 @@ function execShell(command, cwd, opts = {}) {
       clearTimeout(killTimer);
       for (const sig of FORWARDED) process.off(sig, terminate);
       killGroup("SIGKILL");
-      resolve({ ...r, out, ...timedOut ? { timedOut } : {} });
+      resolve2({ ...r, out, ...timedOut ? { timedOut } : {} });
     };
     for (const sig of FORWARDED) process.on(sig, terminate);
     let child;
@@ -829,6 +829,16 @@ function linkChild(pool, taskId, childId, now, byOwner = false) {
   p.updatedAt = now;
   return p;
 }
+function unlinkChild(pool, taskId, childId, now) {
+  const p = clone(pool);
+  const t = p.tasks.find((t2) => t2.id === taskId);
+  if (t?.children) {
+    t.children = t.children.filter((c) => c !== childId);
+    if (!t.children.length) delete t.children;
+  }
+  p.updatedAt = now;
+  return p;
+}
 function startTurn(pool, now) {
   const p = clone(pool);
   p.turnStartedAt = now;
@@ -884,10 +894,10 @@ ${unset}`);
     ctx.orchHome,
     id,
     (p) => {
-      const q = p ?? newPool(id, input.cwd ?? ctx.cwd, now);
-      if (!linking || q.parent) return q;
-      if (linkable) return setParent(q, { sessionId: parentId, taskId }, brief, now);
-      return brief ? { ...q, brief, updatedAt: now } : q;
+      const q2 = p ?? newPool(id, input.cwd ?? ctx.cwd, now);
+      if (!linking || q2.parent) return q2;
+      if (linkable) return setParent(q2, { sessionId: parentId, taskId }, brief, now);
+      return brief ? { ...q2, brief, updatedAt: now } : q2;
     },
     LOCK_WAIT_MS
   );
@@ -921,8 +931,8 @@ async function promptSubmit(ctx, input) {
     ctx.orchHome,
     id,
     (p) => {
-      const q = p ?? newPool(id, input.cwd ?? ctx.cwd, now);
-      return startTurn(clearQuestions(q, now) ?? q, now);
+      const q2 = p ?? newPool(id, input.cwd ?? ctx.cwd, now);
+      return startTurn(clearQuestions(q2, now) ?? q2, now);
     },
     LOCK_WAIT_MS
   );
@@ -966,6 +976,28 @@ function readTail(path, max) {
   }
 }
 
+// src/link.ts
+async function linkSessions(ctx, childId, parentId, taskId, opts = {}) {
+  if (childId === parentId) throw new OrchError("a session cannot be its own parent");
+  const parentOf = (id) => {
+    try {
+      return readPool(ctx.orchHome, id)?.parent?.sessionId;
+    } catch {
+      return void 0;
+    }
+  };
+  for (let id = parentOf(parentId), n = 0; id && n < 64; id = parentOf(id), n++)
+    if (id === childId) throw new OrchError("that parent sits below this session; linking it would make a cycle");
+  if (!readPool(ctx.orchHome, parentId)?.tasks.some((t) => t.id === taskId)) throw new OrchError(`the parent has no task ${taskId}`);
+  const now = ctx.now();
+  const previous = readPool(ctx.orchHome, childId)?.parent;
+  const cwd = readLiveSessions(ctx.claudeHome, ctx.isAlive).find((s) => s.sessionId === childId)?.cwd ?? "";
+  await update(ctx.orchHome, childId, (p) => setParent(p ?? newPool(childId, cwd, now), { sessionId: parentId, taskId }, opts.brief, now));
+  if (previous && (previous.sessionId !== parentId || previous.taskId !== taskId))
+    await updateIfExists(ctx.orchHome, previous.sessionId, (p) => unlinkChild(p, previous.taskId, childId, now));
+  await updateIfExists(ctx.orchHome, parentId, (p) => linkChild(p, taskId, childId, now, opts.byParent));
+}
+
 // src/self.ts
 function resolveSelf(ctx) {
   const fromEnv = ctx.env.CLAUDE_CODE_SESSION_ID || ctx.env.CLAUDE_SESSION_ID;
@@ -984,6 +1016,73 @@ function resolveSelf(ctx) {
     pid = ctx.ppidOf(pid);
   }
   throw new OrchError("cannot tell which session this is: run orch from inside a Claude Code session");
+}
+function trySelf(ctx) {
+  try {
+    return resolveSelf(ctx);
+  } catch {
+    return void 0;
+  }
+}
+
+// src/spawn.ts
+import { existsSync as existsSync3 } from "node:fs";
+import { resolve } from "node:path";
+var q = (s) => `'${s.replace(/'/g, `'\\''`)}'`;
+function agentName(base, taken) {
+  const b = base.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^[^a-z]+/, "").slice(0, 28) || "child";
+  let name = b;
+  for (let i = 2; taken.includes(name); i++) name = `${b}-${i}`;
+  return name;
+}
+async function spawnChild(ctx, o) {
+  const parentId = resolveSelf(ctx);
+  const parent = readPool(ctx.orchHome, parentId);
+  const task = parent?.tasks.find((t) => t.id === o.taskId);
+  if (!parent || !task) throw new OrchError(`no task ${o.taskId} in this pool: run orch plan first`);
+  const cwd = resolve(ctx.cwd, o.cwd);
+  const brief = resolve(ctx.cwd, o.brief);
+  if (!existsSync3(cwd)) throw new OrchError(`cwd does not exist: ${cwd}`);
+  if (!existsSync3(brief)) throw new OrchError(`brief not found: ${brief}: write the brief first`);
+  const intro = `You are a child session of "${parent.title || parentId}", working on its task ${task.id}: "${task.text}". Read ${brief} first, then run \`orch plan\` for your part and tick each task with evidence.` + (o.prompt ? `
+
+${o.prompt}` : "");
+  if (ctx.env.HERDR_ENV !== "1" || !ctx.env.HERDR_WORKSPACE_ID) {
+    const cmd = `cd ${q(cwd)} && ORCH_PARENT=${parentId} ORCH_PARENT_TASK=${task.id} ORCH_BRIEF=${q(brief)} claude --remote-control ${q(o.name)} ${q(intro)}`;
+    return ok(`Not inside herdr. Start the child yourself:
+${cmd}
+`);
+  }
+  const name = agentName(o.name, (await ctx.herdr.list()).map((a) => a.name));
+  const { paneId } = await ctx.herdr.createTab({ workspace: ctx.env.HERDR_WORKSPACE_ID, cwd, label: name });
+  try {
+    await ctx.herdr.startClaude({ name, paneId, args: ["--remote-control", name] });
+  } catch (e) {
+    const trust = e instanceof HerdrError && e.herdrCode === "agent_not_ready";
+    throw new OrchError(
+      `${name} did not become ready in ${paneId} (${e instanceof Error ? e.message : String(e)}). ` + (trust ? `If that pane asks "Do you trust this folder?", ${cwd} has never been opened in Claude: answer it there, then run: ` : "Once it runs, link it: ") + `orch link ${name} ${parentId} ${task.id}`
+    );
+  }
+  let childId;
+  for (let i = 0; i < 60 && !childId; i++) {
+    childId = await ctx.herdr.sessionIdOf(name);
+    if (!childId) await ctx.sleep(500);
+  }
+  if (!childId) throw new OrchError(`started ${name} in ${paneId} but could not read its session id; link it later: orch link ${name} ${parentId} ${task.id}`);
+  await linkSessions(ctx, childId, parentId, task.id, { brief, byParent: true });
+  await ctx.herdr.prompt(name, intro);
+  return ok(`${JSON.stringify({ sessionId: childId, agent: name, paneId })}
+`);
+}
+
+// src/targets.ts
+function resolveTarget(rows, query) {
+  const all = flatten(rows).map((l) => l.row);
+  const exact = all.filter((r) => r.sessionId === query || r.name === query);
+  const matches = exact.length ? exact : all.filter((r) => query.length >= 6 && r.sessionId.startsWith(query) || r.title === query);
+  if (matches.length === 1) return matches[0];
+  if (!matches.length) throw new OrchError(`no session matches "${query}"`);
+  throw new OrchError(`"${query}" matches several sessions: ${matches.map((r) => `${r.name} (${r.sessionId.slice(0, 8)})`).join(", ")}`);
 }
 
 // src/cli.ts
@@ -1134,6 +1233,29 @@ function describeFailure(e) {
 ${sandbox ? `if Claude Code's Bash sandbox is on, add "orch *" to sandbox.excludedCommands in ~/.claude/settings.json
 ` : ""}`;
 }
+async function cmdLink(ctx, args) {
+  const [child, parent, taskId] = [need(args[0], "child session"), need(args[1], "parent session"), need(args[2], "parent task id")];
+  const rows = await collect(ctx);
+  const c = resolveTarget(rows, child);
+  const p = resolveTarget(rows, parent);
+  await linkSessions(ctx, c.sessionId, p.sessionId, taskId, { byParent: trySelf(ctx) === p.sessionId });
+  return ok(`${c.name} is now under ${p.name} ${taskId}
+`);
+}
+async function cmdSpawn(ctx, args) {
+  const { values, positionals } = parseArgs({
+    args,
+    options: { name: { type: "string" }, cwd: { type: "string" }, brief: { type: "string" }, prompt: { type: "string" } },
+    allowPositionals: true
+  });
+  return spawnChild(ctx, {
+    taskId: need(positionals[0], "task id"),
+    name: need(values.name, "--name"),
+    cwd: need(values.cwd, "--cwd"),
+    brief: need(values.brief, "--brief"),
+    prompt: values.prompt
+  });
+}
 async function run(argv, ctx) {
   const [cmd, ...rest] = argv;
   const flags = rest.includes("--") ? rest.slice(0, rest.indexOf("--")) : rest;
@@ -1152,6 +1274,10 @@ async function run(argv, ctx) {
         return await cmdStatus(ctx, rest);
       case "hook":
         return await runHook(ctx, rest[0]);
+      case "link":
+        return await cmdLink(ctx, rest);
+      case "spawn-child":
+        return await cmdSpawn(ctx, rest);
       case void 0:
       case "help":
       case "--help":
