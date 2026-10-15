@@ -1,12 +1,18 @@
-import { spawn } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { spawn, type ChildProcessByStdio } from 'node:child_process'
+import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import type { Readable } from 'node:stream'
 import { cliGh, type Gh } from './sources/gh.js'
 import { cliHerdr, type Herdr } from './sources/herdr.js'
 import { pidAlive } from './sources/sessions.js'
 
-export type ExecResult = { code: number; out: string }
+// signal: the command was killed by it (code is then 1). timedOut: orch killed it at CMD_TIMEOUT_MS.
+export type ExecResult = { code: number; out: string; signal?: string; timedOut?: boolean }
+
+// Under the Bash tool's 2-minute default, so orch answers before the tool gives up on it.
+export const CMD_TIMEOUT_MS = 110_000
+const OUT_KEEP = 64 * 1024
 
 // Every side effect a command needs. Tests pass a fake (tests/helpers.ts).
 export type Ctx = {
@@ -35,14 +41,77 @@ export function ppidOf(pid: number): number | undefined {
   }
 }
 
-export function execShell(command: string, cwd: string): Promise<ExecResult> {
+export type ExecOptions = { timeoutMs?: number; graceMs?: number; closeWaitMs?: number }
+
+// Runs `bash -c` in its own process group, so a timeout or a signal to orch takes the whole tree down.
+// Keeps the last 64 KB of stdout and stderr together. Resolves when the shell exits; a background child
+// that still holds the pipes gets closeWaitMs to let go, then the group is killed.
+export function execShell(command: string, cwd: string, opts: ExecOptions = {}): Promise<ExecResult> {
+  const { timeoutMs = CMD_TIMEOUT_MS, graceMs = 2_000, closeWaitMs = 1_000 } = opts
+  if (!existsSync(cwd)) return Promise.resolve({ code: 127, out: `directory ${cwd} does not exist` })
   return new Promise(resolve => {
-    const child = spawn('bash', ['-c', command], { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
     let out = ''
-    child.stdout.on('data', d => (out += d))
-    child.stderr.on('data', d => (out += d))
-    child.on('error', e => resolve({ code: 127, out: String(e) }))
-    child.on('close', code => resolve({ code: code ?? 1, out }))
+    let pid: number | undefined
+    let timedOut = false
+    let terminating = false
+    let settled = false
+    let killTimer: NodeJS.Timeout | undefined
+    const killGroup = (sig: NodeJS.Signals) => {
+      try {
+        if (pid) process.kill(-pid, sig)
+      } catch {
+        // already gone
+      }
+    }
+    // SIGTERM first; SIGKILL after the grace period, at once if asked again
+    const terminate = () => {
+      if (terminating) return killGroup('SIGKILL')
+      terminating = true
+      killGroup('SIGTERM')
+      killTimer = setTimeout(() => killGroup('SIGKILL'), graceMs)
+    }
+    const deadline = setTimeout(() => {
+      timedOut = true
+      terminate()
+    }, timeoutMs)
+    const settle = (r: ExecResult) => {
+      if (settled) return
+      settled = true
+      clearTimeout(deadline)
+      clearTimeout(killTimer)
+      process.off('SIGINT', terminate)
+      process.off('SIGTERM', terminate)
+      killGroup('SIGKILL')
+      resolve({ ...r, out, ...(timedOut ? { timedOut } : {}) })
+    }
+    // listening before the shell exists, so a signal can never arrive while nobody would forward it
+    process.on('SIGINT', terminate)
+    process.on('SIGTERM', terminate)
+
+    let child: ChildProcessByStdio<null, Readable, Readable>
+    try {
+      child = spawn('bash', ['-c', command], { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    } catch (e) {
+      out = String(e)
+      return settle({ code: 127, out })
+    }
+    pid = child.pid
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    const keep = (d: string) => (out = (out + d).slice(-OUT_KEEP))
+    child.stdout.on('data', keep)
+    child.stderr.on('data', keep)
+    child.on('error', e => {
+      out = String(e)
+      settle({ code: 127, out })
+    })
+    let exited: ExecResult | undefined
+    child.on('exit', (code, signal) => {
+      exited = { code: code ?? 1, out, ...(signal ? { signal } : {}) }
+      setTimeout(() => settle(exited!), closeWaitMs).unref()
+    })
+    // close comes after exit, once the pipes are drained
+    child.on('close', () => exited && settle(exited))
   })
 }
 
@@ -66,7 +135,7 @@ export function realCtx(): Ctx {
     ppidOf,
     isAlive: pidAlive,
     readStdin,
-    exec: execShell,
+    exec: (command, cwd) => execShell(command, cwd),
     herdr: cliHerdr(),
     gh: cliGh(),
   }

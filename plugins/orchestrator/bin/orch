@@ -83,7 +83,7 @@ function readLiveSessions(claudeHome, isAlive = pidAlive) {
   } catch {
     return [];
   }
-  const out2 = [];
+  const out = [];
   for (const n of names) {
     if (!/^\d+\.json$/.test(n)) continue;
     try {
@@ -91,7 +91,7 @@ function readLiveSessions(claudeHome, isAlive = pidAlive) {
       if (o.spare === true || typeof o.parkedJobId === "string") continue;
       if (typeof o.sessionId !== "string" || typeof o.pid !== "number") continue;
       if (!isAlive(o.pid, typeof o.procStart === "string" ? o.procStart : void 0)) continue;
-      out2.push({
+      out.push({
         pid: o.pid,
         sessionId: o.sessionId,
         cwd: typeof o.cwd === "string" ? o.cwd : "",
@@ -104,7 +104,7 @@ function readLiveSessions(claudeHome, isAlive = pidAlive) {
     } catch {
     }
   }
-  return out2;
+  return out;
 }
 function sessionLink(s) {
   const id = s?.bridgeSessionId?.replace(/^cse_/, "session_");
@@ -372,311 +372,26 @@ function update(home, id, fn) {
 var LOG_MAX_BYTES = 1024 * 1024;
 
 // src/collect.ts
-async function collect(ctx) {
+async function collect(ctx, opts = {}) {
+  const which = opts.checks ?? "none";
   const pools = listPools(ctx.orchHome);
   const live = readLiveSessions(ctx.claudeHome, ctx.isAlive);
-  const agents = await ctx.herdr.list().catch(() => null);
+  const liveIds = new Set(live.map((s) => s.sessionId));
+  const wanted = (id) => which === "none" ? false : which === "live" ? liveIds.has(id) : which.has(id);
   const checks = /* @__PURE__ */ new Map();
-  await Promise.all(
-    pools.flatMap(
+  const [agents] = await Promise.all([
+    (async () => ctx.herdr.list())().catch(() => null),
+    ...pools.filter((e) => wanted(e.id)).flatMap(
       (e) => (e.pool?.tasks ?? []).filter((t) => t.status === "done" && (t.evidence?.kind === "ci" || t.evidence?.kind === "pr")).map(async (t) => checks.set(checkKey(t.evidence, e.pool.cwd ?? ""), await ctx.gh.check(t.evidence, e.pool.cwd)))
     )
-  );
+  ]);
   return buildOverview({ pools, live, agents, checks, now: ctx.now() });
-}
-
-// src/format.ts
-import { homedir } from "node:os";
-function flatten(rows) {
-  const out2 = [];
-  const walk = (rs, indent, nested) => rs.forEach((r, i) => {
-    const last = i === rs.length - 1;
-    out2.push({ row: r, prefix: nested ? `${indent}${last ? "\u2514 " : "\u251C "}` : "" });
-    walk(r.children, nested ? `${indent}${last ? "  " : "\u2502 "}` : "", true);
-  });
-  walk(rows, "", false);
-  return out2;
-}
-function shortCwd(cwd, home = homedir()) {
-  const src = `${home}/src/`;
-  const short = cwd === home ? "~" : cwd.startsWith(src) ? cwd.slice(src.length) : cwd.startsWith(`${home}/`) ? `~${cwd.slice(home.length)}` : cwd;
-  return short.replace("/.worktrees/", "/wt/");
-}
-var pad = (s, n) => {
-  const chars = Array.from(s);
-  return chars.length > n ? `${chars.slice(0, n - 1).join("")}\u2026` : s + " ".repeat(n - chars.length);
-};
-function listLine({ row, prefix }) {
-  const progress = row.unreadable ? "unreadable pool" : row.hasPool ? `${row.done}/${row.total}${row.complete ? " \u2713" : ""}` : "\u2014  no pool";
-  const flags = row.flags ? `  \u2691${row.flags}` : "";
-  const orphan = row.orphan ? "  orphan" : "";
-  return `${pad(prefix + row.name, 24)} ${pad(shortCwd(row.cwd), 22)} ${pad(row.state, 7)} ${pad(row.tag, 9)} ${progress}${flags}${orphan}`;
-}
-function header(rows) {
-  const all = flatten(rows).map((l) => l.row);
-  const live = all.filter((r) => r.state !== "ended").length;
-  const flags = rows.reduce((n, r) => n + r.flags, 0);
-  return `ORCHESTRATOR  ${live} live \xB7 ${flags} \u2691 \xB7 ${all.length - live} ended`;
-}
-function renderList(rows) {
-  const lines = flatten(rows).map((l) => {
-    const link = l.row.link ? `
-${" ".repeat(l.prefix.length + 2)}\u2192 ${l.row.link}` : "";
-    return listLine(l) + link;
-  });
-  return [header(rows), ...lines].join("\n") + "\n";
-}
-function poolLines(row) {
-  const head = row.title && row.title !== row.name ? `${row.name} \u2014 ${row.title}` : row.name;
-  if (row.unreadable) return [head, `unreadable pool: ${row.unreadable}`];
-  if (!row.tasks.length) return [head, "(no pool yet)"];
-  return [head, ...row.tasks.map((t) => `${t.mark} ${t.id.padEnd(4)} ${pad(t.text, 34)} ${t.detail}`.trimEnd())];
-}
-var renderPool = (row) => poolLines(row).join("\n") + "\n";
-
-// src/model.ts
-function newPool(sessionId, cwd, now) {
-  return { sessionId, title: "", cwd, tasks: [], seq: 0, createdAt: now, updatedAt: now };
-}
-var clone = (p) => structuredClone(p);
-function find(p, id) {
-  const t = p.tasks.find((t2) => t2.id === id);
-  if (!t) throw new OrchError(`no task ${id} in this pool (have: ${p.tasks.map((t2) => t2.id).join(", ") || "none"})`);
-  return t;
-}
-function nextId(p) {
-  p.seq = Math.max(p.seq ?? 0, ...p.tasks.map((t) => Number(t.id.slice(1)) || 0)) + 1;
-  return `t${p.seq}`;
-}
-function own(p, now) {
-  p.updatedAt = now;
-  p.touchedAt = now;
-  return p;
-}
-function plan(pool, texts, now) {
-  const p = clone(pool);
-  const kept = p.tasks.filter((t) => t.status !== "pending" || t.children?.length || t.needsInput);
-  const fresh = texts.map((text) => ({ id: nextId(p), text, status: "pending" }));
-  p.tasks = [...kept, ...fresh];
-  return own(p, now);
-}
-function addTask(pool, text, now) {
-  const p = clone(pool);
-  p.tasks.push({ id: nextId(p), text, status: "pending" });
-  return own(p, now);
-}
-function setTitle(pool, title, now) {
-  const p = clone(pool);
-  p.title = title;
-  return own(p, now);
-}
-function startTask(pool, id, now) {
-  const p = clone(pool);
-  const t = find(p, id);
-  t.status = "in_progress";
-  delete t.blockedReason;
-  delete t.evidence;
-  return own(p, now);
-}
-function blockTask(pool, id, reason, now) {
-  const p = clone(pool);
-  const t = find(p, id);
-  t.status = "blocked";
-  t.blockedReason = reason;
-  delete t.evidence;
-  return own(p, now);
-}
-function doneTask(pool, id, evidence, now) {
-  const p = clone(pool);
-  const t = find(p, id);
-  t.status = "done";
-  delete t.blockedReason;
-  delete t.needsInput;
-  if (evidence) t.evidence = evidence;
-  else delete t.evidence;
-  return own(p, now);
-}
-function askTask(pool, id, question, now) {
-  const p = clone(pool);
-  find(p, id).needsInput = question;
-  return own(p, now);
-}
-
-// src/out.ts
-var ok = (stdout = "") => ({ code: 0, stdout, stderr: "" });
-
-// src/self.ts
-function resolveSelf(ctx) {
-  if (ctx.env.CLAUDE_SESSION_ID) return ctx.env.CLAUDE_SESSION_ID;
-  const byPid = new Map(readLiveSessions(ctx.claudeHome, ctx.isAlive).map((s) => [s.pid, s.sessionId]));
-  let pid = ctx.pid;
-  for (let i = 0; i < 32 && pid && pid > 1; i++) {
-    const id = byPid.get(pid);
-    if (id) return id;
-    pid = ctx.ppidOf(pid);
-  }
-  throw new OrchError("cannot tell which session this is: run orch from inside a Claude Code session");
-}
-
-// src/cli.ts
-var HELP = `orch \u2014 task pools for Claude Code sessions
-
-  orch plan "step" "step" \u2026              replace the pending part of this session's pool
-  orch title "what this session is for"
-  orch task add "text"
-  orch task start <id>
-  orch task block <id> "why"
-  orch task done <id> [--evidence commit:<sha> | pr:<n|url> | ci:<run-url> | cmd:<command> | note:<text>]
-  orch ask <id> "question"               flag a question for the person (\u2691)
-  orch status [<session-id>] [--json]    this (or that) session's pool
-  orch status --all [--json]             every session
-  orch link <child> <parent> <taskId>    attach a session under a parent task
-  orch spawn-child <taskId> --name <n> --cwd <dir> --brief <file> [--prompt <text>]
-  orch reply <session> "text" [--mark-only]
-  orch tui
-`;
-var need = (v, what) => {
-  if (!v) throw new OrchError(`missing ${what}
-
-${HELP}`, 2);
-  return v;
-};
-function mutateSelf(ctx, f) {
-  const id = resolveSelf(ctx);
-  return update(ctx.orchHome, id, (p) => f(p ?? newPool(id, ctx.cwd, ctx.now())));
-}
-function poolText(ctx, p) {
-  const rows = buildOverview({ pools: listPools(ctx.orchHome), live: [], agents: null, checks: /* @__PURE__ */ new Map(), now: ctx.now() });
-  const row = flatten(rows).map((l) => l.row).find((r) => r.sessionId === p.sessionId);
-  return row ? renderPool(row) : "";
-}
-async function cmdPlan(ctx, args) {
-  if (!args.length) throw new OrchError("orch plan needs at least one step", 2);
-  const p = await mutateSelf(ctx, (p2) => plan(p2, args, ctx.now()));
-  return ok(poolText(ctx, p));
-}
-async function cmdTitle(ctx, args) {
-  const title = need(args.join(" ").trim() || void 0, "title");
-  await mutateSelf(ctx, (p) => setTitle(p, title, ctx.now()));
-  return ok(`title: ${title}
-`);
-}
-async function cmdDone(ctx, args) {
-  const { values, positionals } = parseArgs({ args, options: { evidence: { type: "string" } }, allowPositionals: true });
-  const id = need(positionals[0], "task id");
-  if (positionals.length > 1) throw new OrchError(`orch task done takes one task id, got "${positionals.join(" ")}"; quote the evidence, e.g. --evidence "note:looked fine"`, 2);
-  let evidence;
-  if (values.evidence) {
-    const e = parseEvidence(values.evidence);
-    if (e.kind === "cmd") {
-      const self = readPool(ctx.orchHome, resolveSelf(ctx));
-      if (!self?.tasks.some((t) => t.id === id)) throw new OrchError(`no task ${id} in this pool`);
-      const r = await ctx.exec(e.ref, self.cwd || ctx.cwd);
-      if (r.code !== 0) {
-        const tail = r.out.trimEnd().split("\n").slice(-20).join("\n");
-        throw new OrchError(`refused: \`${e.ref}\` exited ${r.code}, so ${id} stays open
-${tail}`);
-      }
-      evidence = { kind: "cmd", ref: e.ref, exit: 0 };
-    } else {
-      evidence = e;
-    }
-  }
-  await mutateSelf(ctx, (p) => doneTask(p, id, evidence, ctx.now()));
-  return ok(evidence ? `${id} done (${describeEvidence(evidence)})
-` : `${id} done, but only claimed: add --evidence to prove it
-`);
-}
-async function cmdTask(ctx, args) {
-  const [sub, ...rest] = args;
-  const now = ctx.now();
-  switch (sub) {
-    case "add": {
-      const text = need(rest.join(" ").trim() || void 0, "task text");
-      const p = await mutateSelf(ctx, (p2) => addTask(p2, text, now));
-      return ok(`added ${p.tasks.at(-1).id}
-`);
-    }
-    case "start": {
-      const id = need(rest[0], "task id");
-      await mutateSelf(ctx, (p) => startTask(p, id, now));
-      return ok(`${id} in progress
-`);
-    }
-    case "block": {
-      const id = need(rest[0], "task id");
-      const why = need(rest.slice(1).join(" ").trim() || void 0, "reason");
-      await mutateSelf(ctx, (p) => blockTask(p, id, why, now));
-      return ok(`${id} blocked: ${why}
-`);
-    }
-    case "done":
-      return cmdDone(ctx, rest);
-    default:
-      throw new OrchError(`usage: orch task add|start|block|done \u2026
-
-${HELP}`, 2);
-  }
-}
-async function cmdAsk(ctx, args) {
-  const id = need(args[0], "task id");
-  const question = need(args.slice(1).join(" ").trim() || void 0, "question");
-  await mutateSelf(ctx, (p) => askTask(p, id, question, ctx.now()));
-  return ok(`\u2691 ${id}: ${question}
-Now send the person a push notification naming this session and the question.
-`);
-}
-async function cmdStatus(ctx, args) {
-  const { values, positionals } = parseArgs({ args, options: { all: { type: "boolean" }, json: { type: "boolean" } }, allowPositionals: true });
-  const rows = await collect(ctx);
-  if (values.all) return ok(values.json ? `${JSON.stringify(rows, (k, v) => k === "tasks" ? void 0 : v)}
-` : renderList(rows));
-  const id = positionals[0] ?? resolveSelf(ctx);
-  const row = flatten(rows).map((l) => l.row).find((r) => r.sessionId === id);
-  if (positionals[0] && !row) throw new OrchError(`no session ${id}`);
-  if (values.json) return ok(`${JSON.stringify(row ?? null)}
-`);
-  if (row?.tasks.length) return ok(renderPool(row));
-  return ok(row && positionals[0] ? `${row.name} has no pool yet
-` : 'no pool yet: run orch plan "step" "step" \u2026\n');
-}
-async function run(argv, ctx) {
-  const [cmd, ...rest] = argv;
-  try {
-    switch (cmd) {
-      case "plan":
-        return await cmdPlan(ctx, rest);
-      case "title":
-        return await cmdTitle(ctx, rest);
-      case "task":
-        return await cmdTask(ctx, rest);
-      case "ask":
-        return await cmdAsk(ctx, rest);
-      case "status":
-        return await cmdStatus(ctx, rest);
-      case void 0:
-      case "help":
-      case "--help":
-      case "-h":
-        return ok(HELP);
-      default:
-        return { code: 2, stdout: "", stderr: `orch: unknown command ${cmd}
-
-${HELP}` };
-    }
-  } catch (e) {
-    if (e instanceof OrchError) return { code: e.code, stdout: "", stderr: `orch: ${e.message}
-` };
-    if (e instanceof TypeError && e.code?.startsWith("ERR_PARSE_ARGS")) return { code: 2, stdout: "", stderr: `orch: ${e.message}
-` };
-    throw e;
-  }
 }
 
 // src/ctx.ts
 import { spawn } from "node:child_process";
-import { readFileSync as readFileSync3 } from "node:fs";
-import { homedir as homedir2 } from "node:os";
+import { existsSync as existsSync2, readFileSync as readFileSync3 } from "node:fs";
+import { homedir } from "node:os";
 import { join as join3 } from "node:path";
 
 // src/sources/gh.ts
@@ -792,11 +507,11 @@ function cliHerdr(run2 = runHerdr) {
     return r.stdout;
   };
   const json = async (args, timeoutMs) => {
-    const out2 = await ok2(args, timeoutMs);
+    const out = await ok2(args, timeoutMs);
     try {
-      return JSON.parse(out2);
+      return JSON.parse(out);
     } catch {
-      throw new HerdrError(`herdr ${args.slice(0, 2).join(" ")} did not answer with JSON: ${out2.trim().slice(0, 200)}`);
+      throw new HerdrError(`herdr ${args.slice(0, 2).join(" ")} did not answer with JSON: ${out.trim().slice(0, 200)}`);
     }
   };
   return {
@@ -846,6 +561,8 @@ function cliHerdr(run2 = runHerdr) {
 }
 
 // src/ctx.ts
+var CMD_TIMEOUT_MS = 11e4;
+var OUT_KEEP = 64 * 1024;
 function ppidOf(pid) {
   try {
     const stat = readFileSync3(`/proc/${pid}/stat`, "utf8");
@@ -855,14 +572,67 @@ function ppidOf(pid) {
     return void 0;
   }
 }
-function execShell(command, cwd) {
+function execShell(command, cwd, opts = {}) {
+  const { timeoutMs = CMD_TIMEOUT_MS, graceMs = 2e3, closeWaitMs = 1e3 } = opts;
+  if (!existsSync2(cwd)) return Promise.resolve({ code: 127, out: `directory ${cwd} does not exist` });
   return new Promise((resolve) => {
-    const child = spawn("bash", ["-c", command], { cwd, stdio: ["ignore", "pipe", "pipe"] });
-    let out2 = "";
-    child.stdout.on("data", (d) => out2 += d);
-    child.stderr.on("data", (d) => out2 += d);
-    child.on("error", (e) => resolve({ code: 127, out: String(e) }));
-    child.on("close", (code) => resolve({ code: code ?? 1, out: out2 }));
+    let out = "";
+    let pid;
+    let timedOut = false;
+    let terminating = false;
+    let settled = false;
+    let killTimer;
+    const killGroup = (sig) => {
+      try {
+        if (pid) process.kill(-pid, sig);
+      } catch {
+      }
+    };
+    const terminate = () => {
+      if (terminating) return killGroup("SIGKILL");
+      terminating = true;
+      killGroup("SIGTERM");
+      killTimer = setTimeout(() => killGroup("SIGKILL"), graceMs);
+    };
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      terminate();
+    }, timeoutMs);
+    const settle = (r) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      clearTimeout(killTimer);
+      process.off("SIGINT", terminate);
+      process.off("SIGTERM", terminate);
+      killGroup("SIGKILL");
+      resolve({ ...r, out, ...timedOut ? { timedOut } : {} });
+    };
+    process.on("SIGINT", terminate);
+    process.on("SIGTERM", terminate);
+    let child;
+    try {
+      child = spawn("bash", ["-c", command], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (e) {
+      out = String(e);
+      return settle({ code: 127, out });
+    }
+    pid = child.pid;
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    const keep = (d) => out = (out + d).slice(-OUT_KEEP);
+    child.stdout.on("data", keep);
+    child.stderr.on("data", keep);
+    child.on("error", (e) => {
+      out = String(e);
+      settle({ code: 127, out });
+    });
+    let exited;
+    child.on("exit", (code, signal) => {
+      exited = { code: code ?? 1, out, ...signal ? { signal } : {} };
+      setTimeout(() => settle(exited), closeWaitMs).unref();
+    });
+    child.on("close", () => exited && settle(exited));
   });
 }
 async function readStdin() {
@@ -872,7 +642,7 @@ async function readStdin() {
 }
 function realCtx() {
   const env = process.env;
-  const claudeHome = env.ORCH_CLAUDE_HOME ?? join3(homedir2(), ".claude");
+  const claudeHome = env.ORCH_CLAUDE_HOME ?? join3(homedir(), ".claude");
   return {
     env,
     claudeHome,
@@ -884,14 +654,338 @@ function realCtx() {
     ppidOf,
     isAlive: pidAlive,
     readStdin,
-    exec: execShell,
+    exec: (command, cwd) => execShell(command, cwd),
     herdr: cliHerdr(),
     gh: cliGh()
   };
 }
 
+// src/format.ts
+import { homedir as homedir2 } from "node:os";
+function flatten(rows) {
+  const out = [];
+  const walk = (rs, indent, nested) => rs.forEach((r, i) => {
+    const last = i === rs.length - 1;
+    out.push({ row: r, prefix: nested ? `${indent}${last ? "\u2514 " : "\u251C "}` : "" });
+    walk(r.children, nested ? `${indent}${last ? "  " : "\u2502 "}` : "", true);
+  });
+  walk(rows, "", false);
+  return out;
+}
+function shortCwd(cwd, home = homedir2()) {
+  const src = `${home}/src/`;
+  const short = cwd === home ? "~" : cwd.startsWith(src) ? cwd.slice(src.length) : cwd.startsWith(`${home}/`) ? `~${cwd.slice(home.length)}` : cwd;
+  return short.replace("/.worktrees/", "/wt/");
+}
+var pad = (s, n) => {
+  const chars = Array.from(s);
+  return chars.length > n ? `${chars.slice(0, n - 1).join("")}\u2026` : s + " ".repeat(n - chars.length);
+};
+function listLine({ row, prefix }) {
+  const progress = row.unreadable ? "unreadable pool" : row.hasPool ? `${row.done}/${row.total}${row.complete ? " \u2713" : ""}` : "\u2014  no pool";
+  const flags = row.flags ? `  \u2691${row.flags}` : "";
+  const orphan = row.orphan ? "  orphan" : "";
+  return `${pad(prefix + row.name, 24)} ${pad(shortCwd(row.cwd), 22)} ${pad(row.state, 7)} ${pad(row.tag, 9)} ${progress}${flags}${orphan}`;
+}
+function header(rows) {
+  const all = flatten(rows).map((l) => l.row);
+  const live = all.filter((r) => r.state !== "ended").length;
+  const flags = rows.reduce((n, r) => n + r.flags, 0);
+  return `ORCHESTRATOR  ${live} live \xB7 ${flags} \u2691 \xB7 ${all.length - live} ended`;
+}
+function renderList(rows) {
+  const lines = flatten(rows).map((l) => {
+    const link = l.row.link ? `
+${" ".repeat(l.prefix.length + 2)}\u2192 ${l.row.link}` : "";
+    return listLine(l) + link;
+  });
+  return [header(rows), ...lines].join("\n") + "\n";
+}
+function poolLines(row) {
+  const head = row.title && row.title !== row.name ? `${row.name} \u2014 ${row.title}` : row.name;
+  if (row.unreadable) return [head, `unreadable pool: ${row.unreadable}`];
+  if (!row.tasks.length) return [head, "(no pool yet)"];
+  return [head, ...row.tasks.map((t) => `${t.mark} ${t.id.padEnd(4)} ${pad(t.text, 34)} ${t.detail}`.trimEnd())];
+}
+var renderPool = (row) => poolLines(row).join("\n") + "\n";
+
+// src/model.ts
+function newPool(sessionId, cwd, now) {
+  return { sessionId, title: "", cwd, tasks: [], seq: 0, createdAt: now, updatedAt: now };
+}
+var clone = (p) => structuredClone(p);
+function find(p, id) {
+  const t = p.tasks.find((t2) => t2.id === id);
+  if (!t) throw new OrchError(`no task ${id} in this pool (have: ${p.tasks.map((t2) => t2.id).join(", ") || "none"})`);
+  return t;
+}
+function nextId(p) {
+  p.seq = Math.max(p.seq ?? 0, ...p.tasks.map((t) => Number(t.id.slice(1)) || 0)) + 1;
+  return `t${p.seq}`;
+}
+function own(p, now) {
+  p.updatedAt = now;
+  p.touchedAt = now;
+  return p;
+}
+function plan(pool, texts, now) {
+  const p = clone(pool);
+  const kept = p.tasks.filter((t) => t.status !== "pending" || t.children?.length || t.needsInput);
+  const fresh = texts.map((text) => ({ id: nextId(p), text, status: "pending" }));
+  p.tasks = [...kept, ...fresh];
+  return own(p, now);
+}
+function addTask(pool, text, now) {
+  const p = clone(pool);
+  p.tasks.push({ id: nextId(p), text, status: "pending" });
+  return own(p, now);
+}
+function setTitle(pool, title, now) {
+  const p = clone(pool);
+  p.title = title;
+  return own(p, now);
+}
+function startTask(pool, id, now) {
+  const p = clone(pool);
+  const t = find(p, id);
+  t.status = "in_progress";
+  delete t.blockedReason;
+  delete t.evidence;
+  return own(p, now);
+}
+function blockTask(pool, id, reason, now) {
+  const p = clone(pool);
+  const t = find(p, id);
+  t.status = "blocked";
+  t.blockedReason = reason;
+  delete t.evidence;
+  return own(p, now);
+}
+function doneTask(pool, id, evidence, now) {
+  const p = clone(pool);
+  const t = find(p, id);
+  t.status = "done";
+  delete t.blockedReason;
+  delete t.needsInput;
+  if (evidence) t.evidence = evidence;
+  else delete t.evidence;
+  return own(p, now);
+}
+function askTask(pool, id, question, now) {
+  const p = clone(pool);
+  find(p, id).needsInput = question;
+  return own(p, now);
+}
+
+// src/out.ts
+var ok = (stdout = "") => ({ code: 0, stdout, stderr: "" });
+
+// src/self.ts
+function resolveSelf(ctx) {
+  const fromEnv = ctx.env.CLAUDE_CODE_SESSION_ID || ctx.env.CLAUDE_SESSION_ID;
+  if (fromEnv) return fromEnv;
+  const live = readLiveSessions(ctx.claudeHome, ctx.isAlive);
+  const claudePid = Number(ctx.env.CLAUDE_PID);
+  if (ctx.env.CLAUDE_PID && Number.isInteger(claudePid)) {
+    const s = live.find((x) => x.pid === claudePid);
+    if (s) return s.sessionId;
+  }
+  const byPid = new Map(live.map((s) => [s.pid, s.sessionId]));
+  let pid = ctx.pid;
+  for (let i = 0; i < 32 && pid && pid > 1; i++) {
+    const id = byPid.get(pid);
+    if (id) return id;
+    pid = ctx.ppidOf(pid);
+  }
+  throw new OrchError("cannot tell which session this is: run orch from inside a Claude Code session");
+}
+
+// src/cli.ts
+var HELP = `orch \u2014 task pools for Claude Code sessions
+
+  orch plan "step" "step" \u2026              replace the pending part of this session's pool
+  orch title "what this session is for"
+  orch task add "text"
+  orch task start <id>
+  orch task block <id> "why"
+  orch task done <id> [--evidence commit:<sha> | pr:<n|url> | ci:<run-url> | cmd:<command> | note:<text>]
+  orch ask <id> "question"               flag a question for the person (\u2691)
+  orch status [<session-id>] [--json]    this (or that) session's pool
+  orch status --all [--json]             every session
+  orch link <child> <parent> <taskId>    attach a session under a parent task
+  orch spawn-child <taskId> --name <n> --cwd <dir> --brief <file> [--prompt <text>]
+  orch reply <session> "text" [--mark-only]
+  orch tui
+`;
+var need = (v, what) => {
+  if (!v) throw new OrchError(`missing ${what} (orch help lists the commands)`, 2);
+  return v;
+};
+var words = (args) => parseArgs({ args, allowPositionals: true }).positionals;
+function mutateSelf(ctx, f) {
+  const id = resolveSelf(ctx);
+  return update(ctx.orchHome, id, (p) => f(p ?? newPool(id, ctx.cwd, ctx.now())));
+}
+function poolText(ctx, p) {
+  const rows = buildOverview({ pools: listPools(ctx.orchHome), live: [], agents: null, checks: /* @__PURE__ */ new Map(), now: ctx.now() });
+  const row = flatten(rows).map((l) => l.row).find((r) => r.sessionId === p.sessionId);
+  return row ? renderPool(row) : "";
+}
+async function cmdPlan(ctx, args) {
+  const steps = words(args).map((s) => s.trim());
+  if (!steps.length) throw new OrchError("orch plan needs at least one step", 2);
+  if (steps.some((s) => !s)) throw new OrchError("orch plan steps cannot be blank", 2);
+  const p = await mutateSelf(ctx, (p2) => plan(p2, steps, ctx.now()));
+  return ok(poolText(ctx, p));
+}
+async function cmdTitle(ctx, args) {
+  const title = need(words(args).join(" ").trim() || void 0, "title");
+  await mutateSelf(ctx, (p) => setTitle(p, title, ctx.now()));
+  return ok(`title: ${title}
+`);
+}
+function tailOf(out) {
+  const clean = out.replace(/\r\n?/g, "\n").replace(new RegExp("\\p{Cc}", "gu"), (c) => c === "\n" || c === "	" ? c : "").trimEnd().split("\n").slice(-20).join("\n");
+  return clean.length > 4096 ? `\u2026${clean.slice(-4096)}` : clean;
+}
+async function cmdDone(ctx, args) {
+  const { values, positionals } = parseArgs({ args, options: { evidence: { type: "string" } }, allowPositionals: true });
+  const id = need(positionals[0], "task id");
+  if (positionals.length > 1) throw new OrchError(`orch task done takes one task id, got "${positionals.join(" ")}"; quote the evidence, e.g. --evidence "note:looked fine"`, 2);
+  let evidence;
+  if (values.evidence !== void 0) {
+    const e = parseEvidence(values.evidence);
+    if (e.kind === "cmd") {
+      const self = readPool(ctx.orchHome, resolveSelf(ctx));
+      if (!self?.tasks.some((t) => t.id === id)) throw new OrchError(`no task ${id} in this pool`);
+      const r = await ctx.exec(e.ref, ctx.cwd);
+      if (r.timedOut) {
+        throw new OrchError(`refused: \`${e.ref}\` timed out after ${CMD_TIMEOUT_MS / 1e3} s in ${ctx.cwd}, so ${id} stays open; run long commands yourself and tick with commit:, ci: or note:`);
+      }
+      if (r.signal || r.code !== 0) {
+        const how = r.signal ? `was killed by ${r.signal}` : `exited ${r.code}`;
+        throw new OrchError(`refused: \`${e.ref}\` ${how} in ${ctx.cwd}, so ${id} stays open
+${tailOf(r.out)}`);
+      }
+      evidence = { kind: "cmd", ref: e.ref, exit: 0 };
+    } else {
+      evidence = e;
+    }
+  }
+  await mutateSelf(ctx, (p) => doneTask(p, id, evidence, ctx.now()));
+  const where = evidence?.kind === "cmd" ? ` in ${ctx.cwd}` : "";
+  return ok(evidence ? `${id} done (${describeEvidence(evidence)}${where})
+` : `${id} done, but only claimed: add --evidence to prove it
+`);
+}
+async function cmdTask(ctx, args) {
+  const [sub, ...rest] = args;
+  const now = ctx.now();
+  switch (sub) {
+    case "add": {
+      const text = need(words(rest).join(" ").trim() || void 0, "task text");
+      const p = await mutateSelf(ctx, (p2) => addTask(p2, text, now));
+      return ok(`added ${p.tasks.at(-1).id}
+`);
+    }
+    case "start": {
+      const id = need(words(rest)[0], "task id");
+      await mutateSelf(ctx, (p) => startTask(p, id, now));
+      return ok(`${id} in progress
+`);
+    }
+    case "block": {
+      const [id, ...reason] = words(rest);
+      need(id, "task id");
+      const why = need(reason.join(" ").trim() || void 0, "reason");
+      await mutateSelf(ctx, (p) => blockTask(p, id, why, now));
+      return ok(`${id} blocked: ${why}
+`);
+    }
+    case "done":
+      return cmdDone(ctx, rest);
+    default:
+      throw new OrchError(`usage: orch task add|start|block|done \u2026
+
+${HELP}`, 2);
+  }
+}
+async function cmdAsk(ctx, args) {
+  const [id, ...rest] = words(args);
+  need(id, "task id");
+  const question = need(rest.join(" ").trim() || void 0, "question");
+  await mutateSelf(ctx, (p) => askTask(p, id, question, ctx.now()));
+  return ok(`\u2691 ${id}: ${question}
+Now send the person a push notification naming this session and the question.
+`);
+}
+async function cmdStatus(ctx, args) {
+  const { values, positionals } = parseArgs({ args, options: { all: { type: "boolean" }, json: { type: "boolean" } }, allowPositionals: true });
+  if (values.all) {
+    const rows2 = await collect(ctx);
+    return ok(values.json ? `${JSON.stringify(rows2, (k, v) => k === "tasks" ? void 0 : v)}
+` : renderList(rows2));
+  }
+  const id = positionals[0] ?? resolveSelf(ctx);
+  const rows = await collect(ctx, { checks: /* @__PURE__ */ new Set([id]) });
+  const row = flatten(rows).map((l) => l.row).find((r) => r.sessionId === id);
+  if (positionals[0] && !row) throw new OrchError(`no session ${id}`);
+  if (values.json) return ok(`${JSON.stringify(row ?? null)}
+`);
+  if (row?.tasks.length) return ok(renderPool(row));
+  return ok(row && positionals[0] ? `${row.name} has no pool yet
+` : 'no pool yet: run orch plan "step" "step" \u2026\n');
+}
+function describeFailure(e) {
+  const message = e instanceof Error ? e.message : String(e);
+  const code = e?.code;
+  const sandbox = code === "EACCES" || code === "EPERM" || code === "EROFS";
+  return `orch: ${message}
+${sandbox ? `if Claude Code's Bash sandbox is on, add "orch *" to sandbox.excludedCommands in ~/.claude/settings.json
+` : ""}`;
+}
+async function run(argv, ctx) {
+  const [cmd, ...rest] = argv;
+  const flags = rest.includes("--") ? rest.slice(0, rest.indexOf("--")) : rest;
+  if (flags.includes("--help") || flags.includes("-h")) return ok(HELP);
+  try {
+    switch (cmd) {
+      case "plan":
+        return await cmdPlan(ctx, rest);
+      case "title":
+        return await cmdTitle(ctx, rest);
+      case "task":
+        return await cmdTask(ctx, rest);
+      case "ask":
+        return await cmdAsk(ctx, rest);
+      case "status":
+        return await cmdStatus(ctx, rest);
+      case void 0:
+      case "help":
+      case "--help":
+      case "-h":
+        return ok(HELP);
+      default:
+        return { code: 2, stdout: "", stderr: `orch: unknown command ${cmd}
+
+${HELP}` };
+    }
+  } catch (e) {
+    if (e instanceof OrchError) return { code: e.code, stdout: "", stderr: `orch: ${e.message}
+` };
+    if (e instanceof TypeError && e.code?.startsWith("ERR_PARSE_ARGS")) return { code: 2, stdout: "", stderr: `orch: ${e.message}
+` };
+    throw e;
+  }
+}
+
 // src/main.ts
-var out = await run(process.argv.slice(2), realCtx());
-process.stdout.write(out.stdout);
-process.stderr.write(out.stderr);
-process.exitCode = out.code;
+try {
+  const out = await run(process.argv.slice(2), realCtx());
+  process.stdout.write(out.stdout);
+  process.stderr.write(out.stderr);
+  process.exitCode = out.code;
+} catch (e) {
+  process.stderr.write(describeFailure(e));
+  process.exitCode = 1;
+}

@@ -1,6 +1,6 @@
 import { parseArgs } from 'node:util'
 import { collect } from './collect.js'
-import type { Ctx } from './ctx.js'
+import { CMD_TIMEOUT_MS, type Ctx } from './ctx.js'
 import { OrchError } from './errors.js'
 import { describeEvidence, parseEvidence } from './evidence.js'
 import { flatten, renderList, renderPool } from './format.js'
@@ -28,9 +28,13 @@ const HELP = `orch — task pools for Claude Code sessions
 `
 
 const need = (v: string | undefined, what: string): string => {
-  if (!v) throw new OrchError(`missing ${what}\n\n${HELP}`, 2)
+  if (!v) throw new OrchError(`missing ${what} (orch help lists the commands)`, 2)
   return v
 }
+
+// The words of a free-text command. An option-looking word (-x) is an error rather than task text;
+// a word that starts with a dash goes after `--`.
+const words = (args: string[]): string[] => parseArgs({ args, allowPositionals: true }).positionals
 
 function mutateSelf(ctx: Ctx, f: (p: Pool) => Pool): Promise<Pool> {
   const id = resolveSelf(ctx)
@@ -45,15 +49,30 @@ function poolText(ctx: Ctx, p: Pool): string {
 }
 
 async function cmdPlan(ctx: Ctx, args: string[]): Promise<Out> {
-  if (!args.length) throw new OrchError('orch plan needs at least one step', 2)
-  const p = await mutateSelf(ctx, p => plan(p, args, ctx.now()))
+  const steps = words(args).map(s => s.trim())
+  if (!steps.length) throw new OrchError('orch plan needs at least one step', 2)
+  if (steps.some(s => !s)) throw new OrchError('orch plan steps cannot be blank', 2)
+  const p = await mutateSelf(ctx, p => plan(p, steps, ctx.now()))
   return ok(poolText(ctx, p))
 }
 
 async function cmdTitle(ctx: Ctx, args: string[]): Promise<Out> {
-  const title = need(args.join(' ').trim() || undefined, 'title')
+  const title = need(words(args).join(' ').trim() || undefined, 'title')
   await mutateSelf(ctx, p => setTitle(p, title, ctx.now()))
   return ok(`title: ${title}\n`)
+}
+
+// What a failing command printed, safe to show: no control characters but newline and tab (\r becomes a
+// line break), the last 20 lines, about 4 KB.
+function tailOf(out: string): string {
+  const clean = out
+    .replace(/\r\n?/g, '\n')
+    .replace(/\p{Cc}/gu, c => (c === '\n' || c === '\t' ? c : ''))
+    .trimEnd()
+    .split('\n')
+    .slice(-20)
+    .join('\n')
+  return clean.length > 4096 ? `…${clean.slice(-4096)}` : clean
 }
 
 async function cmdDone(ctx: Ctx, args: string[]): Promise<Out> {
@@ -61,15 +80,19 @@ async function cmdDone(ctx: Ctx, args: string[]): Promise<Out> {
   const id = need(positionals[0], 'task id')
   if (positionals.length > 1) throw new OrchError(`orch task done takes one task id, got "${positionals.join(' ')}"; quote the evidence, e.g. --evidence "note:looked fine"`, 2)
   let evidence: Evidence | undefined
-  if (values.evidence) {
+  if (values.evidence !== undefined) {
     const e = parseEvidence(values.evidence)
     if (e.kind === 'cmd') {
       const self = readPool(ctx.orchHome, resolveSelf(ctx))
       if (!self?.tasks.some(t => t.id === id)) throw new OrchError(`no task ${id} in this pool`)
-      const r = await ctx.exec(e.ref, self.cwd || ctx.cwd)
-      if (r.code !== 0) {
-        const tail = r.out.trimEnd().split('\n').slice(-20).join('\n')
-        throw new OrchError(`refused: \`${e.ref}\` exited ${r.code}, so ${id} stays open\n${tail}`)
+      // where the session is (the Bash tool's current directory), which is not always where its pool began
+      const r = await ctx.exec(e.ref, ctx.cwd)
+      if (r.timedOut) {
+        throw new OrchError(`refused: \`${e.ref}\` timed out after ${CMD_TIMEOUT_MS / 1000} s in ${ctx.cwd}, so ${id} stays open; run long commands yourself and tick with commit:, ci: or note:`)
+      }
+      if (r.signal || r.code !== 0) {
+        const how = r.signal ? `was killed by ${r.signal}` : `exited ${r.code}`
+        throw new OrchError(`refused: \`${e.ref}\` ${how} in ${ctx.cwd}, so ${id} stays open\n${tailOf(r.out)}`)
       }
       evidence = { kind: 'cmd', ref: e.ref, exit: 0 }
     } else {
@@ -77,7 +100,8 @@ async function cmdDone(ctx: Ctx, args: string[]): Promise<Out> {
     }
   }
   await mutateSelf(ctx, p => doneTask(p, id, evidence, ctx.now()))
-  return ok(evidence ? `${id} done (${describeEvidence(evidence)})\n` : `${id} done, but only claimed: add --evidence to prove it\n`)
+  const where = evidence?.kind === 'cmd' ? ` in ${ctx.cwd}` : ''
+  return ok(evidence ? `${id} done (${describeEvidence(evidence)}${where})\n` : `${id} done, but only claimed: add --evidence to prove it\n`)
 }
 
 async function cmdTask(ctx: Ctx, args: string[]): Promise<Out> {
@@ -85,18 +109,19 @@ async function cmdTask(ctx: Ctx, args: string[]): Promise<Out> {
   const now = ctx.now()
   switch (sub) {
     case 'add': {
-      const text = need(rest.join(' ').trim() || undefined, 'task text')
+      const text = need(words(rest).join(' ').trim() || undefined, 'task text')
       const p = await mutateSelf(ctx, p => addTask(p, text, now))
       return ok(`added ${p.tasks.at(-1)!.id}\n`)
     }
     case 'start': {
-      const id = need(rest[0], 'task id')
+      const id = need(words(rest)[0], 'task id')
       await mutateSelf(ctx, p => startTask(p, id, now))
       return ok(`${id} in progress\n`)
     }
     case 'block': {
-      const id = need(rest[0], 'task id')
-      const why = need(rest.slice(1).join(' ').trim() || undefined, 'reason')
+      const [id, ...reason] = words(rest)
+      need(id, 'task id')
+      const why = need(reason.join(' ').trim() || undefined, 'reason')
       await mutateSelf(ctx, p => blockTask(p, id, why, now))
       return ok(`${id} blocked: ${why}\n`)
     }
@@ -108,18 +133,24 @@ async function cmdTask(ctx: Ctx, args: string[]): Promise<Out> {
 }
 
 async function cmdAsk(ctx: Ctx, args: string[]): Promise<Out> {
-  const id = need(args[0], 'task id')
-  const question = need(args.slice(1).join(' ').trim() || undefined, 'question')
+  const [id, ...rest] = words(args)
+  need(id, 'task id')
+  const question = need(rest.join(' ').trim() || undefined, 'question')
   await mutateSelf(ctx, p => askTask(p, id, question, ctx.now()))
   return ok(`⚑ ${id}: ${question}\nNow send the person a push notification naming this session and the question.\n`)
 }
 
 async function cmdStatus(ctx: Ctx, args: string[]): Promise<Out> {
   const { values, positionals } = parseArgs({ args, options: { all: { type: 'boolean' }, json: { type: 'boolean' } }, allowPositionals: true })
-  const rows = await collect(ctx)
-  // --all --json drops task lists and indentation so /orch's Bash output stays small; /orch then asks for one session by id
-  if (values.all) return ok(values.json ? `${JSON.stringify(rows, (k, v) => (k === 'tasks' ? undefined : v))}\n` : renderList(rows))
+  // --all --json drops task lists and indentation so /orch's Bash output stays small; /orch then asks for one session by id.
+  // The overview asks gh nothing: it would wait on one call per finished task of every session.
+  if (values.all) {
+    const rows = await collect(ctx)
+    return ok(values.json ? `${JSON.stringify(rows, (k, v) => (k === 'tasks' ? undefined : v))}\n` : renderList(rows))
+  }
+  // the id first, so outside a session this fails before herdr or gh is asked; gh only about the pool shown
   const id = positionals[0] ?? resolveSelf(ctx)
+  const rows = await collect(ctx, { checks: new Set([id]) })
   const row = flatten(rows).map(l => l.row).find(r => r.sessionId === id)
   if (positionals[0] && !row) throw new OrchError(`no session ${id}`)
   if (values.json) return ok(`${JSON.stringify(row ?? null)}\n`)
@@ -127,8 +158,19 @@ async function cmdStatus(ctx: Ctx, args: string[]): Promise<Out> {
   return ok(row && positionals[0] ? `${row.name} has no pool yet\n` : 'no pool yet: run orch plan "step" "step" …\n')
 }
 
+// How main prints a failure that run did not turn into an Out: the message alone, never a stack trace.
+export function describeFailure(e: unknown): string {
+  const message = e instanceof Error ? e.message : String(e)
+  const code = (e as NodeJS.ErrnoException | undefined)?.code
+  const sandbox = code === 'EACCES' || code === 'EPERM' || code === 'EROFS'
+  return `orch: ${message}\n${sandbox ? `if Claude Code's Bash sandbox is on, add "orch *" to sandbox.excludedCommands in ~/.claude/settings.json\n` : ''}`
+}
+
 export async function run(argv: string[], ctx: Ctx): Promise<Out> {
   const [cmd, ...rest] = argv
+  // --help or -h anywhere before a `--` is a request for help, never task text
+  const flags = rest.includes('--') ? rest.slice(0, rest.indexOf('--')) : rest
+  if (flags.includes('--help') || flags.includes('-h')) return ok(HELP)
   try {
     switch (cmd) {
       case 'plan':
