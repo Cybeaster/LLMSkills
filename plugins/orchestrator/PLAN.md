@@ -145,7 +145,7 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=18"
   },
   "scripts": {
     "build": "node build.mjs",
@@ -1379,6 +1379,17 @@ describe('parseEvidence', () => {
   })
 })
 
+describe('parseEvidence refs that look like flags', () => {
+  it.each(['pr:--web', 'pr:-R x/y', 'ci:-1', 'ci:--repo=x/y'])('refuses %s', s => {
+    expect(() => parseEvidence(s)).toThrow(/bad evidence.*cannot start with "-"/)
+  })
+
+  it('still takes a note or command that starts with a dash', () => {
+    expect(parseEvidence('note:-1 on the diff')).toEqual({ kind: 'note', ref: '-1 on the diff' })
+    expect(parseEvidence('cmd:-x')).toEqual({ kind: 'cmd', ref: '-x' })
+  })
+})
+
 describe('grade', () => {
   it('trusts commits and commands orch ran, not notes', () => {
     expect(grade({ kind: 'commit', ref: 'a' })).toBe('proven')
@@ -1499,6 +1510,10 @@ export function parseEvidence(s: string): ParsedEvidence {
   if (i < 1 || !isKind(kind) || !ref) throw new OrchError(`bad evidence "${s}": ${USAGE}`, 2)
   if (kind === 'commit' && !SHA.test(ref)) {
     throw new OrchError(`bad evidence "${s}": commit needs a sha, e.g. commit:$(git rev-parse --short HEAD)`, 2)
+  }
+  // gh would read a leading dash as a flag
+  if ((kind === 'pr' || kind === 'ci') && ref.startsWith('-')) {
+    throw new OrchError(`bad evidence "${s}": a ${kind} ref cannot start with "-"`, 2)
   }
   return { kind, ref }
 }
@@ -2216,14 +2231,20 @@ describe('cliGh', () => {
   it('reads a CI run from its URL', async () => {
     const { run, calls } = fakeRun({ status: 'completed', conclusion: 'failure' })
     expect(await cliGh(run).check(ci('https://github.com/o/r/actions/runs/77'), repoA)).toBe('fail')
-    expect(calls[0]).toEqual(['run', 'view', '77', '-R', 'o/r', '--json', 'status,conclusion'])
+    expect(calls[0]).toEqual(['run', 'view', '-R', 'o/r', '--json', 'status,conclusion', '--', '77'])
   })
 
   it('reads a bare CI id from the repo in cwd', async () => {
     const { run, calls, cwds } = fakeRun(done('success'))
     expect(await cliGh(run).check(ci('77'), repoA)).toBe('pass')
-    expect(calls[0]).toEqual(['run', 'view', '77', '--json', 'status,conclusion'])
+    expect(calls[0]).toEqual(['run', 'view', '--json', 'status,conclusion', '--', '77'])
     expect(cwds[0]).toBe(repoA)
+  })
+
+  it('puts a pr ref after -- as well', async () => {
+    const { run, calls } = fakeRun({ state: 'OPEN', statusCheckRollup: [] })
+    await cliGh(run).check(pr('41'), repoA)
+    expect(calls[0]).toEqual(['pr', 'view', '--json', 'state,statusCheckRollup', '--', '41'])
   })
 
   it('reports a running CI run as pending', async () => {
@@ -2429,13 +2450,13 @@ describe('cliGh when the cwd is gone', () => {
   it.each(gone)('runs a URL ref from an existing directory, not orch\'s own (cwd %j)', async cwd => {
     const ciRun = fakeRun(done('success'))
     expect(await cliGh(ciRun.run).check(ci('https://github.com/o/r/actions/runs/77'), cwd)).toBe('pass')
-    expect(ciRun.calls).toEqual([['run', 'view', '77', '-R', 'o/r', '--json', 'status,conclusion']])
+    expect(ciRun.calls).toEqual([['run', 'view', '-R', 'o/r', '--json', 'status,conclusion', '--', '77']])
     expect(ciRun.cwds[0]).toBe(tmpdir())
     expect(existsSync(ciRun.cwds[0])).toBe(true)
 
     const prRun = fakeRun({ state: 'MERGED', statusCheckRollup: [] })
     expect(await cliGh(prRun.run).check(pr('https://github.com/o/r/pull/41'), cwd)).toBe('pass')
-    expect(prRun.calls).toEqual([['pr', 'view', 'https://github.com/o/r/pull/41', '--json', 'state,statusCheckRollup']])
+    expect(prRun.calls).toEqual([['pr', 'view', '--json', 'state,statusCheckRollup', '--', 'https://github.com/o/r/pull/41']])
     expect(prRun.cwds[0]).toBe(tmpdir())
   })
 
@@ -2760,7 +2781,7 @@ const UNKNOWN_TTL_MS = 15_000
 
 async function ciCheck(run: GhRun, ref: string, cwd: string): Promise<Answer> {
   const m = ref.match(/github\.com\/([^/]+\/[^/]+)\/actions\/runs\/(\d+)/)
-  const args = m ? ['run', 'view', m[2], '-R', m[1], '--json', 'status,conclusion'] : ['run', 'view', ref, '--json', 'status,conclusion']
+  const args = m ? ['run', 'view', '-R', m[1], '--json', 'status,conclusion', '--', m[2]] : ['run', 'view', '--json', 'status,conclusion', '--', ref]
   const r = await run(args, cwd)
   if (r.code !== 0) return { value: 'unknown', final: false }
   const o = JSON.parse(r.stdout)
@@ -2771,7 +2792,7 @@ async function ciCheck(run: GhRun, ref: string, cwd: string): Promise<Answer> {
 }
 
 async function prCheck(run: GhRun, ref: string, cwd: string): Promise<Answer> {
-  const r = await run(['pr', 'view', ref, '--json', 'state,statusCheckRollup'], cwd)
+  const r = await run(['pr', 'view', '--json', 'state,statusCheckRollup', '--', ref], cwd)
   if (r.code !== 0) return { value: 'unknown', final: false }
   const o = JSON.parse(r.stdout)
   if (o.state === 'MERGED') return { value: 'pass', final: true }
@@ -2978,6 +2999,32 @@ describe('buildOverview', () => {
   it('shows a session blocked on a dialog as waiting', () => {
     const [row] = buildOverview(input({ live: [live('S', { waitingFor: 'dialog open' })] }))
     expect(row).toMatchObject({ state: 'waiting', waitingFor: 'dialog open' })
+  })
+
+  it('hides an ended session whose pool is empty, has no title and no children', () => {
+    const empty = (id: string, extra: Partial<Pool> = {}) => ({ id, pool: pool(id, [], extra) })
+    const rows = buildOverview(input({
+      pools: [empty('bare'), empty('titled', { title: 'Notes' }), empty('parent'), { id: 'kid', pool: pool('kid', [{}], { parent: { sessionId: 'parent', taskId: 't1' } }) }, empty('livebare')],
+      live: [live('livebare')],
+    }))
+    expect(rows.map(r => r.sessionId).sort()).toEqual(['livebare', 'parent', 'titled'])
+  })
+
+  it('replaces format characters in cwd as well as control characters', () => {
+    const rows = buildOverview(input({ live: [live('x', { cwd: '/src/a\u202Eb\x1bc d' })], pools: [] }))
+    expect(rows[0].cwd).toBe('/src/a?b?c d')
+  })
+
+  it('carries when a pool was last touched', () => {
+    const rows = buildOverview(input({
+      pools: [
+        { id: 'a', pool: pool('a', [{}], { updatedAt: NOW - 500, touchedAt: NOW - 100 }) },
+        { id: 'b', pool: pool('b', [{}], { updatedAt: NOW - 700 }) },
+      ],
+      live: [live('a'), live('b'), live('c')],
+    }))
+    const at = (id: string) => rows.find(r => r.sessionId === id)!.touchedAt
+    expect([at('a'), at('b'), at('c')]).toEqual([NOW - 100, NOW - 700, 0])
   })
 
   it('drops ended sessions after a day unless their parent is live', () => {
@@ -3304,7 +3351,7 @@ import { width as stringWidth } from '../src/width.js'
 
 const row = (o: Partial<Row>): Row => ({
   sessionId: 's', name: 's', title: '', cwd: '/home/u/src/ItAbyss', state: 'idle', tag: 'herdr',
-  hasPool: true, orphan: false, done: 0, total: 0, complete: false, flags: 0, tasks: [], children: [], ...o,
+  hasPool: true, orphan: false, done: 0, total: 0, complete: false, touchedAt: 0, flags: 0, tasks: [], children: [], ...o,
 })
 
 describe('format', () => {
@@ -3452,6 +3499,7 @@ export type Row = {
   done: number
   total: number
   complete: boolean
+  touchedAt: number
   flags: number
   tasks: TaskView[]
   children: Row[]
@@ -3508,7 +3556,13 @@ export function buildOverview(input: OverviewInput): Row[] {
   // Who is shown: every live session, pools written in the last day, ended children of live
   // parents, and the parent of anything shown.
   const ids = new Set(live.keys())
-  for (const [id, e] of pools) if (e.error || (e.pool && input.now - e.pool.updatedAt < DAY)) ids.add(id)
+  // an ended session that never planned, titled or parented anything is not worth a row
+  const parents = new Set(input.pools.map(e => e.pool?.parent?.sessionId))
+  const blank = (id: string) => {
+    const p = pools.get(id)?.pool
+    return !live.has(id) && !!p && !p.tasks.length && !p.title && !parents.has(id)
+  }
+  for (const [id, e] of pools) if (e.error || (e.pool && input.now - e.pool.updatedAt < DAY && !blank(id))) ids.add(id)
   for (let grew = true; grew; ) {
     grew = false
     for (const id of pools.keys()) {
@@ -3554,7 +3608,7 @@ export function buildOverview(input: OverviewInput): Row[] {
       name: oneLine(a?.name) || oneLine(s?.name) || oneLine(pool?.title) || oneLine(id.slice(0, 8)),
       title: oneLine(pool?.title) || oneLine(a?.title),
       // a path may hold spaces, so control characters are replaced rather than folded away by oneLine
-      cwd: (pool?.cwd || s?.cwd || '').replace(/\p{Cc}/gu, '?'),
+      cwd: (pool?.cwd || s?.cwd || '').replace(/[\p{Cc}\p{Cf}]/gu, '?'),
       state: s ? (s.waitingFor ? 'waiting' : s.status) : 'ended',
       waitingFor: s?.waitingFor ? oneLine(s.waitingFor) : undefined,
       tag: s ? (a ? 'herdr' : 'external') : '—',
@@ -3567,6 +3621,7 @@ export function buildOverview(input: OverviewInput): Row[] {
       done,
       total: tasks.length,
       complete: isComplete(id),
+      touchedAt: pool?.touchedAt ?? pool?.updatedAt ?? 0,
       flags: (pool?.tasks.filter(t => t.needsInput).length ?? 0) + children.reduce((n, c) => n + c.flags, 0),
       tasks,
       children,
@@ -3789,6 +3844,7 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
 - Modify: `plugins/orchestrator/src/main.ts` (replace the stub)
 - Create: `plugins/orchestrator/tests/helpers.ts`
 - Test: `plugins/orchestrator/tests/cli.test.ts`, `plugins/orchestrator/tests/exec.test.ts`, `plugins/orchestrator/tests/main.test.ts`, `plugins/orchestrator/tests/helpers.test.ts`
+- Test: `plugins/orchestrator/tests/ctx.test.ts`
 
 - [ ] **Step 1: Write the test helpers**
 
@@ -4046,6 +4102,8 @@ describe('orch status', () => {
     const json = JSON.parse((await run(['status', '--all', '--json'], ctx)).stdout)
     expect(json.map((r: { name: string }) => r.name).sort()).toEqual(['me', 'other'])
     expect(json.some((r: object) => 'tasks' in r)).toBe(false)
+    expect(json.find((r: { name: string }) => r.name === 'me').touchedAt).toBeGreaterThan(1000)
+    expect(json.find((r: { name: string }) => r.name === 'other').touchedAt).toBe(0)
     const one = JSON.parse((await run(['status', 's-self', '--json'], ctx)).stdout)
     expect(one.tasks.map((t: { text: string }) => t.text)).toEqual(['a'])
     expect((await run(['status', 's-nope'], ctx)).stderr).toMatch(/no session s-nope/)
@@ -4053,9 +4111,10 @@ describe('orch status', () => {
   })
 
   it('grades CI evidence with the live check', async () => {
-    const ctx = makeCtx({ gh: { check: async () => 'fail' } })
+    const ctx = makeCtx({ gh: { check: async () => 'pending' } })
     await run(['plan', 'a'], ctx)
     await run(['task', 'done', 't1', '--evidence', 'ci:https://github.com/o/r/actions/runs/1'], ctx)
+    ctx.gh = { check: async () => 'fail' }
     expect((await run(['status'], ctx)).stdout).toMatch(/^✗ t1 /m)
   })
 
@@ -4253,13 +4312,50 @@ describe('who is calling', () => {
   })
 })
 
+describe('orch task done with ci: and pr: evidence', () => {
+  const doneWith = async (answer: 'pass' | 'fail' | 'pending' | 'unknown', evidence: string) => {
+    const gh = fakeGh(answer)
+    const ctx = makeCtx({ gh })
+    await run(['plan', 'a'], ctx)
+    const out = await run(['task', 'done', 't1', '--evidence', evidence], ctx)
+    return { out, gh, ctx }
+  }
+
+  it.each(['ci:https://github.com/o/r/actions/runs/1', 'pr:41'])('refuses %s while it is failing', async ev => {
+    const { out, gh, ctx } = await doneWith('fail', ev)
+    expect(out.code).toBe(1)
+    expect(out.stderr).toMatch(/refused: (ci|pr) .* is failing, so t1 stays open/)
+    expect(gh.calls).toHaveLength(1)
+    expect(readPool(ctx.orchHome, 's-self')!.tasks[0].status).toBe('pending')
+  })
+
+  it('accepts evidence that passes', async () => {
+    const { out, ctx } = await doneWith('pass', 'pr:41')
+    expect(out).toMatchObject({ code: 0, stdout: 't1 done (pr 41)\n' })
+    expect(readPool(ctx.orchHome, 's-self')!.tasks[0]).toMatchObject({ status: 'done', evidence: { kind: 'pr', ref: '41' } })
+  })
+
+  it.each(['pending', 'unknown'] as const)('accepts evidence that is %s and says orch will keep checking', async verdict => {
+    const { out, ctx } = await doneWith(verdict, 'ci:77')
+    expect(out.code).toBe(0)
+    expect(out.stdout).toBe(`t1 done; ci 77 is ${verdict}, orch will keep checking it\n`)
+    expect(readPool(ctx.orchHome, 's-self')!.tasks[0].status).toBe('done')
+  })
+
+  it('does not ask gh about other evidence', async () => {
+    const { gh } = await doneWith('fail', 'note:fine')
+    expect(gh.calls).toEqual([])
+  })
+})
+
 describe('orch status and gh', () => {
   it('asks gh nothing for status --all, as text or JSON', async () => {
-    const gh = fakeGh('fail')
+    const gh = fakeGh('pass')
     const ctx = makeCtx({ gh })
     writeSession(ctx, { pid: 1, sessionId: 's-self', name: 'me' })
     await run(['plan', 'a'], ctx)
     await run(['task', 'done', 't1', '--evidence', CI], ctx)
+    gh.calls.length = 0 // done asked once itself
     expect((await run(['status', '--all'], ctx)).code).toBe(0)
     expect((await run(['status', '--all', '--json'], ctx)).code).toBe(0)
     expect(gh.calls).toEqual([])
@@ -4270,6 +4366,7 @@ describe('orch status and gh', () => {
     const ctx = makeCtx({ gh })
     await run(['plan', 'a'], ctx)
     await run(['task', 'done', 't1', '--evidence', CI], ctx)
+    gh.calls.length = 0
     writePool(ctx.orchHome, doneTask(plan(newPool('s-other', '/o', 1), ['x'], 2), 't1', { kind: 'pr', ref: '7' }, 3))
     await run(['status'], ctx)
     expect(gh.calls.map(([ev]) => ev.kind)).toEqual(['ci'])
@@ -4589,6 +4686,35 @@ Expected: FAIL, cannot find `../src/ctx.js` / `../src/cli.js`.
 
 - [ ] **Step 4: Implement `ctx.ts`, `self.ts`, `collect.ts`**
 
+`tests/ctx.test.ts`:
+
+```ts
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+import { describe, expect, it } from 'vitest'
+import { realCtx } from '../src/ctx.js'
+
+describe('realCtx homes', () => {
+  it('defaults to ~/.claude', () => {
+    const c = realCtx({})
+    expect(c.claudeHome).toBe(join(homedir(), '.claude'))
+    expect(c.orchHome).toBe(join(homedir(), '.claude', 'orchestrator'))
+  })
+
+  it('honours CLAUDE_CONFIG_DIR, and ORCH_CLAUDE_HOME over it', () => {
+    expect(realCtx({ CLAUDE_CONFIG_DIR: '/cfg' })).toMatchObject({ claudeHome: '/cfg', orchHome: '/cfg/orchestrator' })
+    expect(realCtx({ CLAUDE_CONFIG_DIR: '/cfg', ORCH_CLAUDE_HOME: '/mine' }).claudeHome).toBe('/mine')
+  })
+
+  it('treats an empty value as unset', () => {
+    const c = realCtx({ ORCH_HOME: '', ORCH_CLAUDE_HOME: '', CLAUDE_CONFIG_DIR: '' })
+    expect(c.claudeHome).toBe(join(homedir(), '.claude'))
+    expect(c.orchHome).toBe(join(homedir(), '.claude', 'orchestrator'))
+    expect(realCtx({ ORCH_HOME: '/pools' }).orchHome).toBe('/pools')
+  })
+})
+```
+
 `src/ctx.ts`:
 
 ```ts
@@ -4719,13 +4845,13 @@ async function readStdin(): Promise<string> {
   return s
 }
 
-export function realCtx(): Ctx {
-  const env = process.env
-  const claudeHome = env.ORCH_CLAUDE_HOME ?? join(homedir(), '.claude')
+export function realCtx(env: Record<string, string | undefined> = process.env): Ctx {
+  // an empty value is no value
+  const claudeHome = env.ORCH_CLAUDE_HOME || env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
   return {
     env,
     claudeHome,
-    orchHome: env.ORCH_HOME ?? join(claudeHome, 'orchestrator'),
+    orchHome: env.ORCH_HOME || join(claudeHome, 'orchestrator'),
     cwd: process.cwd(),
     pid: process.pid,
     now: Date.now,
@@ -4923,6 +5049,7 @@ async function cmdDone(ctx: Ctx, args: string[]): Promise<Out> {
   const id = need(positionals[0], 'task id')
   if (positionals.length > 1) throw new OrchError(`orch task done takes one task id, got "${positionals.join(' ')}"; quote the evidence, e.g. --evidence "note:looked fine"`, 2)
   let evidence: Evidence | undefined
+  let unsettled: string | undefined
   if (values.evidence !== undefined) {
     const e = parseEvidence(values.evidence)
     if (e.kind === 'cmd') {
@@ -4939,10 +5066,18 @@ async function cmdDone(ctx: Ctx, args: string[]): Promise<Out> {
       }
       evidence = { kind: 'cmd', ref: e.ref, exit: 0 }
     } else {
-      evidence = e
+      evidence = e as Evidence
+      if (e.kind === 'ci' || e.kind === 'pr') {
+        if (!readPool(ctx.orchHome, resolveSelf(ctx))?.tasks.some(t => t.id === id)) throw new OrchError(`no task ${id} in this pool`)
+        // an answer someone acts on waits for gh: no stale verdict
+        const verdict = await ctx.gh.check(e as Evidence, ctx.cwd)
+        if (verdict === 'fail') throw new OrchError(`refused: ${describeEvidence(e as Evidence)} is failing, so ${id} stays open`)
+        if (verdict !== 'pass') unsettled = `${id} done; ${describeEvidence(e as Evidence)} is ${verdict}, orch will keep checking it\n`
+      }
     }
   }
   await mutateSelf(ctx, p => doneTask(p, id, evidence, ctx.now()))
+  if (unsettled) return ok(unsettled)
   const where = evidence?.kind === 'cmd' ? ` in ${ctx.cwd}` : ''
   return ok(evidence ? `${id} done (${describeEvidence(evidence)}${where})\n` : `${id} done, but only claimed: add --evidence to prove it\n`)
 }
@@ -5086,6 +5221,7 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
 - Modify: `plugins/orchestrator/src/cli.ts` (add the `hook` case)
 - Create: `plugins/orchestrator/hooks/hooks.json`
 - Test: `plugins/orchestrator/tests/hooks.test.ts`
+- Create: `plugins/orchestrator/src/prune.ts` (SessionStart prunes empty ended pools)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -5096,9 +5232,9 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { run } from '../src/cli.js'
-import { askTask, newPool, plan } from '../src/model.js'
+import { askTask, linkChild, newPool, plan } from '../src/model.js'
 import { poolPath, readPool, writePool } from '../src/store.js'
-import { makeCtx, type TestCtx } from './helpers.js'
+import { makeCtx, writeSession, type TestCtx } from './helpers.js'
 
 const hook = (ctx: TestCtx, name: string, input: object) => {
   ctx.stdin = JSON.stringify(input)
@@ -5111,6 +5247,78 @@ function transcript(ctx: TestCtx, tools: { name: string; at: number }[]): string
   writeFileSync(path, tools.map(t => JSON.stringify({ type: 'assistant', timestamp: new Date(t.at).toISOString(), message: { content: [{ type: 'tool_use', name: t.name, input: {} }] } })).join('\n') + '\n')
   return path
 }
+
+describe('hook prompt-submit and orch reply', () => {
+  const twoQuestions = (ctx: TestCtx) => {
+    let p = plan(newPool('s-self', '/r', 1), ['a', 'b', 'c'], 2)
+    p = askTask(p, 't2', 'Strict or "lenient"?', 3)
+    writePool(ctx.orchHome, askTask(p, 't3', 'Which curve?', 4))
+  }
+  const asked = (ctx: TestCtx) => readPool(ctx.orchHome, 's-self')!.tasks.map(t => t.needsInput)
+
+  it('clears only the question an orch reply frame quotes', async () => {
+    const ctx = makeCtx()
+    twoQuestions(ctx)
+    await hook(ctx, 'prompt-submit', { session_id: 's-self', prompt: `[orch reply to: ${JSON.stringify('Strict or "lenient"?')}] lenient` })
+    expect(asked(ctx)).toEqual([undefined, undefined, 'Which curve?'])
+  })
+
+  it('clears nothing when the quoted question matches no task', async () => {
+    const ctx = makeCtx()
+    twoQuestions(ctx)
+    await hook(ctx, 'prompt-submit', { session_id: 's-self', prompt: `[orch reply to: "something else"] yes` })
+    expect(asked(ctx)).toEqual([undefined, 'Strict or "lenient"?', 'Which curve?'])
+  })
+
+  it('still clears every question for a prompt the person typed', async () => {
+    const ctx = makeCtx()
+    twoQuestions(ctx)
+    await hook(ctx, 'prompt-submit', { session_id: 's-self', prompt: 'lenient, and the second curve' })
+    expect(asked(ctx)).toEqual([undefined, undefined, undefined])
+  })
+})
+
+describe('pruning empty pools at session start', () => {
+  const D = 86_400_000
+  const NOW = 30 * D
+  const empty = (id: string, at: number, extra: object = {}) => ({ ...newPool(id, '/r', at), ...extra })
+  const start = (ctx: TestCtx) => hook(ctx, 'session-start', { session_id: 's-new', cwd: '/r', source: 'startup' })
+  const gone = (ctx: TestCtx, id: string) => !existsSync(poolPath(ctx.orchHome, id))
+
+  it('deletes old ended pools with no tasks, and keeps everything else', async () => {
+    const ctx = makeCtx({ now: () => NOW })
+    writePool(ctx.orchHome, empty('old-empty', NOW - 8 * D))
+    writePool(ctx.orchHome, empty('recent-empty', NOW - 6 * D))
+    writePool(ctx.orchHome, plan(empty('old-tasks', NOW - 8 * D), ['a'], NOW - 8 * D))
+    writePool(ctx.orchHome, empty('old-touched', NOW - 8 * D, { touchedAt: NOW - D }))
+    writePool(ctx.orchHome, empty('old-live', NOW - 8 * D))
+    writePool(ctx.orchHome, empty('old-parent', NOW - 8 * D))
+    writePool(ctx.orchHome, empty('old-kid', NOW - 8 * D, { parent: { sessionId: 'old-parent', taskId: 't1' } }))
+    writePool(ctx.orchHome, plan(empty('holder', NOW - D), ['x'], NOW - D))
+    writePool(ctx.orchHome, linkChild(readPool(ctx.orchHome, 'holder')!, 't1', 'old-listed', NOW - D))
+    writePool(ctx.orchHome, empty('old-listed', NOW - 8 * D))
+    writeSession(ctx, { pid: 7, sessionId: 'old-live' })
+    await start(ctx)
+    expect(['old-empty'].every(id => gone(ctx, id))).toBe(true)
+    for (const id of ['recent-empty', 'old-tasks', 'old-touched', 'old-live', 'old-parent', 'old-kid', 'old-listed', 's-new']) expect(gone(ctx, id), id).toBe(false)
+  })
+
+  it('prunes at most once an hour', async () => {
+    let now = NOW
+    const ctx = makeCtx({ now: () => now })
+    writePool(ctx.orchHome, empty('first', NOW - 8 * D))
+    await start(ctx)
+    expect(gone(ctx, 'first')).toBe(true)
+    expect(existsSync(join(ctx.orchHome, '.pruned'))).toBe(true)
+    writePool(ctx.orchHome, empty('second', NOW - 8 * D))
+    now += 30 * 60_000
+    await start(ctx)
+    expect(gone(ctx, 'second')).toBe(false)
+    now += 40 * 60_000
+    await start(ctx)
+    expect(gone(ctx, 'second')).toBe(true)
+  })
+})
 
 describe('hook session-start', () => {
   it('registers the session and exports its id', async () => {
@@ -5132,6 +5340,14 @@ describe('hook session-start', () => {
     expect(readPool(ctx.orchHome, 's-par')!.tasks[0]).toMatchObject({ children: ['s-kid'], status: 'in_progress' })
     expect(JSON.parse(out.stdout).hookSpecificOutput.hookEventName).toBe('SessionStart')
     expect(contextOf(out.stdout)).toMatch(/child of "Courses".*t1 \("Make courses"\).*Read \/r\/brief\.md first/)
+  })
+
+  it('folds the parent title and task text onto one line', async () => {
+    const ctx = makeCtx()
+    writePool(ctx.orchHome, { ...plan(newPool('s-par', '/r', 1), ['Make\x1b]0;x\x07\ncourses'], 2), title: 'Cour\nses' })
+    Object.assign(ctx.env, { ORCH_PARENT: 's-par', ORCH_PARENT_TASK: 't1', ORCH_BRIEF: '/r/brief.md' })
+    const out = await hook(ctx, 'session-start', { session_id: 's-kid', cwd: '/r/wt', source: 'startup' })
+    expect(contextOf(out.stdout)).toContain('child of "Cour ses" for its task t1 ("Make ]0;x courses")')
   })
 
   it('does not export an id that failed vetting into the env file', async () => {
@@ -5347,17 +5563,64 @@ Expected: FAIL, `orch: unknown command hook` makes the first assertions fail.
 
 - [ ] **Step 3: Implement**
 
+`src/prune.ts`:
+
+```ts
+import { existsSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import type { Ctx } from './ctx.js'
+import { DAY } from './overview.js'
+import { readLiveSessions } from './sources/sessions.js'
+import { listPools, poolPath } from './store.js'
+
+const MAX_AGE_MS = 7 * DAY
+const EVERY_MS = 60 * 60 * 1000
+
+// Deletes the pool files of sessions that ended a week ago without ever planning anything. A pool with tasks,
+// a live session, and anything that is named as a parent or listed as a child is kept. At most once an hour,
+// tracked by the mtime of $ORCH_HOME/.pruned (set from ctx.now, so a test clock works). Returns the ids removed.
+export function pruneEmptyPools(ctx: Ctx, keep: string): string[] {
+  const marker = join(ctx.orchHome, '.pruned')
+  const now = ctx.now()
+  if (existsSync(marker) && now - statSync(marker).mtimeMs < EVERY_MS) return []
+  writeFileSync(marker, '')
+  utimesSync(marker, now / 1000, now / 1000)
+
+  const pools = listPools(ctx.orchHome)
+  const alive = new Set(readLiveSessions(ctx.claudeHome, ctx.isAlive).map(s => s.sessionId))
+  const referenced = new Set<string>()
+  for (const e of pools) {
+    if (e.pool?.parent) referenced.add(e.pool.parent.sessionId)
+    for (const t of e.pool?.tasks ?? []) for (const c of t.children ?? []) referenced.add(c)
+  }
+  const removed: string[] = []
+  for (const { id, pool } of pools) {
+    if (!pool || id === keep || alive.has(id) || referenced.has(id) || pool.parent || pool.tasks.length) continue
+    if (now - Math.max(pool.updatedAt, pool.touchedAt ?? 0) < MAX_AGE_MS) continue
+    try {
+      unlinkSync(poolPath(ctx.orchHome, id))
+      removed.push(id)
+    } catch {
+      // gone already, or not ours to remove
+    }
+  }
+  return removed
+}
+```
+
 `src/hooks.ts`:
 
 ```ts
 import { appendFileSync, closeSync, fstatSync, openSync, readSync } from 'node:fs'
 import type { Ctx } from './ctx.js'
 import { OrchError } from './errors.js'
-import { clearQuestions, linkChild, newPool, setParent, startTurn } from './model.js'
+import { oneLine } from './evidence.js'
+import { clearQuestions, linkChild, newPool, setParent, startTurn, type Pool } from './model.js'
 import { ok, type Out } from './out.js'
+import { pruneEmptyPools } from './prune.js'
 import { log, poolPath, readPool, update, updateIfExists } from './store.js'
 
-type HookInput = { session_id?: string; cwd?: string; transcript_path?: string; source?: string }
+type HookInput = { session_id?: string; cwd?: string; transcript_path?: string; source?: string; prompt?: string }
 type Input = HookInput & { session_id: string }
 
 const WORK = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash', 'Agent', 'Task']) // subagent edits never show up in this transcript
@@ -5431,6 +5694,12 @@ async function sessionStart(ctx: Ctx, input: Input): Promise<Out> {
     }
   }
 
+  try {
+    pruneEmptyPools(ctx, id)
+  } catch (e) {
+    log(ctx.orchHome, `hook session-start: prune: ${e instanceof Error ? e.message : String(e)}`)
+  }
+
   if (!pool.brief) return ok()
   const next = pool.tasks.length ? 'run `orch status` to pick up where you left off' : 'then run `orch plan` for your part and tick each task with evidence'
   if (!pool.parent) return context('SessionStart', `[orch] Read ${pool.brief} first, ${next}.`)
@@ -5443,8 +5712,27 @@ async function sessionStart(ctx: Ctx, input: Input): Promise<Out> {
   const task = parent?.tasks.find(t => t.id === pool.parent!.taskId)
   return context(
     'SessionStart',
-    `[orch] This session is a child of "${parent?.title || pool.parent.sessionId}" for its task ${pool.parent.taskId}${task ? ` ("${task.text}")` : ''}. Read ${pool.brief} first, ${next}.`,
+    `[orch] This session is a child of "${oneLine(parent?.title) || pool.parent.sessionId}" for its task ${pool.parent.taskId}${task ? ` ("${oneLine(task.text)}")` : ''}. Read ${pool.brief} first, ${next}.`,
   )
+}
+
+const REPLY_FRAME = '[orch reply to: '
+
+// An orch reply answers one question; the frame quotes it. Any other prompt answers everything.
+function clearAnswered(pool: Pool, prompt: string | undefined, now: number): Pool | undefined {
+  if (typeof prompt !== 'string' || !prompt.startsWith(REPLY_FRAME)) return clearQuestions(pool, now)
+  // JSON.stringify escapes the closing quote, so the quoted string ends at the first unescaped one
+  const m = /^"(?:[^"\\]|\\.)*"/.exec(prompt.slice(REPLY_FRAME.length))
+  let asked: unknown
+  try {
+    asked = m && JSON.parse(m[0])
+  } catch {
+    return undefined
+  }
+  // the frame holds a one-line, 200-character form of the question
+  const quoted = (s: string) => Array.from(oneLine(s)).slice(0, 200).join('')
+  const task = typeof asked === 'string' ? pool.tasks.find(t => t.needsInput && quoted(t.needsInput) === asked) : undefined
+  return task ? clearQuestions(pool, now, task.id) : undefined
 }
 
 async function promptSubmit(ctx: Ctx, input: Input): Promise<Out> {
@@ -5459,7 +5747,7 @@ async function promptSubmit(ctx: Ctx, input: Input): Promise<Out> {
     id,
     p => {
       const q = p ?? newPool(id, input.cwd ?? ctx.cwd, now)
-      return startTurn(clearQuestions(q, now) ?? q, now)
+      return startTurn(clearAnswered(q, input.prompt, now) ?? q, now)
     },
     LOCK_WAIT_MS,
   )
@@ -5885,7 +6173,17 @@ describe('orch spawn-child', () => {
     inHerdr(ctx)
     parent(ctx)
     await spawn(ctx, '--prompt', 'Start with the tests.')
-    expect(ctx.herdr.calls[2][2]).toMatch(/with evidence\.\n\nStart with the tests\.$/)
+    expect(ctx.herdr.calls[2][2]).toMatch(/with evidence\. Start with the tests\.$/)
+  })
+
+  it('sends the intro to herdr as one line, even with a multi-line --prompt', async () => {
+    const ctx = makeCtx()
+    inHerdr(ctx)
+    parent(ctx)
+    await spawn(ctx, '--prompt', 'one\ntwo\x1b[31m\n\nthree')
+    const sent = ctx.herdr.calls[2][2]
+    expect(sent).not.toMatch(/[\x00-\x1f]/)
+    expect(sent).toMatch(/with evidence\. one two \[31m three$/)
   })
 
   it('prints the command when HERDR_ENV is set but there is no workspace', async () => {
@@ -6034,6 +6332,7 @@ export function workDir(ctx: Ctx, p: string): string {
 ```ts
 import type { Ctx } from './ctx.js'
 import { OrchError } from './errors.js'
+import { safeLine } from './evidence.js'
 import { flatten } from './format.js'
 import type { Row } from './overview.js'
 import { readPool } from './store.js'
@@ -6073,7 +6372,7 @@ export async function resolveSession(ctx: Ctx, rows: Row[], query: string, opts:
     } catch {
       // not a usable id or an unreadable pool: not a match
     }
-    if (pool) return { sessionId: query, name: pool.title || query }
+    if (pool) return { sessionId: query, name: safeLine(pool.title) || query }
     if (opts.herdr) {
       const agent = await ctx.herdr.list().then(
         l => l.find(a => a.name === query),
@@ -6188,7 +6487,7 @@ export async function spawnChild(ctx: Ctx, o: SpawnOptions): Promise<Out> {
     `You are a child session of "${oneLine(parent.title) || parentId}", working on its task ${task.id}: "${oneLine(task.text)}". ` +
     `Read ${brief} first, then run \`orch plan\` for your part and tick each task with evidence.` +
     (o.prompt ? `\n\n${o.prompt}` : '')
-  // what is printed for a person to paste: never carries a control character
+  // what is printed for a person to paste, and what herdr gets as one prompt: never a control character or a newline
   const shown = oneLine(intro)
 
   if (ctx.env.HERDR_ENV !== '1' || !ctx.env.HERDR_WORKSPACE_ID) {
@@ -6233,7 +6532,7 @@ export async function spawnChild(ctx: Ctx, o: SpawnOptions): Promise<Out> {
     throw new OrchError(`${name} runs in ${paneId} (session ${childId}) but linking failed: ${why(e)}. Link it: ${linkCmd(q(childId))} ; then send its intro: ${promptCmd(name)}`)
   }
   try {
-    await ctx.herdr.prompt(name, intro)
+    await ctx.herdr.prompt(name, shown)
   } catch (e) {
     throw new OrchError(`${name} is linked under ${parentId} ${task.id}, but sending its intro failed (${why(e)}). Send it yourself: ${promptCmd(name)}`)
   }
@@ -6314,6 +6613,7 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
 - Create: `plugins/orchestrator/src/reply.ts`
 - Modify: `plugins/orchestrator/src/cli.ts` (add the `reply` case)
 - Test: `plugins/orchestrator/tests/reply.test.ts`
+- Test: `plugins/orchestrator/tests/e2e.test.ts` (spawn, link, child completes, parent rolls up)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -6564,6 +6864,16 @@ describe('orch reply', () => {
     expect(readPool(ctx.orchHome, 's-old')!.tasks[0].needsInput).toBeUndefined()
   })
 
+  it('cleans the title of an old pool before it echoes it back', async () => {
+    const ctx = makeCtx({ now: () => 10 * 86_400_000 })
+    writePool(ctx.orchHome, { ...askTask(plan(newPool('s-old', '/r', 1), ['a'], 2), 't1', 'q', 3), title: 'evil\x1b]0;PWNED\x07 name' })
+    const out = await run(['reply', 's-old', '--', 'hi'], ctx)
+    expect(out.code).toBe(1)
+    expect(out.stderr).toMatch(/has ended/)
+    expect(out.stderr).not.toContain('\x1b')
+    expect(out.stderr).not.toContain('PWNED')
+  })
+
   it('keeps the newlines for SendMessage', async () => {
     const ctx = makeCtx()
     asking(ctx, 's-ext', 'api-fix', false)
@@ -6587,6 +6897,44 @@ describe('orch reply', () => {
     const out = await run(['reply', 's-old', '--', 'x'], ctx)
     expect(out.code).toBe(1)
     expect(out.stderr).toMatch(/has ended/)
+  })
+})
+```
+
+`tests/e2e.test.ts`:
+
+```ts
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { describe, expect, it } from 'vitest'
+import { run } from '../src/cli.js'
+import { readPool } from '../src/store.js'
+import { makeCtx } from './helpers.js'
+
+// DESIGN section 11: parent plans, spawns a child, the child plans and finishes, the parent task rolls up.
+describe('parent and child end to end', () => {
+  it('shows the parent task complete once the child has ticked its own', async () => {
+    const parent = makeCtx()
+    Object.assign(parent.env, { HERDR_ENV: '1', HERDR_WORKSPACE_ID: 'w1' })
+    mkdirSync(parent.cwd, { recursive: true })
+    writeFileSync(join(parent.cwd, 'brief.md'), '# brief\n')
+    expect((await run(['plan', 'fan out'], parent)).code).toBe(0)
+
+    const spawned = await run(['spawn-child', 't1', '--name', 'kid', '--cwd', '.', '--brief', 'brief.md'], parent)
+    expect(spawned.code).toBe(0)
+    const childId = JSON.parse(spawned.stdout).sessionId as string
+    expect(readPool(parent.orchHome, childId)).toMatchObject({ parent: { sessionId: 's-self', taskId: 't1' }, brief: join(parent.cwd, 'brief.md') })
+
+    const status = async () => JSON.parse((await run(['status', '--all', '--json'], parent)).stdout) as { sessionId: string; complete: boolean; done: number; total: number; children: { sessionId: string; complete: boolean }[] }[]
+    expect((await status())[0]).toMatchObject({ sessionId: 's-self', complete: false, done: 0, total: 1 })
+
+    const child = makeCtx({ orchHome: parent.orchHome, claudeHome: parent.claudeHome, cwd: parent.cwd, env: { CLAUDE_SESSION_ID: childId } })
+    expect((await run(['plan', 'a'], child)).code).toBe(0)
+    expect((await run(['task', 'done', 't1', '--evidence', 'note:x'], child)).code).toBe(0)
+
+    const [top] = await status()
+    expect(top).toMatchObject({ sessionId: 's-self', complete: true, done: 1, total: 1 })
+    expect(top.children).toMatchObject([{ sessionId: childId, complete: true }])
   })
 })
 ```
@@ -7748,8 +8096,8 @@ allowed-tools: Bash(orch status:*), Bash(orch reply:*), AskUserQuestion, ListAge
 
 Show the person every local Claude session and let them act on one. This is used from a phone over Remote Control, so keep each message short and drive everything through AskUserQuestion.
 
-1. Run `orch status --all --json`. It prints a compact tree of rows without their tasks: `sessionId`, `name`, `state` (busy, idle, waiting, ended), `tag`, `done`/`total`, `flags` (open questions in the subtree), `link` and `children`.
-2. Ask *Which session?* with AskUserQuestion. Options, at most four: sessions with `flags > 0` first, then waiting, then busy ones; label each `name done/total` plus ` ⚑` when it has flags. The person can type any other session's name through *Other*. If there are no sessions, say so and stop.
+1. Run `orch status --all --json`. It prints a compact tree of rows without their tasks: `sessionId`, `name`, `state` (busy, idle, waiting, ended), `tag`, `done`/`total`, `flags` (open questions in the subtree), `touchedAt`, `link` and `children`.
+2. Ask *Which session?* with AskUserQuestion. Options, at most four: sessions with `flags > 0` first, then waiting, then busy ones, and within each group the most recently touched first (largest `touchedAt`, epoch ms); label each `name done/total` plus ` ⚑` when it has flags. The person can type any other session's name through *Other*. If there are no sessions, say so and stop.
 3. Run `orch status <sessionId> --json` for the chosen row; it adds `tasks` (each with `mark`, `id`, `text`, `detail`). Print them as a short list (`mark id text — detail`) and the `link` if there is one. Then ask *What now?* with the options **Answer ⚑** (only when one of its tasks has `mark` ⚑; for a parent whose own tasks show no ⚑, find the child under `children` in the step-1 tree with `flags > 0` and use that child's `sessionId` for steps 3–4), **Open session** (only when it has a `link`), **Back**.
 4. **Answer ⚑**: if the session has more than one ⚑ task, ask which one first. Ask the person for the answer as free text, then run `orch reply <sessionId> --task <taskId> -- '<answer>'` in single quotes, with every `'` in the answer written as `'\''`, so `$`, backticks and `"` in the answer reach the session literally (always the id, since two sessions can share a name; always `--`, since an answer may start with a dash).
    - exit 0: say it was delivered.
@@ -7776,7 +8124,7 @@ Design: [DESIGN.md](DESIGN.md). Plan: [PLAN.md](PLAN.md).
 
 ## Requirements
 
-- Node 18+ for `bin/orch` and the hooks; Node 20+ for `orch tui` (`package.json` `engines` says `>=20`, but the CLI is deliberately kept runnable on 18).
+- Node 18+ for `bin/orch` and the hooks; Node 20+ for `orch tui` (`package.json` `engines` says `>=18`, the floor of the CLI and the hooks; `orch tui` needs 20).
 - `gh` for `pr:` and `ci:` evidence.
 - herdr for the TUI's `f` key, for in-pane replies, and for `spawn-child` in a tab.
 
@@ -7825,7 +8173,7 @@ npm run build      # bin/orch and lib/orch-tui.mjs are committed: rebuild before
 npm run check:bundle   # after committing: fails if the committed bundles are stale
 ```
 
-Pools live in `~/.claude/orchestrator/<sessionId>.json` (`ORCH_HOME` overrides); hook errors go to `orch.log` there.
+Pools live in `~/.claude/orchestrator/<sessionId>.json` (`ORCH_HOME` overrides it; the Claude home itself is `ORCH_CLAUDE_HOME`, else `CLAUDE_CONFIG_DIR`, else `~/.claude`); hook errors go to `orch.log` there.
 ````
 
 - [ ] **Step 4: Add the marketplace entry**
