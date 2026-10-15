@@ -1428,7 +1428,7 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
 
 **Files:**
 - Create: `plugins/orchestrator/src/sources/sessions.ts`
-- Create: `plugins/orchestrator/tests/fixtures/claude/sessions/101.json`, `102.json`, `103.json`, `104.json`, `101.abc.key`
+- Create: `plugins/orchestrator/tests/fixtures/claude/sessions/101.json`, `102.json`, `103.json`, `104.json`, `105.json.tmp`
 - Test: `plugins/orchestrator/tests/sessions.test.ts`
 
 - [ ] **Step 1: Write the fixtures**
@@ -1442,7 +1442,7 @@ These mirror the real files in `~/.claude/sessions/` (trimmed). `101.json`:
 `102.json`:
 
 ```json
-{"pid":102,"sessionId":"s-python","cwd":"/home/u/src/ItAbyss/.worktrees/course-python","kind":"interactive","entrypoint":"cli","name":"course-python-5f","status":"busy","updatedAt":1791968067000}
+{"pid":102,"sessionId":"s-python","cwd":"/home/u/src/ItAbyss/.worktrees/course-python","kind":"interactive","entrypoint":"cli","name":"course-python-5f","status":"busy","updatedAt":1791968067000,"bridgeSessionId":null}
 ```
 
 `103.json` (its process is gone):
@@ -1457,10 +1457,10 @@ These mirror the real files in `~/.claude/sessions/` (trimmed). `101.json`:
 {not json
 ```
 
-`101.abc.key`:
+`105.json.tmp` (a valid session under a name that is not `<pid>.json`, standing in for half-written files and the `<pid>.<hash>.key` files the real directory also holds):
 
-```
-key
+```json
+{"pid":105,"sessionId":"s-temp","cwd":"/tmp","status":"idle"}
 ```
 
 - [ ] **Step 2: Write the failing tests**
@@ -1475,11 +1475,13 @@ import { pidAlive, readLiveSessions, sessionLink } from '../src/sources/sessions
 const claudeHome = fileURLToPath(new URL('./fixtures/claude', import.meta.url))
 
 describe('readLiveSessions', () => {
-  it('reads live sessions and skips dead pids, keys and broken files', () => {
+  it('reads live sessions and skips dead pids, broken files and other names', () => {
     const s = readLiveSessions(claudeHome, pid => pid !== 103).sort((a, b) => a.pid - b.pid)
     expect(s.map(x => x.sessionId)).toEqual(['s-parent', 's-python'])
     expect(s[0]).toMatchObject({ name: 'beginner-courses', status: 'idle', bridgeSessionId: 'session_01Parent' })
     expect(s[1].status).toBe('busy')
+    // Claude Code writes "bridgeSessionId": null outside Remote Control
+    expect(s[1].bridgeSessionId).toBeUndefined()
   })
 
   it('returns nothing when the directory is missing', () => {
@@ -1543,14 +1545,14 @@ export function readLiveSessions(claudeHome: string, isAlive: (pid: number) => b
     if (!/^\d+\.json$/.test(n)) continue
     try {
       const o = JSON.parse(readFileSync(join(dir, n), 'utf8'))
-      if (!o.sessionId || typeof o.pid !== 'number' || !isAlive(o.pid)) continue
+      if (typeof o.sessionId !== 'string' || typeof o.pid !== 'number' || !isAlive(o.pid)) continue
       out.push({
         pid: o.pid,
         sessionId: o.sessionId,
         cwd: o.cwd ?? '',
-        name: o.name,
+        name: typeof o.name === 'string' ? o.name : undefined,
         status: o.status === 'busy' ? 'busy' : 'idle',
-        bridgeSessionId: o.bridgeSessionId,
+        bridgeSessionId: typeof o.bridgeSessionId === 'string' ? o.bridgeSessionId : undefined,
       })
     } catch {
       // a half-written or foreign file: skip it
