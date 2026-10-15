@@ -2535,7 +2535,7 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
 import { describe, expect, it } from 'vitest'
 import { checkKey, type Check } from '../src/evidence.js'
 import { newPool, type Pool, type Task } from '../src/model.js'
-import { buildOverview, DAY, type OverviewInput } from '../src/overview.js'
+import { buildOverview, DAY, type OverviewInput, type Row } from '../src/overview.js'
 import type { HerdrAgent } from '../src/sources/herdr.js'
 import type { LiveSession } from '../src/sources/sessions.js'
 
@@ -2641,6 +2641,13 @@ describe('buildOverview', () => {
     }))
     expect(rows.map(r => r.sessionId)).toEqual(['P'])
     expect(rows[0].children[0]).toMatchObject({ sessionId: 'kept', state: 'ended', tag: '—' })
+  })
+
+  it('survives a parent cycle and keeps every member', () => {
+    const p = (id: string, parent: string) => ({ id, pool: pool(id, [{}], { parent: { sessionId: parent, taskId: 't1' } }) })
+    const rows = buildOverview(input({ pools: [p('A', 'B'), p('B', 'A'), p('S', 'S')], live: [live('A'), live('B'), live('S')] }))
+    const count = (rs: Row[]): number => rs.reduce((n, r) => n + 1 + count(r.children), 0)
+    expect(count(rows)).toBe(3)
   })
 
   it('marks orphans and unreadable pools', () => {
