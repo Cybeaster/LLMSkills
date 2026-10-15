@@ -160,6 +160,7 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
     "ink": "^6.0.0",
     "ink-testing-library": "^4.0.0",
     "react": "^19.1.0",
+    "string-width": "^8.3.0",
     "typescript": "^5.9.0",
     "vitest": "^3.2.0"
   }
@@ -1326,7 +1327,7 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
 ```ts
 import { describe, expect, it } from 'vitest'
 import { OrchError } from '../src/errors.js'
-import { checkKey, describeEvidence, grade, oneLine, parseEvidence } from '../src/evidence.js'
+import { checkKey, describeEvidence, grade, oneLine, parseEvidence, safeLine, stripEscapes } from '../src/evidence.js'
 import type { Evidence } from '../src/model.js'
 
 const thrown = (fn: () => unknown): unknown => {
@@ -1448,6 +1449,23 @@ describe('checkKey', () => {
     expect(checkKey(pr, '/a')).not.toBe(checkKey({ kind: 'ci', ref: '41' }, '/a'))
   })
 })
+
+describe('stripEscapes and safeLine', () => {
+  it('removes whole CSI and OSC sequences', () => {
+    expect(stripEscapes('a\x1b[31mred\x1b[0m b')).toBe('ared b')
+    expect(stripEscapes('x\x1b]0;PWNED\x07y')).toBe('xy')
+    expect(stripEscapes('x\x1b]8;;http://e\x1b\\link\x1b]8;;\x1b\\y')).toBe('xlinky')
+  })
+
+  it('folds what is left onto one line', () => {
+    expect(safeLine('a\x1b]0;PWNED\x07b\nc')).toBe('ab c')
+    expect(safeLine(new Error('x').message)).toBe('x')
+  })
+
+  it('drops invisible format characters such as the bidi override', () => {
+    expect(oneLine('a‮b​c')).toBe('abc')
+  })
+})
 ```
 
 - [ ] **Step 2: Run them to see them fail**
@@ -1495,9 +1513,21 @@ export function grade(ev: Evidence | undefined, check?: Check): Grade {
   return 'unverified'
 }
 
-// Text a session wrote, folded onto one line with control characters (ESC, BEL, newlines) gone, so it
-// cannot move the cursor or retitle the terminal when it is printed.
-export const oneLine = (s: unknown): string => String(s ?? '').replace(/[\s\p{Cc}]+/gu, ' ').trim()
+// Text a session wrote, folded onto one line with control characters (ESC, BEL, newlines) and invisible
+// format characters (zero-width and bidi overrides such as U+202E) gone, so it cannot move the cursor,
+// retitle the terminal or reorder what is printed.
+export const oneLine = (s: unknown): string =>
+  String(s ?? '')
+    .replace(/\p{Cf}/gu, '')
+    .replace(/[\s\p{Cc}]+/gu, ' ')
+    .trim()
+
+// Whole terminal escape sequences gone: CSI (colours, cursor moves) and OSC (titles, links).
+export const stripEscapes = (s: string): string =>
+  s.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+
+// Anything that may be printed on a status line: escape sequences stripped whole, then one line.
+export const safeLine = (s: unknown): string => oneLine(stripEscapes(String(s ?? '')))
 
 export function describeEvidence(ev: Evidence): string {
   const ref = oneLine(ev.ref)
@@ -2266,9 +2296,11 @@ describe('cliGh', () => {
 
 describe('cliGh cache', () => {
   const passed = done('success')
+  // a run still going: a finished one is final and never expires
+  const running = { status: 'in_progress', conclusion: '' }
 
   it('caches answers for 60 s per repo', async () => {
-    const { run, calls } = fakeRun(passed)
+    const { run, calls } = fakeRun(running)
     let now = 0
     const gh = cliGh(run, () => now)
     const ev = ci('1')
@@ -2303,13 +2335,16 @@ describe('cliGh cache', () => {
   })
 
   it('keeps a pass for 60 s, not the 15 s an unknown gets', async () => {
-    const { run, calls } = fakeRun(passed)
+    const { run, calls } = fakeRun({ state: 'OPEN', statusCheckRollup: [{ conclusion: 'SUCCESS' }] })
     let now = 0
     const gh = cliGh(run, () => now)
-    await gh.check(ci('1'), repoA)
+    expect(await gh.check(pr('1'), repoA)).toBe('pass')
     now = 20_000
-    await gh.check(ci('1'), repoA)
+    await gh.check(pr('1'), repoA)
     expect(calls).toHaveLength(1)
+    now = 61_000
+    await gh.check(pr('1'), repoA)
+    expect(calls).toHaveLength(2)
   })
 
   it('runs gh once for two checks of the same key at the same time', async () => {
@@ -2357,7 +2392,7 @@ describe('cliGh cache', () => {
         first = false
         await gate
       }
-      return { code: 0, stdout: JSON.stringify(passed) }
+      return { code: 0, stdout: JSON.stringify(running) }
     }
     let now = 0
     const gh = cliGh(run, () => now)
@@ -2411,6 +2446,127 @@ describe('cliGh when the cwd is gone', () => {
     expect(await gh.check(ci('77'), cwd)).toBe('unknown')
     expect(await gh.check(pr('41'), cwd)).toBe('unknown')
     expect(calls).toHaveLength(0)
+  })
+})
+
+// A gh whose answers the test releases by hand, to see how many run at once.
+function gated() {
+  let active = 0
+  let peak = 0
+  const calls: string[][] = []
+  const release: (() => void)[] = []
+  const run: GhRun = args =>
+    new Promise(resolve => {
+      calls.push(args)
+      active++
+      peak = Math.max(peak, active)
+      release.push(() => {
+        active--
+        resolve({ code: 0, stdout: JSON.stringify(done('success')) })
+      })
+    })
+  return { run, calls, release, peak: () => peak }
+}
+const tick = () => new Promise(r => setTimeout(r, 10))
+
+describe('cliGh limits and caching', () => {
+  it('runs at most 4 gh processes at once', async () => {
+    const g = gated()
+    const gh = cliGh(g.run)
+    const all = Array.from({ length: 9 }, (_, i) => gh.check(ci(String(100 + i)), repoA))
+    await tick()
+    expect(g.calls).toHaveLength(4)
+    while (g.release.length) {
+      g.release.shift()!()
+      await tick()
+    }
+    expect(await Promise.all(all)).toEqual(Array(9).fill('pass'))
+    expect(g.calls).toHaveLength(9)
+    expect(g.peak()).toBe(4)
+  })
+
+  it('never asks again about a finished CI run or a merged or closed PR', async () => {
+    let t = 0
+    const finished = fakeRun(done('success'))
+    const gh = cliGh(finished.run, () => t)
+    await gh.check(ci('1'), repoA)
+    t += 3_600_000
+    expect(await gh.check(ci('1'), repoA)).toBe('pass')
+    expect(finished.calls).toHaveLength(1)
+
+    for (const state of ['MERGED', 'CLOSED']) {
+      const f = fakeRun({ state, statusCheckRollup: [] })
+      const g = cliGh(f.run, () => t)
+      await g.check(pr('5'), repoA)
+      t += 3_600_000
+      await g.check(pr('5'), repoA)
+      expect(f.calls).toHaveLength(1)
+    }
+  })
+
+  it('asks again about an open PR once its answer expires', async () => {
+    let t = 0
+    const open = fakeRun({ state: 'OPEN', statusCheckRollup: [] })
+    const gh = cliGh(open.run, () => t)
+    await gh.check(pr('5'), repoA)
+    t += 61_000
+    await gh.check(pr('5'), repoA)
+    expect(open.calls).toHaveLength(2)
+  })
+
+  describe('stale mode (the TUI)', () => {
+    it('answers unknown at once for a new key and fills it in the background', async () => {
+      const g = gated()
+      const gh = cliGh(g.run)
+      expect(await gh.check(ci('1'), repoA, { stale: true })).toBe('unknown')
+      await tick()
+      expect(g.calls).toHaveLength(1)
+      g.release[0]()
+      await tick()
+      expect(await gh.check(ci('1'), repoA, { stale: true })).toBe('pass')
+    })
+
+    it('returns the last answer while an expired one refreshes', async () => {
+      let t = 0
+      const answers = [{ state: 'OPEN', statusCheckRollup: [{ conclusion: 'SUCCESS' }] }, { state: 'OPEN', statusCheckRollup: [{ conclusion: 'FAILURE' }] }]
+      const hold: (() => void)[] = []
+      const run: GhRun = () =>
+        new Promise(resolve => {
+          const out = JSON.stringify(answers.shift())
+          if (answers.length === 1) return resolve({ code: 0, stdout: out })
+          hold.push(() => resolve({ code: 0, stdout: out }))
+        })
+      const gh = cliGh(run, () => t)
+      expect(await gh.check(pr('5'), repoA)).toBe('pass')
+      t += 61_000
+      expect(await gh.check(pr('5'), repoA, { stale: true })).toBe('pass')
+      await tick()
+      hold[0]()
+      await tick()
+      expect(await gh.check(pr('5'), repoA, { stale: true })).toBe('fail')
+    })
+
+    it('does not start a second gh while one is still running', async () => {
+      const g = gated()
+      const gh = cliGh(g.run)
+      await gh.check(ci('1'), repoA, { stale: true })
+      await gh.check(ci('1'), repoA, { stale: true })
+      await tick()
+      expect(g.calls).toHaveLength(1)
+    })
+
+    it('the blocking mode still waits for the real verdict', async () => {
+      const g = gated()
+      const gh = cliGh(g.run)
+      await gh.check(ci('1'), repoA, { stale: true })
+      let verdict: string | undefined
+      const p = gh.check(ci('1'), repoA).then(v => (verdict = v))
+      await tick()
+      expect(verdict).toBeUndefined()
+      g.release[0]()
+      await p
+      expect(verdict).toBe('pass')
+    })
   })
 })
 ```
@@ -2567,8 +2723,14 @@ import { tmpdir } from 'node:os'
 import { checkKey, type Check } from '../evidence.js'
 import type { Evidence } from '../model.js'
 
+export type CheckOpts = {
+  // Answer from the last known verdict at once ('unknown' for a key never asked) and refresh in the background.
+  // For a display that polls. A verdict someone acts on (orch task done --evidence ci:…) leaves this off and waits.
+  stale?: boolean
+}
+
 export interface Gh {
-  check(ev: Evidence, cwd: string): Promise<Check>
+  check(ev: Evidence, cwd: string, opts?: CheckOpts): Promise<Check>
 }
 
 export type GhRun = (args: string[], cwd: string) => Promise<{ code: number; stdout: string }>
@@ -2581,30 +2743,33 @@ const runGh: GhRun = (args, cwd) =>
 const FAILED = ['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE']
 const PASSED = ['SUCCESS', 'NEUTRAL', 'SKIPPED']
 
+// final: the state cannot change any more (a finished run, a merged or closed PR), so it is never asked again
+type Answer = { value: Check; final: boolean }
+const MAX_GH = 4
 const ANSWER_TTL_MS = 60_000
 const UNKNOWN_TTL_MS = 15_000
 
-async function ciCheck(run: GhRun, ref: string, cwd: string): Promise<Check> {
+async function ciCheck(run: GhRun, ref: string, cwd: string): Promise<Answer> {
   const m = ref.match(/github\.com\/([^/]+\/[^/]+)\/actions\/runs\/(\d+)/)
   const args = m ? ['run', 'view', m[2], '-R', m[1], '--json', 'status,conclusion'] : ['run', 'view', ref, '--json', 'status,conclusion']
   const r = await run(args, cwd)
-  if (r.code !== 0) return 'unknown'
+  if (r.code !== 0) return { value: 'unknown', final: false }
   const o = JSON.parse(r.stdout)
-  if (o.status !== 'completed') return 'pending'
+  if (o.status !== 'completed') return { value: 'pending', final: false }
   const c = String(o.conclusion ?? '').toUpperCase()
-  return PASSED.includes(c) ? 'pass' : FAILED.includes(c) ? 'fail' : 'unknown'
+  return PASSED.includes(c) ? { value: 'pass', final: true } : FAILED.includes(c) ? { value: 'fail', final: true } : { value: 'unknown', final: false }
 }
 
-async function prCheck(run: GhRun, ref: string, cwd: string): Promise<Check> {
+async function prCheck(run: GhRun, ref: string, cwd: string): Promise<Answer> {
   const r = await run(['pr', 'view', ref, '--json', 'state,statusCheckRollup'], cwd)
-  if (r.code !== 0) return 'unknown'
+  if (r.code !== 0) return { value: 'unknown', final: false }
   const o = JSON.parse(r.stdout)
-  if (o.state === 'MERGED') return 'pass'
-  if (o.state === 'CLOSED') return 'fail'
+  if (o.state === 'MERGED') return { value: 'pass', final: true }
+  if (o.state === 'CLOSED') return { value: 'fail', final: true }
   const states: string[] = (o.statusCheckRollup ?? []).map((c: { conclusion?: string; state?: string }) => c.conclusion || c.state || '')
-  if (states.some(s => FAILED.includes(s))) return 'fail'
-  if (states.length && states.every(s => PASSED.includes(s))) return 'pass'
-  return 'pending'
+  if (states.some(s => FAILED.includes(s))) return { value: 'fail', final: false }
+  if (states.length && states.every(s => PASSED.includes(s))) return { value: 'pass', final: false }
+  return { value: 'pending', final: false }
 }
 
 // A finished child's worktree is deleted, and gh must never fall back to orch's own cwd:
@@ -2614,36 +2779,51 @@ function runDir(ref: string, cwd: string): string | undefined {
   return /^https?:\/\//i.test(ref) ? tmpdir() : undefined
 }
 
-async function ask(run: GhRun, ev: Evidence, cwd: string): Promise<Check> {
+async function ask(run: GhRun, ev: Evidence, cwd: string): Promise<Answer> {
   const dir = runDir(ev.ref, cwd)
-  if (dir === undefined) return 'unknown'
+  if (dir === undefined) return { value: 'unknown', final: false }
   return ev.kind === 'ci' ? ciCheck(run, ev.ref, dir) : prCheck(run, ev.ref, dir)
 }
 
-type Entry = { promise: Promise<Check>; value?: Check; arrivedAt?: number }
+type Entry = { value?: Check; arrivedAt?: number; final?: boolean; inflight?: Promise<void> }
 
 export function cliGh(run: GhRun = runGh, now: () => number = Date.now): Gh {
-  // the promise is cached, not the answer, so two checks of one key while gh runs spawn it once
+  // at most MAX_GH gh processes at once; the rest wait their turn
+  let active = 0
+  const waiting: (() => void)[] = []
+  const limited: GhRun = async (args, cwd) => {
+    if (active >= MAX_GH) await new Promise<void>(go => waiting.push(go))
+    active++
+    try {
+      return await run(args, cwd)
+    } finally {
+      active--
+      waiting.shift()?.()
+    }
+  }
+  // the in-flight refresh is cached, so two checks of one key while gh runs spawn it once
   const cache = new Map<string, Entry>()
+  const refresh = (e: Entry, ev: Evidence, cwd: string) =>
+    (e.inflight ??= ask(limited, ev, cwd)
+      .catch((): Answer => ({ value: 'unknown', final: false }))
+      .then(a => {
+        e.value = a.value
+        e.final = a.final
+        e.arrivedAt = now()
+        e.inflight = undefined
+      }))
   return {
-    async check(ev, cwd) {
+    async check(ev, cwd, opts = {}) {
       if (ev.kind !== 'ci' && ev.kind !== 'pr') return 'unknown'
       const key = checkKey(ev, cwd)
-      const hit = cache.get(key)
-      if (hit && (hit.arrivedAt === undefined || now() - hit.arrivedAt < (hit.value === 'unknown' ? UNKNOWN_TTL_MS : ANSWER_TTL_MS))) {
-        return hit.promise
-      }
-      const entry: Entry = {
-        promise: ask(run, ev, cwd)
-          .catch((): Check => 'unknown')
-          .then(value => {
-            entry.value = value
-            entry.arrivedAt = now()
-            return value
-          }),
-      }
-      cache.set(key, entry)
-      return entry.promise
+      let e = cache.get(key)
+      if (!e) cache.set(key, (e = {}))
+      const fresh = e.value !== undefined && (e.final || now() - e.arrivedAt! < (e.value === 'unknown' ? UNKNOWN_TTL_MS : ANSWER_TTL_MS))
+      if (fresh) return e.value!
+      const refreshing = refresh(e, ev, cwd)
+      if (opts.stale) return e.value ?? 'unknown'
+      await refreshing
+      return e.value!
     },
   }
 }
@@ -2668,6 +2848,7 @@ Claude-Session: https://claude.ai/code/session_01Rh6E8Ye2wL28onWR4hj3Ep"
 
 **Files:**
 - Create: `plugins/orchestrator/src/overview.ts`
+- Create: `plugins/orchestrator/src/width.ts`
 - Create: `plugins/orchestrator/src/format.ts`
 - Test: `plugins/orchestrator/tests/overview.test.ts`, `plugins/orchestrator/tests/format.test.ts`
 
@@ -2705,6 +2886,12 @@ function input(over: Partial<OverviewInput>): OverviewInput {
 }
 
 describe('buildOverview', () => {
+  it('sorts names with numbers in numeric order', () => {
+    const names = ['s10', 's2', 's1']
+    const rows = buildOverview(input({ live: names.map(n => live(n)), agents: names.map(n => agent(n, n)) }))
+    expect(rows.map(r => r.name)).toEqual(['s1', 's2', 's10'])
+  })
+
   it('nests children under their parent and rolls up flags', () => {
     const rows = buildOverview(input({
       pools: [
@@ -2911,12 +3098,12 @@ describe('buildOverview', () => {
   })
 
   it('clips evidence by code point, so an emoji at the cut is not split', () => {
-    // 'note: ' + 32 x is 38 characters, so the emoji starts at the 39th; the clip keeps 39 and adds the ellipsis
+    // 'note: ' + 32 x is 38 columns and the emoji is 2 wide, so it would end at column 40; the clip keeps 39 columns and adds the ellipsis
     const [row] = buildOverview(input({
       pools: [{ id: 'S', pool: pool('S', [{ status: 'done', evidence: { kind: 'note', ref: `${'x'.repeat(32)}😀tail` } }]) }],
       live: [live('S')],
     }))
-    expect(row.tasks[0].detail).toBe(`note: ${'x'.repeat(32)}😀…`)
+    expect(row.tasks[0].detail).toBe(`note: ${'x'.repeat(32)}…`)
     expect(row.tasks[0].detail).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/)
   })
 
@@ -3099,6 +3286,7 @@ describe('buildOverview', () => {
 `tests/format.test.ts`:
 
 ```ts
+import stringWidth from 'string-width'
 import { describe, expect, it } from 'vitest'
 import { flatten, header, listLine, poolLines, renderList, shortCwd } from '../src/format.js'
 import type { Row } from '../src/overview.js'
@@ -3161,13 +3349,13 @@ describe('format', () => {
     expect(line).not.toContain('n'.repeat(24))
   })
 
-  it('clips by code point, so an emoji is never cut in half', () => {
+  it('clips by display width, so an emoji is never cut in half', () => {
     const lone = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/
     const line = listLine({ prefix: '', row: row({ name: `${'n'.repeat(22)}😀tail` }) })
-    expect(line.startsWith(`${'n'.repeat(22)}😀… `)).toBe(true)
+    expect(line.startsWith(`${'n'.repeat(22)}… `)).toBe(true)
     expect(lone.test(line)).toBe(false)
     const short = listLine({ prefix: '', row: row({ name: '😀'.repeat(3) }) })
-    expect(short.startsWith(`😀😀😀${' '.repeat(21)} `)).toBe(true)
+    expect(short.startsWith(`😀😀😀${' '.repeat(18)} `)).toBe(true)
     const text = poolLines(row({ name: 'p', tasks: [{ id: 't1', text: `${'w'.repeat(33)}😀😀`, status: 'pending', mark: '·', detail: '' }] }))[1]
     expect(text).toBe(`· t1   ${'w'.repeat(33)}…`)
     expect(lone.test(text)).toBe(false)
@@ -3195,6 +3383,20 @@ describe('format', () => {
     expect(poolLines(row({ name: 'a', title: 'b' }))[0]).toBe('a — b')
   })
 })
+
+describe('display width', () => {
+  const cols = (line: string) => stringWidth(line.slice(0, line.indexOf('idle')))
+  it('keeps the columns aligned for CJK and emoji names', () => {
+    const widths = ['plain', '日本語セッション', '🚀 rocket', 'a'.repeat(40)].map(name => cols(listLine({ prefix: '', row: row({ name }) })))
+    expect(new Set(widths).size).toBe(1)
+  })
+
+  it('never cuts a wide character in half', () => {
+    const line = listLine({ prefix: '', row: row({ name: '日本語日本語日本語日本語日本語日本語' }) })
+    expect(line).toContain('…')
+    expect(stringWidth(line.slice(0, line.indexOf('idle')))).toBe(24 + 1 + 22 + 1)
+  })
+})
 ```
 
 - [ ] **Step 2: Run them to see them fail**
@@ -3211,17 +3413,13 @@ import { checkKey, describeEvidence, grade, oneLine, type Check } from './eviden
 import type { Status, Task } from './model.js'
 import type { PoolEntry } from './store.js'
 import type { HerdrAgent } from './sources/herdr.js'
+import { clip } from './width.js'
 import { sessionLink, type LiveSession } from './sources/sessions.js'
 
 export const DAY = 24 * 60 * 60 * 1000
 
-// Clips evidence text only, to keep a pool row on one line; the live verdict is appended after clipping so it
-// always shows. A question or a blocked reason is never clipped: /orch needs the whole of it. It cuts by
-// code point, so an emoji at the cut is never split.
-const clip = (s: string, n: number) => {
-  const chars = Array.from(s)
-  return chars.length > n ? `${chars.slice(0, n - 1).join('')}…` : s
-}
+// Evidence text is clipped (by display width) to keep a pool row on one line; the live verdict is appended
+// after clipping so it always shows. A question or a blocked reason is never clipped: /orch needs the whole of it.
 
 export type Mark = '✓' | '~' | '✗' | '?' | '◐' | '·' | '!' | '⚑'
 export type TaskView = { id: string; text: string; status: Status; mark: Mark; detail: string }
@@ -3286,7 +3484,7 @@ function viewTask(t: Task, cwd: string, checks: Map<string, Check>, childDone: (
   return { id: t.id, text: oneLine(t.text), status, mark, detail }
 }
 
-const byName = (a: Row, b: Row) => a.name.localeCompare(b.name)
+const byName = (a: Row, b: Row) => a.name.localeCompare(b.name, undefined, { numeric: true })
 const byPriority = (a: Row, b: Row) =>
   b.flags - a.flags || Number(a.state === 'ended') - Number(b.state === 'ended') || byName(a, b)
 
@@ -3383,11 +3581,41 @@ export function buildOverview(input: OverviewInput): Row[] {
 }
 ```
 
+`src/width.ts`:
+
+```ts
+import stringWidth from 'string-width'
+
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+
+// Cuts to at most n terminal columns with a trailing …, by grapheme, so a wide character or an emoji
+// sequence at the cut is never split. Text that already fits is returned as is.
+export function clip(s: string, n: number): string {
+  if (stringWidth(s) <= n) return s
+  let out = ''
+  let used = 0
+  for (const { segment } of graphemes.segment(s)) {
+    const w = stringWidth(segment)
+    if (used + w > n - 1) break
+    out += segment
+    used += w
+  }
+  return `${out}…`
+}
+
+// Clips, then pads with spaces to exactly n columns.
+export function pad(s: string, n: number): string {
+  const c = clip(s, n)
+  return c + ' '.repeat(Math.max(0, n - stringWidth(c)))
+}
+```
+
 `src/format.ts`:
 
 ```ts
 import { homedir } from 'node:os'
 import type { Row } from './overview.js'
+import { pad } from './width.js'
 
 export type Line = { row: Row; prefix: string }
 
@@ -3408,12 +3636,6 @@ export function shortCwd(cwd: string, home = homedir()): string {
   const src = `${home}/src/`
   const short = cwd === home ? '~' : cwd.startsWith(src) ? cwd.slice(src.length) : cwd.startsWith(`${home}/`) ? `~${cwd.slice(home.length)}` : cwd
   return short.replace('/.worktrees/', '/wt/')
-}
-
-// Counts and cuts by code point: slicing UTF-16 units could leave half of an emoji.
-const pad = (s: string, n: number) => {
-  const chars = Array.from(s)
-  return chars.length > n ? `${chars.slice(0, n - 1).join('')}…` : s + ' '.repeat(n - chars.length)
 }
 
 export function listLine({ row, prefix }: Line): string {
@@ -4165,6 +4387,13 @@ function sandbox() {
 }
 
 describe('bin/orch', () => {
+  it('prints help for tui --help without starting the TUI', () => {
+    const { env } = sandbox()
+    const r = spawnSync(process.execPath, [BIN, 'tui', '--help'], { encoding: 'utf8', env, timeout: 5000 })
+    expect(r.status).toBe(0)
+    expect(r.stdout).toContain('orch tui')
+  })
+
   it('prints help and exits 0', () => {
     const r = spawnSync(process.execPath, [BIN, '--help'], { encoding: 'utf8', env: sandbox().env })
     expect(r.status).toBe(0)
@@ -4457,7 +4686,9 @@ import { readLiveSessions } from './sources/sessions.js'
 
 // Whose CI and PR evidence gh is asked about: nobody's (the default), every live session's pool,
 // or exactly these sessions' pools. gh is slow, so a caller asks only for the pools it shows.
-export type CollectOpts = { checks?: 'none' | 'live' | ReadonlySet<string> }
+// stale: a display that polls takes the last known verdict at once and lets gh refresh in the background;
+// without it each check waits for gh.
+export type CollectOpts = { checks?: 'none' | 'live' | ReadonlySet<string>; stale?: boolean }
 
 export async function collect(ctx: Ctx, opts: CollectOpts = {}): Promise<Row[]> {
   const which = opts.checks ?? 'none'
@@ -4474,7 +4705,7 @@ export async function collect(ctx: Ctx, opts: CollectOpts = {}): Promise<Row[]> 
       .flatMap(e =>
         (e.pool?.tasks ?? [])
           .filter(t => t.status === 'done' && (t.evidence?.kind === 'ci' || t.evidence?.kind === 'pr'))
-          .map(async t => checks.set(checkKey(t.evidence!, e.pool!.cwd ?? ''), await ctx.gh.check(t.evidence!, e.pool!.cwd))),
+          .map(async t => checks.set(checkKey(t.evidence!, e.pool!.cwd ?? ''), await ctx.gh.check(t.evidence!, e.pool!.cwd, { stale: opts.stale }))),
       ),
   ])
   return buildOverview({ pools, live, agents, checks, now: ctx.now() })
@@ -4498,7 +4729,7 @@ import { parseArgs } from 'node:util'
 import { collect } from './collect.js'
 import { CMD_TIMEOUT_MS, type Ctx } from './ctx.js'
 import { OrchError } from './errors.js'
-import { describeEvidence, parseEvidence } from './evidence.js'
+import { describeEvidence, parseEvidence, stripEscapes } from './evidence.js'
 import { flatten, renderList, renderPool } from './format.js'
 import { addTask, askTask, blockTask, doneTask, newPool, plan, setTitle, startTask, type Evidence, type Pool } from './model.js'
 import { ok, type Out } from './out.js'
@@ -4566,9 +4797,7 @@ async function cmdTitle(ctx: Ctx, args: string[]): Promise<Out> {
 // titles and links) gone, then every other control character but newline and tab (\r becomes a line
 // break), the last 20 lines, about 4 KB.
 function tailOf(out: string): string {
-  const clean = out
-    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
-    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+  const clean = stripEscapes(out)
     .replace(/\r\n?/g, '\n')
     .replace(/\p{Cc}/gu, c => (c === '\n' || c === '\t' ? c : ''))
     .trimEnd()
@@ -6415,6 +6644,9 @@ import { describe, expect, it, vi } from 'vitest'
 import { newPool, type Pool, type Task } from '../src/model.js'
 import { buildOverview, type Row } from '../src/overview.js'
 import { App, type Actions } from '../src/tui/App.js'
+import { tuiActions } from '../src/tui/main.js'
+import { update } from '../src/store.js'
+import { makeCtx, writeSession } from './helpers.js'
 
 const tick = () => new Promise(r => setTimeout(r, 30))
 
@@ -6536,6 +6768,381 @@ describe('TUI', () => {
     expect(app.lastFrame()).toContain('not on Remote Control')
   })
 })
+
+const keys = { esc: '\x1b', left: '\x1b[D', down: '\x1b[B', up: '\x1b[A' }
+const press = async (app: { stdin: { write: (s: string) => void } }, ...ks: string[]) => {
+  for (const k of ks) {
+    app.stdin.write(k)
+    await new Promise(r => setTimeout(r, k === keys.esc ? 80 : 30))
+  }
+}
+const last = (app: { lastFrame: () => string | undefined }) => app.lastFrame()!
+
+// P (with its child C) and O, plus any extra sessions that each wait on a question
+function world(extra: string[] = [], without: string[] = []): Row[] {
+  const ids = ['P', 'C', 'O', ...extra].filter(i => !without.includes(i))
+  return buildOverview({
+    pools: [
+      { id: 'P', pool: pool('P', 'Courses', [{ status: 'done', evidence: { kind: 'commit', ref: '9f3e2a1' } }, { children: ['C'], status: 'in_progress' }]) },
+      { id: 'C', pool: pool('C', 'Python', [{ needsInput: 'Strict?' }], { parent: { sessionId: 'P', taskId: 't2' } }) },
+      { id: 'O', pool: pool('O', 'Orchestrator', [{}]) },
+      ...extra.map(id => ({ id, pool: pool(id, `Extra ${id}`, [{ needsInput: 'Now?' }]) })),
+    ].filter(e => ids.includes(e.id)),
+    live: ids.map(id => ({ pid: 1, sessionId: id, cwd: `/src/${id}`, status: 'idle' as const })),
+    agents: [
+      { sessionId: 'P', name: 'beginner-courses', paneId: 'pP', status: 'idle' },
+      { sessionId: 'C', name: 'course-python', paneId: 'pC', status: 'idle' },
+      ...extra.map(id => ({ sessionId: id, name: `extra-${id}`, paneId: `p${id}`, status: 'idle' as const })),
+    ],
+    checks: new Map(),
+    now: 1000,
+  })
+}
+
+function mount(data: Row[], over: Partial<Actions> = {}, props: Partial<Parameters<typeof App>[0]> = {}) {
+  const actions: Actions = {
+    load: vi.fn(async () => data),
+    focus: vi.fn(async (r: Row) => `focused ${r.name}`),
+    link: vi.fn(async (c: Row, p: Row, t: string) => `${c.name} under ${p.name} ${t}`),
+    ...over,
+  }
+  const app = render(<App initial={data} actions={actions} interval={0} {...props} />)
+  return { app, actions }
+}
+
+describe('selection', () => {
+  it('stays on the same session when a reload puts a flagged row above it', async () => {
+    let data = world()
+    const { app } = mount(data, { load: vi.fn(async () => data) })
+    await press(app, 'j', 'j')
+    expect(last(app)).toMatch(/▸ Orchestrator/)
+    data = world(['N'])
+    await press(app, 'r')
+    expect(last(app)).toMatch(/▸ Orchestrator/)
+    expect(last(app)).toContain('extra-N')
+  })
+
+  it('clamps to a valid row when the selected session disappears', async () => {
+    let data = world()
+    const { app } = mount(data, { load: vi.fn(async () => data) })
+    await press(app, 'j', 'j')
+    data = world([], ['O'])
+    await press(app, 'r')
+    expect(last(app)).toMatch(/▸ └ course-python/)
+  })
+
+  it('keeps the highlight on the same parent candidate in the picker across a reload', async () => {
+    let data = world()
+    const { app } = mount(data, { load: vi.fn(async () => data) })
+    await press(app, 'j', 'j', 'l', 'j')
+    expect(last(app)).toMatch(/▸ course-python/)
+    data = world(['N'])
+    await press(app, 'r')
+    expect(last(app)).toMatch(/▸ course-python/)
+  })
+})
+
+describe('the l picker', () => {
+  it('does not offer a descendant, the session itself or a session without a pool', async () => {
+    const data = world(['X'])
+    const noPool = buildOverview({
+      pools: [],
+      live: [{ pid: 1, sessionId: 'Z', cwd: '/src/Z', status: 'idle' }],
+      agents: [{ sessionId: 'Z', name: 'no-pool-z', paneId: 'pZ', status: 'idle' }],
+      checks: new Map(),
+      now: 1000,
+    })
+    const { app } = mount([...data, ...noPool])
+    await press(app, 'l')
+    const frame = last(app)
+    expect(frame).toContain('Attach beginner-courses under which session?')
+    expect(frame).not.toContain('course-python')
+    expect(frame).not.toContain('no-pool-z')
+    expect(frame.split('\n').filter(l => l.includes('beginner-courses')).length).toBe(1)
+    expect(frame).toContain('Orchestrator')
+    expect(frame).toContain('extra-X')
+  })
+
+  it('says so when there is nothing to attach under', async () => {
+    const only = world([], ['C', 'O'])
+    const { app } = mount(only)
+    await press(app, 'l')
+    expect(last(app)).toContain('no session with a pool to attach under')
+  })
+
+  it('links the parent that was picked, not the first one', async () => {
+    const { app, actions } = mount(world())
+    await press(app, 'j', 'j', 'l', 'j', '\r')
+    expect(last(app)).toContain('Which task of course-python?')
+    await press(app, '\r')
+    expect(actions.link).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'O' }), expect.objectContaining({ sessionId: 'C' }), 't1')
+  })
+
+  it('reloads after a link', async () => {
+    const { app, actions } = mount(world())
+    await press(app, 'j', 'j', 'l', '\r', 'j', '\r')
+    expect(actions.link).toHaveBeenCalled()
+    expect(actions.load).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows a failed link without an error class prefix', async () => {
+    const link = vi.fn(async () => {
+      throw new Error('that parent sits below this session')
+    })
+    const { app } = mount(world(), { link })
+    await press(app, 'j', 'j', 'l', '\r', '\r')
+    expect(last(app)).toContain('that parent sits below this session')
+    expect(last(app)).not.toContain('Error:')
+  })
+})
+
+describe('messages', () => {
+  it('shows a failed refresh without the error class prefix', async () => {
+    const { app } = mount(world(), { load: vi.fn(async () => Promise.reject(new Error('herdr is down'))) })
+    await press(app, 'r')
+    expect(last(app)).toContain('refresh failed: herdr is down')
+    expect(last(app)).not.toContain('Error:')
+  })
+
+  it('strips terminal escapes from a message', async () => {
+    const { app } = mount(world(), { load: vi.fn(async () => Promise.reject('x\x1b]0;PWNED\x07y')) })
+    await press(app, 'r')
+    expect(last(app)).toContain('refresh failed: xy')
+    expect(last(app)).not.toContain('PWNED')
+    expect(last(app)).not.toMatch(/\x1b\]/)
+  })
+
+  it('shows a failed focus', async () => {
+    const { app } = mount(world(), { focus: vi.fn(async () => Promise.reject(new Error('no such pane'))) })
+    await press(app, 'f')
+    expect(last(app)).toContain('no such pane')
+    expect(last(app)).not.toContain('Error:')
+  })
+
+  it('shows the claude.ai link with o when there is one', async () => {
+    const data = world()
+    data[0] = { ...data[0], link: 'https://claude.ai/code/session_abc' }
+    const { app } = mount(data)
+    await press(app, 'o')
+    expect(last(app)).toContain('https://claude.ai/code/session_abc')
+  })
+})
+
+describe('loading', () => {
+  it('paints at once with a loading line, then shows the first data', async () => {
+    let finish: (r: Row[]) => void = () => {}
+    const load = vi.fn(() => new Promise<Row[]>(r => (finish = r)))
+    const app = render(<App actions={{ load, focus: vi.fn(), link: vi.fn() }} interval={0} />)
+    expect(last(app)).toContain('loading…')
+    expect(last(app)).not.toContain('no sessions')
+    expect(load).toHaveBeenCalledTimes(1)
+    finish(world())
+    await press(app)
+    await new Promise(r => setTimeout(r, 30))
+    expect(last(app)).toContain('beginner-courses')
+    expect(last(app)).not.toContain('loading…')
+  })
+
+  it('says no sessions when there are none', () => {
+    expect(last(mount([]).app)).toContain('no sessions')
+  })
+
+  it('stops loading after a failed first load', async () => {
+    const app = render(<App actions={{ load: async () => Promise.reject(new Error('boom')), focus: vi.fn(), link: vi.fn() }} interval={0} />)
+    await press(app)
+    await new Promise(r => setTimeout(r, 30))
+    expect(last(app)).not.toContain('loading…')
+    expect(last(app)).toContain('refresh failed: boom')
+  })
+})
+
+describe('quitting', () => {
+  it('q quits with 0 and ctrl-c with 130', async () => {
+    const q = vi.fn()
+    await press(mount(world(), {}, { onQuit: q }).app, 'q')
+    expect(q).toHaveBeenCalledWith(0)
+    const c = vi.fn()
+    await press(mount(world(), {}, { onQuit: c }).app, '\x03')
+    expect(c).toHaveBeenCalledWith(130)
+  })
+
+  it('stops refreshing once unmounted', async () => {
+    const { app, actions } = mount(world(), {}, { interval: 20 })
+    await new Promise(r => setTimeout(r, 70))
+    app.unmount()
+    const n = (actions.load as ReturnType<typeof vi.fn>).mock.calls.length
+    expect(n).toBeGreaterThan(0)
+    await new Promise(r => setTimeout(r, 100))
+    expect((actions.load as ReturnType<typeof vi.fn>).mock.calls.length).toBe(n)
+  })
+})
+
+describe('navigation', () => {
+  it('k stops at the first row, r reloads', async () => {
+    const { app, actions } = mount(world())
+    await press(app, 'k', 'k', 'f')
+    expect(actions.focus).toHaveBeenCalledWith(expect.objectContaining({ name: 'beginner-courses' }))
+    await press(app, 'r')
+    expect(actions.load).toHaveBeenCalledTimes(1)
+  })
+
+  it('arrow keys move too', async () => {
+    const { app, actions } = mount(world())
+    await press(app, keys.down, keys.down, keys.up, 'f')
+    expect(actions.focus).toHaveBeenCalledWith(expect.objectContaining({ name: 'course-python' }))
+  })
+
+  it('shows the pool of the selected row, and f works there', async () => {
+    const { app, actions } = mount(world())
+    await press(app, 'j', '\r')
+    expect(last(app)).toMatch(/course-python — Python/)
+    expect(last(app)).not.toMatch(/beginner-courses — Courses/)
+    await press(app, 'f')
+    expect(actions.focus).toHaveBeenCalledWith(expect.objectContaining({ name: 'course-python' }))
+    expect(last(app)).toContain('focused course-python')
+  })
+
+  it.each([
+    ['esc', keys.esc],
+    ['left arrow', keys.left],
+    ['h', 'h'],
+  ])('%s goes back from a pool', async (_n, key) => {
+    const { app } = mount(world())
+    await press(app, 'j', '\r')
+    await press(app, key)
+    expect(last(app)).toMatch(/▸ └ course-python/)
+    expect(last(app)).toContain('ORCHESTRATOR')
+  })
+
+  it('cancels a picker with esc', async () => {
+    const { app } = mount(world())
+    await press(app, 'l', keys.esc)
+    expect(last(app)).not.toContain('which session')
+    expect(last(app)).toContain('ORCHESTRATOR')
+  })
+})
+
+describe('filter', () => {
+  it('types, backspaces, and clears with esc', async () => {
+    const { app } = mount(world())
+    await press(app, '/', 'o', 'r', 'x')
+    expect(last(app)).toContain('filter: orx')
+    expect(last(app)).toContain('no sessions')
+    await press(app, '\x7f')
+    expect(last(app)).toContain('filter: or')
+    expect(last(app)).toMatch(/Orchestrator/)
+    await press(app, keys.esc)
+    expect(last(app)).not.toContain('filter:')
+    expect(last(app)).toContain('beginner-courses')
+    await press(app, 'j')
+    await press(app, 'f')
+  })
+
+  it('esc after enter clears an applied filter', async () => {
+    const { app } = mount(world())
+    await press(app, '/', 'o', 'r', '\r')
+    expect(last(app)).toContain('filter: or')
+    await press(app, keys.esc)
+    expect(last(app)).not.toContain('filter:')
+  })
+
+  it('keeps the ancestors of a matching child', async () => {
+    const { app } = mount(world())
+    await press(app, '/', 'p', 'y', 't', 'h', 'o', 'n', '\r')
+    expect(last(app)).toMatch(/beginner-courses/)
+    expect(last(app)).toMatch(/└ course-python/)
+    expect(last(app)).not.toContain('Orchestrator')
+  })
+
+  it('matches the cwd and the title', async () => {
+    const { app } = mount(world())
+    await press(app, '/', ...'/src/o', '\r')
+    expect(last(app)).toMatch(/Orchestrator/)
+    expect(last(app)).not.toContain('beginner-courses')
+    await press(app, keys.esc, '/', ...'extra p', '\r')
+    expect(last(app)).toContain('no sessions')
+    const data = world(['T'])
+    data[data.findIndex(r => r.sessionId === 'T')] = { ...data.find(r => r.sessionId === 'T')!, name: 'plain', title: 'Zebra crossing' }
+    const second = mount(data)
+    await press(second.app, '/', ...'zebra', '\r')
+    expect(last(second.app)).toContain('plain')
+    expect(last(second.app)).not.toContain('Orchestrator')
+  })
+
+  it('puts the cursor back on the first row when the filter changes', async () => {
+    const { app, actions } = mount(world())
+    await press(app, 'j', 'j', '/', 'c', 'o', 'u', '\r', 'f')
+    expect(actions.focus).toHaveBeenCalledWith(expect.objectContaining({ name: 'beginner-courses' }))
+  })
+})
+
+describe('small terminals', () => {
+  const many = () => world(Array.from({ length: 8 }, (_, i) => `E${i + 1}`))
+
+  it('shows a window of rows that fits and scrolls with the cursor', async () => {
+    const { app } = mount(many(), {}, { rows: 8 })
+    const lines = (last(app).match(/extra-E\d/g) ?? []).length
+    expect(lines).toBeGreaterThan(0)
+    expect(last(app).split('\n').length).toBeLessThanOrEqual(8)
+    expect(last(app)).not.toContain('extra-E8')
+    for (let i = 0; i < 12; i++) await press(app, 'j')
+    expect(last(app).split('\n').length).toBeLessThanOrEqual(8)
+    expect(last(app)).toContain('extra-E8')
+    expect(last(app)).not.toContain('beginner-courses')
+    for (let i = 0; i < 12; i++) await press(app, 'k')
+    expect(last(app)).toContain('beginner-courses')
+  })
+
+  it('cuts a long pool line instead of wrapping it', async () => {
+    const data = buildOverview({
+      pools: [{ id: 'B', pool: pool('B', 'Blocked', [{ status: 'blocked', blockedReason: 'because '.repeat(60) }]) }],
+      live: [{ pid: 1, sessionId: 'B', cwd: '/src/B', status: 'idle' }],
+      agents: [],
+      checks: new Map(),
+      now: 1000,
+    })
+    const { app } = mount(data)
+    await press(app, '\r')
+    const body = last(app).split('\n')
+    expect(body.every(l => l.length <= 100)).toBe(true)
+    expect(body.some(l => l.includes('…'))).toBe(true)
+  })
+})
+
+describe('tuiActions', () => {
+  const row = (o: Partial<Row>): Row => ({ ...world()[0], paneId: undefined, pid: undefined, ...o })
+
+  it('says so when the session is not in herdr', async () => {
+    const ctx = makeCtx()
+    const a = tuiActions(ctx)
+    expect(await a.focus(row({ cwd: '/src/x', pid: 77 }))).toBe('not in herdr: /src/x (pid 77)')
+    expect(await a.focus(row({ cwd: '/src/x' }))).toBe('not in herdr: /src/x')
+    expect(ctx.herdr.calls).toEqual([])
+  })
+
+  it('focuses the herdr pane', async () => {
+    const ctx = makeCtx()
+    expect(await tuiActions(ctx).focus(row({ paneId: 'w1:p2', name: 'abc' }))).toBe('focused abc')
+    expect(ctx.herdr.calls).toEqual([['focus', 'w1:p2']])
+  })
+
+  it('refreshes in stale mode, so a slow gh cannot hold it up', async () => {
+    const modes: unknown[] = []
+    const ctx = makeCtx({
+      gh: {
+        check: async (_ev, _cwd, opts) => {
+          modes.push(opts?.stale)
+          return opts?.stale ? 'unknown' : new Promise<never>(() => {})
+        },
+      },
+    })
+    writeSession(ctx, { pid: 1, sessionId: 's1', cwd: ctx.cwd })
+    await update(ctx.orchHome, 's1', p => ({ ...newPool('s1', ctx.cwd, 0), tasks: [{ id: 't1', text: 'x', status: 'done', evidence: { kind: 'ci', ref: '7' } }], ...(p ? {} : {}) }))
+    const rows = await tuiActions(ctx).load()
+    expect(rows).toHaveLength(1)
+    expect(modes).toEqual([true])
+  })
+})
 ```
 
 - [ ] **Step 2: Run them to see them fail**
@@ -6548,8 +7155,9 @@ Expected: FAIL, `Cannot find module '../src/tui/App.js'`.
 `src/tui/App.tsx`:
 
 ```tsx
-import { Box, Text, useApp, useInput } from 'ink'
+import { Box, Text, useApp, useInput, useStdout } from 'ink'
 import { useEffect, useRef, useState } from 'react'
+import { safeLine } from '../evidence.js'
 import { flatten, header, listLine, poolLines, shortCwd } from '../format.js'
 import type { Row } from '../overview.js'
 
@@ -6571,14 +7179,53 @@ const FOOT = {
   pick: 'enter choose · esc/h cancel',
 }
 
-export function App({ initial, actions, interval = 3000 }: { initial: Row[]; actions: Actions; interval?: number }) {
+const errText = (e: unknown) => (e instanceof Error ? e.message : String(e))
+
+// A row and everything below it, with a guard so a malformed tree cannot loop.
+function subtreeIds(row: Row, seen = new Set<string>()): Set<string> {
+  if (seen.has(row.sessionId)) return seen
+  seen.add(row.sessionId)
+  row.children.forEach(c => subtreeIds(c, seen))
+  return seen
+}
+
+// A row stays when it matches or something below it does, so a matching child is shown under its ancestors.
+function filterRows(rows: Row[], q: string): Row[] {
+  const text = (r: Row) => `${r.name} ${r.title} ${r.cwd}`.toLowerCase()
+  const walk = (rs: Row[]): Row[] =>
+    rs.flatMap(r => {
+      const children = walk(r.children)
+      return children.length || text(r).includes(q) ? [{ ...r, children }] : []
+    })
+  return q ? walk(rows) : rows
+}
+
+export function App({
+  initial,
+  actions,
+  interval = 3000,
+  rows: screenRows,
+  onQuit,
+}: {
+  initial?: Row[] // omitted: nothing is loaded yet, the first load shows "loading…"
+  actions: Actions
+  interval?: number
+  rows?: number // terminal height; defaults to the real one
+  onQuit?: (code: number) => void
+}) {
   const { exit } = useApp()
-  const [rows, setRows] = useState(initial)
+  const { stdout } = useStdout()
+  const height = screenRows ?? stdout?.rows ?? 24
+  const [rows, setRows] = useState(initial ?? [])
+  const [loaded, setLoaded] = useState(initial !== undefined)
   const [mode, setMode] = useState<Mode>({ kind: 'list' })
+  // the highlight follows the session (or task) it is on; the index is only the fallback when that one is gone
   const [cursor, setCursor] = useState(0)
+  const [selectedId, setSelectedId] = useState<string | undefined>()
   const [filter, setFilter] = useState('')
   const [typing, setTyping] = useState(false)
   const [message, setMessage] = useState('')
+  const say = (m: unknown) => setMessage(safeLine(m))
 
   // One refresh at a time: a slow herdr or gh call must not stack up a new one every tick.
   const loading = useRef(false)
@@ -6587,66 +7234,104 @@ export function App({ initial, actions, interval = 3000 }: { initial: Row[]; act
     loading.current = true
     actions
       .load()
-      .then(setRows, e => setMessage(`refresh failed: ${e}`))
+      .then(setRows, e => say(`refresh failed: ${errText(e)}`))
       .finally(() => {
         loading.current = false
+        setLoaded(true)
       })
   }
   useEffect(() => {
+    if (initial === undefined) reload()
     if (!interval) return
     const t = setInterval(reload, interval)
     return () => clearInterval(t)
   }, [interval])
 
   const all = flatten(rows).map(l => l.row)
-  const lines = flatten(rows).filter(l => !filter || `${l.row.name} ${l.row.title} ${l.row.cwd}`.toLowerCase().includes(filter.toLowerCase()))
-  const parents = mode.kind === 'pick-parent' ? all.filter(r => r.sessionId !== mode.child.sessionId && r.hasPool) : []
+  const lines = flatten(filterRows(rows, filter.toLowerCase()))
+  const excluded = mode.kind === 'pick-parent' ? subtreeIds(all.find(r => r.sessionId === mode.child.sessionId) ?? mode.child) : new Set<string>()
+  const parents = mode.kind === 'pick-parent' ? all.filter(r => !excluded.has(r.sessionId) && r.hasPool) : []
   const tasks = mode.kind === 'pick-task' ? mode.parent.tasks : []
-  const size = mode.kind === 'list' ? lines.length : mode.kind === 'pick-parent' ? parents.length : tasks.length
-  const at = Math.min(cursor, Math.max(0, size - 1))
+  const ids = mode.kind === 'list' ? lines.map(l => l.row.sessionId) : mode.kind === 'pick-parent' ? parents.map(r => r.sessionId) : tasks.map(t => t.id)
+  const size = ids.length
+  const found = selectedId === undefined ? -1 : ids.indexOf(selectedId)
+  const at = found >= 0 ? found : Math.min(cursor, Math.max(0, size - 1))
   const selected = mode.kind === 'list' ? lines[at]?.row : mode.kind === 'pool' ? all.find(r => r.sessionId === mode.id) : undefined
 
-  const go = (m: Mode) => {
+  const select = (i: number) => {
+    const n = Math.max(0, Math.min(i, size - 1))
+    setCursor(n)
+    setSelectedId(ids[n])
+  }
+  const go = (m: Mode, sel?: string) => {
     setMode(m)
     setCursor(0)
+    setSelectedId(sel)
     setMessage('')
   }
+  const quit = (code: number) => {
+    onQuit?.(code)
+    exit()
+  }
+
+  // The window of rows that fits under the header and above the message and footer, kept where it was
+  // until the cursor leaves it.
+  const room = Math.max(3, height - 3)
+  const top = useRef(0)
+  top.current = Math.max(0, Math.min(top.current, size - room))
+  if (at < top.current) top.current = at
+  if (at >= top.current + room) top.current = at - room + 1
+  const visible = (i: number) => i >= top.current && i < top.current + room
 
   useInput((input, key) => {
+    if (key.ctrl && input === 'c') return quit(130)
     if (typing) {
-      if (key.return || key.escape) setTyping(false)
+      if (key.escape) {
+        setFilter('')
+        setTyping(false)
+      } else if (key.return) setTyping(false)
       else if (key.backspace || key.delete) setFilter(f => f.slice(0, -1))
-      else if (input) setFilter(f => f + input)
+      else if (input && !key.ctrl && !key.meta) setFilter(f => f + input)
+      else return
+      setCursor(0)
+      setSelectedId(undefined)
       return
     }
-    if (input === 'q') return exit()
-    if (key.downArrow || input === 'j') return setCursor(Math.min(at + 1, Math.max(0, size - 1)))
-    if (key.upArrow || input === 'k') return setCursor(Math.max(at - 1, 0))
+    if (input === 'q') return quit(0)
+    if (key.downArrow || input === 'j') return select(at + 1)
+    if (key.upArrow || input === 'k') return select(at - 1)
     if (input === 'r') return void reload()
 
     if (mode.kind === 'list' || mode.kind === 'pool') {
-      if (input === 'f' && selected) return void actions.focus(selected).then(setMessage, e => setMessage(String(e)))
-      if (input === 'o' && selected) return setMessage(selected.link ?? 'no claude.ai link: this session is not on Remote Control')
+      if (input === 'f' && selected) return void actions.focus(selected).then(say, e => say(errText(e)))
+      if (input === 'o' && selected) return say(selected.link ?? 'no claude.ai link: this session is not on Remote Control')
     }
     if (mode.kind === 'list') {
       if (key.return && selected) return go({ kind: 'pool', id: selected.sessionId })
       if (input === '/') return setTyping(true)
+      if (key.escape && filter) {
+        setFilter('')
+        setCursor(0)
+        setSelectedId(undefined)
+        return
+      }
       if (input === 'l' && selected) return go({ kind: 'pick-parent', child: selected })
       return
     }
     if (mode.kind === 'pick-parent' && key.return && parents[at]) return go({ kind: 'pick-task', child: mode.child, parent: parents[at] })
     if (mode.kind === 'pick-task' && key.return && tasks[at]) {
       const { child, parent } = mode
-      setMode({ kind: 'list' })
-      return void actions.link(child, parent, tasks[at].id).then(
+      const taskId = tasks[at].id
+      go({ kind: 'list' }, child.sessionId)
+      return void actions.link(child, parent, taskId).then(
         m => {
-          setMessage(m)
+          say(m)
           void reload()
         },
-        e => setMessage(String(e)),
+        e => say(errText(e)),
       )
     }
-    if (key.escape || key.leftArrow || input === 'h') return go({ kind: 'list' })
+    if (key.escape || key.leftArrow || input === 'h') return go({ kind: 'list' }, mode.kind === 'pool' ? mode.id : mode.kind === 'pick-parent' ? mode.child.sessionId : undefined)
   })
 
   const filterNote = filter || typing ? `   filter: ${filter}${typing ? '▏' : ''}` : ''
@@ -6657,32 +7342,56 @@ export function App({ initial, actions, interval = 3000 }: { initial: Row[]; act
       <Text bold>{header(rows) + filterNote}</Text>
       {mode.kind === 'list' &&
         (lines.length ? (
-          lines.map((l, i) => (
-            <Text key={l.row.sessionId} inverse={i === at} wrap="truncate-end">{`${pointer(i)} ${listLine(l)}`}</Text>
-          ))
+          lines.map((l, i) =>
+            visible(i) ? (
+              <Text key={l.row.sessionId} inverse={i === at} wrap="truncate-end">{`${pointer(i)} ${listLine(l)}`}</Text>
+            ) : null,
+          )
         ) : (
-          <Text dimColor>no sessions</Text>
+          <Text dimColor>{loaded ? 'no sessions' : 'loading…'}</Text>
         ))}
       {mode.kind === 'pool' &&
-        (selected ? poolLines(selected).map((s, i) => <Text key={i} bold={i === 0}>{s}</Text>) : <Text dimColor>this session is gone</Text>)}
+        (selected ? (
+          poolLines(selected).map((s, i) => (
+            <Text key={i} bold={i === 0} wrap="truncate-end">
+              {s}
+            </Text>
+          ))
+        ) : (
+          <Text dimColor>this session is gone</Text>
+        ))}
       {mode.kind === 'pick-parent' && (
         <>
           <Text>{`Attach ${mode.child.name} under which session?`}</Text>
-          {parents.map((r, i) => (
-            <Text key={r.sessionId} inverse={i === at} wrap="truncate-end">{`${pointer(i)} ${r.name}  ${shortCwd(r.cwd)}`}</Text>
-          ))}
+          {parents.length ? (
+            parents.map((r, i) =>
+              visible(i) ? (
+                <Text key={r.sessionId} inverse={i === at} wrap="truncate-end">{`${pointer(i)} ${r.name}  ${shortCwd(r.cwd)}`}</Text>
+              ) : null,
+            )
+          ) : (
+            <Text dimColor>no session with a pool to attach under</Text>
+          )}
         </>
       )}
       {mode.kind === 'pick-task' && (
         <>
           <Text>{`Which task of ${mode.parent.name}?`}</Text>
-          {tasks.map((t, i) => (
-            <Text key={t.id} inverse={i === at} wrap="truncate-end">{`${pointer(i)} ${t.id} ${t.text}`}</Text>
-          ))}
+          {tasks.map((t, i) =>
+            visible(i) ? (
+              <Text key={t.id} inverse={i === at} wrap="truncate-end">{`${pointer(i)} ${t.id} ${t.text}`}</Text>
+            ) : null,
+          )}
         </>
       )}
-      {message ? <Text color="yellow">{message}</Text> : null}
-      <Text dimColor>{mode.kind === 'list' ? FOOT.list : mode.kind === 'pool' ? FOOT.pool : FOOT.pick}</Text>
+      {message ? (
+        <Text color="yellow" wrap="truncate-end">
+          {message}
+        </Text>
+      ) : null}
+      <Text dimColor wrap="truncate-end">
+        {mode.kind === 'list' ? FOOT.list : mode.kind === 'pool' ? FOOT.pool : FOOT.pick}
+      </Text>
     </Box>
   )
 }
@@ -6698,9 +7407,10 @@ import { linkSessions } from '../link.js'
 import type { Row } from '../overview.js'
 import { App, type Actions } from './App.js'
 
-export async function startTui(ctx: Ctx): Promise<void> {
-  const actions: Actions = {
-    load: () => collect(ctx, { checks: 'live' }),
+export function tuiActions(ctx: Ctx): Actions {
+  return {
+    // stale: a slow gh must not hold up a refresh; its verdict shows on the next one
+    load: () => collect(ctx, { checks: 'live', stale: true }),
     async focus(row: Row) {
       if (!row.paneId) return `not in herdr: ${row.cwd}${row.pid ? ` (pid ${row.pid})` : ''}`
       await ctx.herdr.focus(row.paneId)
@@ -6711,8 +7421,14 @@ export async function startTui(ctx: Ctx): Promise<void> {
       return `${child.name} is now under ${parent.name} ${taskId}`
     },
   }
-  const app = render(<App initial={await collect(ctx, { checks: 'live' })} actions={actions} />)
+}
+
+export async function startTui(ctx: Ctx): Promise<void> {
+  // Ctrl-C is handled by the App (exit 130), not by Ink
+  const app = render(<App actions={tuiActions(ctx)} onQuit={code => (process.exitCode = code)} />, { exitOnCtrlC: false })
   await app.waitUntilExit()
+  // a slow gh or herdr call still in flight must not keep the process, or the quit, waiting
+  process.exit(process.exitCode ?? 0)
 }
 ```
 
@@ -6724,7 +7440,7 @@ import { realCtx } from './ctx.js'
 
 const argv = process.argv.slice(2)
 try {
-  if (argv[0] === 'tui') {
+  if (argv[0] === 'tui' && !argv.some(a => a === '--help' || a === '-h')) {
     const tui = new URL('../lib/orch-tui.mjs', import.meta.url).href
     const { startTui } = await import(tui)
     await startTui(realCtx())
@@ -6746,13 +7462,13 @@ In `build.mjs`, add after the `chmodSync('bin/orch', 0o755)` line. The TUI bundl
 const nodeGuard =
   "\nif (+process.versions.node.split('.')[0] < 20) { process.stderr.write('orch tui: needs Node 20 or newer, got ' + process.version + ' at ' + process.execPath + '\\n'); process.exit(1); }"
 mkdirSync('lib', { recursive: true })
-await build({ ...common, banner: { js: banner.js + nodeGuard }, entryPoints: ['src/tui/main.tsx'], outfile: 'lib/orch-tui.mjs' })
+await build({ ...common, define: { 'process.env.NODE_ENV': '"production"' }, banner: { js: banner.js + nodeGuard }, entryPoints: ['src/tui/main.tsx'], outfile: 'lib/orch-tui.mjs' })
 ```
 
 In `package.json`, make `check:bundle` also fail when a bundle was built but never added to git (`git diff` alone only sees tracked files):
 
 ```json
-    "check:bundle": "node build.mjs && git diff --exit-code -- bin lib && git ls-files --error-unmatch bin/orch lib/orch-tui.mjs",
+    "check:bundle": "node build.mjs && git diff --exit-code -- bin lib && git ls-files --error-unmatch bin/orch lib/orch-tui.mjs && test -z \"$(git status --porcelain -- bin lib)\"",
 ```
 
 - [ ] **Step 4: Run them to see them pass**

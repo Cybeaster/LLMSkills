@@ -178,7 +178,7 @@ Evidence marks: ✓ proven, `~` claimed (no evidence or note only), ✗ a live C
 
 **Keys:** `↑↓`/`jk` move, `Enter` open, `Esc` back, `f` focus the session's herdr pane (external sessions show cwd and pid instead), `o` print the session's claude.ai link, `l` link the selected session under a parent task, `r` refresh, `/` filter, `q` quit.
 
-**Refresh:** every 3 s the TUI re-reads `$ORCH_HOME`, `~/.claude/sessions/` and `herdr agent list`; `gh` answers are cached 60 s and asked only for CI and PR evidence.
+**Refresh:** every 3 s the TUI re-reads `$ORCH_HOME`, `~/.claude/sessions/` and `herdr agent list`; `gh` is asked only for CI and PR evidence, at most four at a time. Answers are cached 60 s, and final ones (merged or closed PRs, finished runs) for good. The TUI never waits on `gh`: it shows the last answer (or *unverified*) and refreshes it in the background. `orch task done` still waits for a fresh answer before it accepts CI or PR evidence.
 
 ## 8. Remote use (`claude rc`)
 
