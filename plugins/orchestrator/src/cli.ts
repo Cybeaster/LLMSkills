@@ -30,7 +30,10 @@ const HELP = `orch — task pools for Claude Code sessions
   orch link <child> <parent> <taskId> [--brief <file>]
                                          attach a session under a parent task
   orch spawn-child <taskId> --name <n> --cwd <dir> --brief <file> [--prompt <text>]
-  orch reply <session> "text" [--mark-only]
+  orch reply <session> [--task <id>] -- "text"
+                                         answer a session's open question (the -- keeps a text that starts with a dash)
+  orch reply <session> [--task <id>] --mark-only
+                                         mark it answered after delivering the text yourself
   orch tui
 `
 
@@ -209,9 +212,13 @@ async function cmdSpawn(ctx: Ctx, args: string[]): Promise<Out> {
 }
 
 async function cmdReply(ctx: Ctx, args: string[]): Promise<Out> {
-  const { values, positionals } = parseArgs({ args, options: { 'mark-only': { type: 'boolean' } }, allowPositionals: true })
+  const { values, positionals } = parseArgs({
+    args,
+    options: { 'mark-only': { type: 'boolean' }, task: { type: 'string' } },
+    allowPositionals: true,
+  })
   const session = need(positionals[0], 'session')
-  return reply(ctx, session, positionals.slice(1).join(' ').trim() || undefined, !!values['mark-only'])
+  return reply(ctx, session, positionals.slice(1).join(' ').trim() || undefined, !!values['mark-only'], values.task)
 }
 
 export async function run(argv: string[], ctx: Ctx): Promise<Out> {

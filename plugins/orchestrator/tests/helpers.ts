@@ -8,13 +8,14 @@ import type { Evidence } from '../src/model.js'
 import type { Gh } from '../src/sources/gh.js'
 import type { Herdr, HerdrAgent } from '../src/sources/herdr.js'
 
-export type FakeHerdr = Herdr & { calls: string[][]; agents: HerdrAgent[] }
+export type FakeHerdr = Herdr & { calls: string[][]; agents: HerdrAgent[]; waitTimeouts: number[] }
 
 export function fakeHerdr(agents: HerdrAgent[] = []): FakeHerdr {
   const calls: string[][] = []
   const h: FakeHerdr = {
     calls,
     agents,
+    waitTimeouts: [],
     async list() {
       return h.agents
     },
@@ -32,8 +33,9 @@ export function fakeHerdr(agents: HerdrAgent[] = []): FakeHerdr {
     async sessionIdOf(name) {
       return h.agents.find(a => a.name === name)?.sessionId
     },
-    async waitIdle(target) {
+    async waitIdle(target, timeoutMs) {
       calls.push(['waitIdle', target])
+      h.waitTimeouts.push(timeoutMs)
       return h.agents.find(a => a.paneId === target)?.status === 'blocked' ? 'blocked' : 'idle'
     },
     async prompt(target, text) {

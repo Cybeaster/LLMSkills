@@ -7,7 +7,7 @@ import { cliHerdr, HerdrError, runHerdr, type Run } from '../src/sources/herdr.j
 
 const listJson = readFileSync(new URL('./fixtures/herdr-agent-list.json', import.meta.url), 'utf8')
 
-type Reply = { code?: number; stdout?: string; stderr?: string; error?: string }
+type Reply = { code?: number; stdout?: string; stderr?: string; error?: string; timedOut?: boolean }
 
 function fakeRun(replies: Record<string, Reply>) {
   const calls: string[][] = []
@@ -16,7 +16,7 @@ function fakeRun(replies: Record<string, Reply>) {
     calls.push(args)
     timeouts.push(timeoutMs)
     const r = replies[args.slice(0, 2).join(' ')] ?? {}
-    return { code: r.code ?? 0, stdout: r.stdout ?? '', stderr: r.stderr ?? '', error: r.error }
+    return { code: r.code ?? 0, stdout: r.stdout ?? '', stderr: r.stderr ?? '', error: r.error, timedOut: r.timedOut }
   }
   return { run, calls, timeouts }
 }
@@ -92,6 +92,21 @@ describe('cliHerdr failures', () => {
     expect(e).toBeInstanceOf(OrchError)
     expect(e.message).toBe('herdr agent prompt failed: agent is waiting for input (agent_blocked)')
     expect(e.herdrCode).toBe('agent_blocked')
+  })
+
+  it('codes a killed herdr call as timeout, and keeps the code of wait\'s own timeout error', async () => {
+    const killed = await cliHerdr(fakeRun({ 'agent wait': { code: 127, error: 'timed out after 15000ms', timedOut: true } }).run)
+      .waitIdle('w1:p1', 5000)
+      .catch(x => x)
+    expect(killed).toBeInstanceOf(HerdrError)
+    expect(killed.herdrCode).toBe('timeout')
+
+    const stderr = JSON.stringify({ error: { code: 'timeout', message: 'condition not met' } })
+    const own = await cliHerdr(fakeRun({ 'agent wait': { code: 1, stderr } }).run).waitIdle('w1:p1', 5000).catch(x => x)
+    expect(own.herdrCode).toBe('timeout')
+
+    const other = await cliHerdr(fakeRun({ 'agent wait': { code: 127, error: 'spawn herdr ENOENT' } }).run).waitIdle('w1:p1', 5000).catch(x => x)
+    expect(other.herdrCode).toBeUndefined()
   })
 
   it('reads the JSON error from stdout when stderr is empty', async () => {
@@ -235,6 +250,7 @@ describe('runHerdr', () => {
     const r = await runHerdr(['agent', 'list'])
     expect(r.code).not.toBe(0)
     expect(r.error).toMatch(/ENOENT/)
+    expect(r.timedOut).toBeFalsy()
   })
 
   it('kills a call that outlives its timeout and says so', async () => {
@@ -244,5 +260,6 @@ describe('runHerdr', () => {
     expect(Date.now() - t0).toBeLessThan(2500)
     expect(r.code).not.toBe(0)
     expect(r.error).toBe('timed out after 100ms')
+    expect(r.timedOut).toBe(true)
   })
 })

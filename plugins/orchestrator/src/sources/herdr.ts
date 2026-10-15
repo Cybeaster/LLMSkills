@@ -13,7 +13,7 @@ export interface Herdr {
   prompt(target: string, text: string): Promise<void>
 }
 
-export type Run = (args: string[], timeoutMs?: number) => Promise<{ code: number; stdout: string; stderr: string; error?: string }>
+export type Run = (args: string[], timeoutMs?: number) => Promise<{ code: number; stdout: string; stderr: string; error?: string; timedOut?: boolean }>
 
 // herdr failed. herdrCode is the code from its {error:{code,message}} reply (agent_not_ready, agent_blocked, ...), when it sent one
 export class HerdrError extends OrchError {
@@ -36,7 +36,7 @@ export const runHerdr: Run = (args, timeoutMs) => {
       const timedOut = err?.killed === true && typeof err.code !== 'string'
       const code = err ? (typeof err.code === 'number' ? err.code : 127) : 0
       const error = err ? (timedOut ? `timed out after ${limit}ms` : err.message) : undefined
-      resolve({ code, stdout: String(stdout), stderr: String(stderr), error })
+      resolve({ code, stdout: String(stdout), stderr: String(stderr), error, timedOut })
     })
   })
 }
@@ -58,11 +58,12 @@ function herdrErrorIn(text: string): { code?: string; message?: string } | undef
   return undefined
 }
 
-function failure(args: string[], r: { stdout: string; stderr: string; error?: string }): HerdrError {
+function failure(args: string[], r: { stdout: string; stderr: string; error?: string; timedOut?: boolean }): HerdrError {
   const what = `herdr ${args.slice(0, 2).join(' ')} failed`
   const e = herdrErrorIn(r.stderr) ?? herdrErrorIn(r.stdout)
   if (e) return new HerdrError(`${what}: ${e.message ?? e.code}${e.message && e.code ? ` (${e.code})` : ''}`, e.code)
-  return new HerdrError(`${what}: ${r.stderr.trim() || r.stdout.trim() || (r.error ?? '').trim()}`)
+  // a call killed by its exec timeout gets the same code as herdr's own {error:{code:'timeout'}}
+  return new HerdrError(`${what}: ${r.stderr.trim() || r.stdout.trim() || (r.error ?? '').trim()}`, r.timedOut ? 'timeout' : undefined)
 }
 
 export function cliHerdr(run: Run = runHerdr): Herdr {

@@ -502,7 +502,7 @@ var runHerdr = (args, timeoutMs) => {
       const timedOut = err?.killed === true && typeof err.code !== "string";
       const code = err ? typeof err.code === "number" ? err.code : 127 : 0;
       const error = err ? timedOut ? `timed out after ${limit}ms` : err.message : void 0;
-      resolve2({ code, stdout: String(stdout), stderr: String(stderr), error });
+      resolve2({ code, stdout: String(stdout), stderr: String(stderr), error, timedOut });
     });
   });
 };
@@ -523,7 +523,7 @@ function failure(args, r) {
   const what = `herdr ${args.slice(0, 2).join(" ")} failed`;
   const e = herdrErrorIn(r.stderr) ?? herdrErrorIn(r.stdout);
   if (e) return new HerdrError(`${what}: ${e.message ?? e.code}${e.message && e.code ? ` (${e.code})` : ""}`, e.code);
-  return new HerdrError(`${what}: ${r.stderr.trim() || r.stdout.trim() || (r.error ?? "").trim()}`);
+  return new HerdrError(`${what}: ${r.stderr.trim() || r.stdout.trim() || (r.error ?? "").trim()}`, r.timedOut ? "timeout" : void 0);
 }
 function cliHerdr(run2 = runHerdr) {
   const ok2 = async (args, timeoutMs) => {
@@ -1081,40 +1081,61 @@ async function resolveSession(ctx, rows, query, opts = {}) {
 
 // src/reply.ts
 var EXIT_SENDMESSAGE = 3;
-async function reply(ctx, query, text, markOnly) {
-  const row = resolveTarget(await collect(ctx), query);
-  const task = readPool(ctx.orchHome, row.sessionId)?.tasks.find((t) => t.needsInput);
-  if (!task) throw new OrchError(`${row.name} has no open question`);
+var MAX_REPLY = 4e3;
+var cleanText = (s) => s.replace(new RegExp("(?![\\n\\t])\\p{Cc}", "gu"), "");
+async function reply(ctx, query, text, markOnly, taskId) {
+  const rows = await collect(ctx);
+  const { sessionId, name } = await resolveSession(ctx, rows, query);
+  const pool = readPool(ctx.orchHome, sessionId);
+  const open = (pool?.tasks ?? []).filter((t) => t.needsInput);
+  let task;
+  if (taskId) {
+    task = open.find((t) => t.id === taskId);
+    if (!task) throw new OrchError(`${name} ${taskId} has no open question`);
+  } else {
+    if (!open.length) throw new OrchError(`${name} has no open question`);
+    if (open.length > 1) throw new OrchError(`${name} has ${open.length} open questions (${open.map((t) => t.id).join(", ")}); pass --task <id>`);
+    task = open[0];
+  }
+  const asked = task.needsInput;
+  if (markOnly && text) throw new OrchError("--mark-only takes no reply text", 2);
   if (!markOnly) {
-    if (!text) throw new OrchError("missing reply text", 2);
-    if (row.state === "ended") throw new OrchError(`${row.name} has ended; its question stays open`);
-    if (row.state === "waiting") throw new OrchError(`${row.name} is waiting on a dialog (${row.waitingFor}); answer that in the session first`);
-    const message = `[orch reply to: "${task.needsInput}"] ${text}`;
+    const body = cleanText(text ?? "").trim();
+    if (!body) throw new OrchError("missing reply text", 2);
+    if (body.length > MAX_REPLY) throw new OrchError(`the reply is ${body.length} characters; the limit is ${MAX_REPLY}, shorten it`, 2);
+    const row = flatten(rows).map((l) => l.row).find((r) => r.sessionId === sessionId);
+    if (!row || row.state === "ended") throw new OrchError(`${name} has ended; its question stays open`);
+    if (row.state === "waiting") throw new OrchError(`${name} is waiting on a dialog (${row.waitingFor}); answer that in the session first`);
+    const message = `[orch reply to: ${JSON.stringify(oneLine(asked).slice(0, 200))}] ${body}`;
     if (!row.paneId) {
-      return { code: EXIT_SENDMESSAGE, stdout: `${JSON.stringify({ route: "sendmessage", to: row.name, text: message })}
+      const payload = { route: "sendmessage", sessionId, name, cwd: pool?.cwd ?? row.cwd, taskId: task.id, text: message };
+      return { code: EXIT_SENDMESSAGE, stdout: `${JSON.stringify(payload)}
 `, stderr: "" };
     }
-    const blocked = new OrchError(`${row.name} is waiting on a permission prompt; answer that in its pane first`);
+    const blocked = new OrchError(`${name} is waiting on a permission prompt; answer that in its pane first`);
     let state;
     try {
       state = await ctx.herdr.waitIdle(row.paneId, 9e4);
     } catch (e) {
-      const timedOut = e instanceof HerdrError && (e.herdrCode === "timeout" || /timed out/.test(e.message));
-      if (!timedOut) throw e;
-      throw new OrchError(`${row.name} is still busy after 90 s; its question stays open, try again later`);
+      if (!(e instanceof HerdrError && e.herdrCode === "timeout")) throw e;
+      throw new OrchError(`${name} is still busy after 90 s; its question stays open, try again later`);
     }
     if (state === "blocked") throw blocked;
+    if (state !== "idle" && state !== "done") throw new OrchError(`${name} is ${state}; its question stays open, try again later`);
+    if (readPool(ctx.orchHome, sessionId)?.tasks.find((t) => t.id === task.id)?.needsInput !== asked) {
+      throw new OrchError(`${name} already answered that question in the session; nothing sent`);
+    }
     try {
       await ctx.herdr.prompt(row.paneId, message);
     } catch (e) {
       if (e instanceof HerdrError && e.herdrCode === "agent_blocked") throw blocked;
       throw new OrchError(
-        `${row.name} may not have got the reply (${e instanceof Error ? e.message : String(e)}); check its pane, then run orch reply ${row.name} --mark-only if it arrived`
+        `${name} may not have got the reply (${e instanceof Error ? e.message : String(e)}); check its pane, then run orch reply ${name} --task ${task.id} --mark-only if it arrived`
       );
     }
   }
-  await updateIfExists(ctx.orchHome, row.sessionId, (p) => clearQuestions(p, ctx.now(), task.id) ?? p);
-  return ok(`answered ${row.name} ${task.id}
+  await updateIfExists(ctx.orchHome, sessionId, (p) => clearQuestions(p, ctx.now(), task.id) ?? p);
+  return ok(`answered ${name} ${task.id}
 `);
 }
 
@@ -1227,7 +1248,10 @@ var HELP = `orch \u2014 task pools for Claude Code sessions
   orch link <child> <parent> <taskId> [--brief <file>]
                                          attach a session under a parent task
   orch spawn-child <taskId> --name <n> --cwd <dir> --brief <file> [--prompt <text>]
-  orch reply <session> "text" [--mark-only]
+  orch reply <session> [--task <id>] -- "text"
+                                         answer a session's open question (the -- keeps a text that starts with a dash)
+  orch reply <session> [--task <id>] --mark-only
+                                         mark it answered after delivering the text yourself
   orch tui
 `;
 var need = (v, what) => {
@@ -1387,9 +1411,13 @@ async function cmdSpawn(ctx, args) {
   });
 }
 async function cmdReply(ctx, args) {
-  const { values, positionals } = parseArgs({ args, options: { "mark-only": { type: "boolean" } }, allowPositionals: true });
+  const { values, positionals } = parseArgs({
+    args,
+    options: { "mark-only": { type: "boolean" }, task: { type: "string" } },
+    allowPositionals: true
+  });
   const session = need(positionals[0], "session");
-  return reply(ctx, session, positionals.slice(1).join(" ").trim() || void 0, !!values["mark-only"]);
+  return reply(ctx, session, positionals.slice(1).join(" ").trim() || void 0, !!values["mark-only"], values.task);
 }
 async function run(argv, ctx) {
   const [cmd, ...rest] = argv;
