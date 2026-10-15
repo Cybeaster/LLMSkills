@@ -210,7 +210,8 @@ describe('runHerdr', () => {
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
   })
 
-  // PATH points at a throwaway dir, so the real herdr is never reached
+  // PATH starts at a throwaway dir, so the real herdr is never reached; with no script the dir is all of
+  // PATH, since herdr may also live in /usr/bin
   function fakeHerdr(script?: string) {
     const dir = mkdtempSync(join(tmpdir(), 'fake-herdr-'))
     dirs.push(dir)
@@ -218,7 +219,7 @@ describe('runHerdr', () => {
       writeFileSync(join(dir, 'herdr'), `#!/bin/sh\n${script}\n`)
       chmodSync(join(dir, 'herdr'), 0o755)
     }
-    process.env.PATH = `${dir}:/usr/bin:/bin`
+    process.env.PATH = script ? `${dir}:/usr/bin:/bin` : dir
   }
 
   it('hands back exit code, stdout and stderr', async () => {

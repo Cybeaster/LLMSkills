@@ -1969,7 +1969,8 @@ describe('runHerdr', () => {
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
   })
 
-  // PATH points at a throwaway dir, so the real herdr is never reached
+  // PATH starts at a throwaway dir, so the real herdr is never reached; with no script the dir is all of
+  // PATH, since herdr may also live in /usr/bin
   function fakeHerdr(script?: string) {
     const dir = mkdtempSync(join(tmpdir(), 'fake-herdr-'))
     dirs.push(dir)
@@ -1977,7 +1978,7 @@ describe('runHerdr', () => {
       writeFileSync(join(dir, 'herdr'), `#!/bin/sh\n${script}\n`)
       chmodSync(join(dir, 'herdr'), 0o755)
     }
-    process.env.PATH = `${dir}:/usr/bin:/bin`
+    process.env.PATH = script ? `${dir}:/usr/bin:/bin` : dir
   }
 
   it('hands back exit code, stdout and stderr', async () => {
@@ -4123,6 +4124,13 @@ describe('orch reply', () => {
     expect(out.code).toBe(1)
     expect(out.stderr).toMatch(/permission prompt/)
     expect(readPool(ctx.orchHome, 's-go')!.tasks[0].needsInput).toBe('Strict or lenient?')
+
+    ctx.herdr.prompt = async () => {
+      throw new HerdrError('herdr agent prompt failed: timed out after 10000ms')
+    }
+    const lost = await run(['reply', 'course-go', 'strict'], ctx)
+    expect(lost.stderr).toMatch(/may not have got the reply.*timed out.*orch reply course-go --mark-only/s)
+    expect(readPool(ctx.orchHome, 's-go')!.tasks[0].needsInput).toBe('Strict or lenient?')
   })
 
   it('hands sessions outside herdr back to /orch with exit 3', async () => {
@@ -4199,7 +4207,12 @@ export async function reply(ctx: Ctx, query: string, text: string | undefined, m
       await ctx.herdr.prompt(row.paneId, message)
     } catch (e) {
       // the agent can block between the wait and the prompt; herdr then refuses with agent_blocked
-      throw e instanceof HerdrError && e.herdrCode === 'agent_blocked' ? blocked : e
+      if (e instanceof HerdrError && e.herdrCode === 'agent_blocked') throw blocked
+      // herdr says a failed or timed-out prompt may still have arrived: never invite a blind resend
+      throw new OrchError(
+        `${row.name} may not have got the reply (${e instanceof Error ? e.message : String(e)}); ` +
+          `check its pane, then run orch reply ${row.name} --mark-only if it arrived`,
+      )
     }
   }
   await updateIfExists(ctx.orchHome, row.sessionId, p => clearQuestions(p, ctx.now(), task.id) ?? p)
@@ -4302,6 +4315,18 @@ function setup() {
 }
 
 describe('TUI', () => {
+  it('runs one refresh at a time', async () => {
+    let finish: (r: Row[]) => void = () => {}
+    const load = vi.fn(() => new Promise<Row[]>(r => (finish = r)))
+    const app = render(<App initial={rows()} actions={{ load, focus: vi.fn(), link: vi.fn() }} interval={20} />)
+    await new Promise(r => setTimeout(r, 120))
+    expect(load).toHaveBeenCalledTimes(1)
+    finish(rows())
+    await new Promise(r => setTimeout(r, 60))
+    expect(load.mock.calls.length).toBeGreaterThan(1)
+    app.unmount()
+  })
+
   it('lists sessions as a tree with the header', () => {
     const frame = setup().app.lastFrame()!
     expect(frame).toContain('ORCHESTRATOR  3 live · 1 ⚑ · 0 ended')
