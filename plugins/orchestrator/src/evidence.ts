@@ -1,40 +1,51 @@
 import { OrchError } from './errors.js'
 import type { Evidence } from './model.js'
 
+type Kind = Evidence['kind']
+
 export type Check = 'pass' | 'fail' | 'pending' | 'unknown'
 export type Grade = 'proven' | 'claimed' | 'contradicted' | 'unverified'
-export type ParsedEvidence = { kind: 'commit' | 'pr' | 'ci' | 'note'; ref: string } | { kind: 'cmd'; ref: string }
+// cmd evidence gets its exit code from orch running the command, so the parsed form has none
+export type ParsedEvidence = Exclude<Evidence, { kind: 'cmd' }> | { kind: 'cmd'; ref: string }
 
-const KINDS = ['commit', 'pr', 'ci', 'cmd', 'note']
+const KINDS: readonly Kind[] = ['commit', 'pr', 'ci', 'cmd', 'note']
+const isKind = (k: string): k is Kind => (KINDS as readonly string[]).includes(k)
 const USAGE = 'use commit:<sha> | pr:<number|url> | ci:<run-url> | cmd:<command> | note:<text>'
+const SHA = /^[0-9a-f]{4,64}$/i
 
 export function parseEvidence(s: string): ParsedEvidence {
   const i = s.indexOf(':')
   const kind = s.slice(0, i)
   const ref = s.slice(i + 1).trim()
-  if (i < 1 || !KINDS.includes(kind) || !ref) throw new OrchError(`bad evidence "${s}": ${USAGE}`, 2)
-  return { kind, ref } as ParsedEvidence
+  if (i < 1 || !isKind(kind) || !ref) throw new OrchError(`bad evidence "${s}": ${USAGE}`, 2)
+  if (kind === 'commit' && !SHA.test(ref)) {
+    throw new OrchError(`bad evidence "${s}": commit needs a sha, e.g. commit:$(git rev-parse --short HEAD)`, 2)
+  }
+  return { kind, ref }
 }
 
 export function grade(ev: Evidence | undefined, check?: Check): Grade {
   if (!ev || ev.kind === 'note') return 'claimed'
-  if (ev.kind === 'commit' || ev.kind === 'cmd') return 'proven'
+  if (ev.kind === 'commit') return 'proven'
+  if (ev.kind === 'cmd') return ev.exit === 0 ? 'proven' : 'contradicted'
   if (check === 'pass') return 'proven'
   if (check === 'fail') return 'contradicted'
   return 'unverified'
 }
 
-export function describe(ev: Evidence): string {
+export function describeEvidence(ev: Evidence): string {
+  const ref = String(ev.ref ?? '').replace(/[\s\p{Cc}]+/gu, ' ').trim()
   switch (ev.kind) {
     case 'commit':
-      return `commit ${ev.ref.slice(0, 7)}`
+      return `commit ${ref.slice(0, 7)}`
     case 'cmd':
-      return `cmd ${ev.ref} (exit ${ev.exit})`
+      return `cmd ${ref} (exit ${String(ev.exit)})`
     case 'note':
-      return `note: ${ev.ref}`
+      return `note: ${ref}`
     default:
-      return `${ev.kind} ${ev.ref}`
+      return `${ev.kind} ${ref}`
   }
 }
 
-export const checkKey = (ev: Evidence) => `${ev.kind}:${ev.ref}`
+// gh resolves a bare PR or run number against the repo in cwd, so the same ref in two repos is two checks
+export const checkKey = (ev: Evidence, cwd: string) => `${cwd}\0${ev.kind}:${ev.ref}`
