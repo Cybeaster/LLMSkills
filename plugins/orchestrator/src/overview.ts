@@ -135,7 +135,8 @@ export function buildOverview(input: OverviewInput): Row[] {
       sessionId: id,
       name: oneLine(a?.name) || oneLine(s?.name) || oneLine(pool?.title) || oneLine(id.slice(0, 8)),
       title: oneLine(pool?.title) || oneLine(a?.title),
-      cwd: pool?.cwd || s?.cwd || '',
+      // a path may hold spaces, so control characters are replaced rather than folded away by oneLine
+      cwd: (pool?.cwd || s?.cwd || '').replace(/\p{Cc}/gu, '?'),
       state: s ? (s.waitingFor ? 'waiting' : s.status) : 'ended',
       waitingFor: s?.waitingFor ? oneLine(s.waitingFor) : undefined,
       tag: s ? (a ? 'herdr' : 'external') : '—',

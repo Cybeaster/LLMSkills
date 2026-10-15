@@ -25,6 +25,9 @@ export function poolPath(home: string, id: string): string {
   return join(home, `${id}.json`)
 }
 
+// orch itself only writes t1, t2 and so on; anything else was edited in by hand, and an id is printed as is.
+const TASK_ID = /^[A-Za-z0-9_-]+$/
+
 const STATUSES: readonly Status[] = ['pending', 'in_progress', 'done', 'blocked']
 
 // One malformed task (null, no text, a numeric id) would otherwise throw deep inside the overview and
@@ -35,6 +38,7 @@ function isTask(v: unknown): v is Task {
     typeof t === 'object' &&
     t !== null &&
     typeof t.id === 'string' &&
+    TASK_ID.test(t.id) &&
     typeof t.text === 'string' &&
     STATUSES.includes(t.status as Status) &&
     (t.children === undefined || (Array.isArray(t.children) && t.children.every(c => typeof c === 'string')))
@@ -43,7 +47,7 @@ function isTask(v: unknown): v is Task {
 
 function isPool(v: unknown): v is Pool {
   const p = v as Partial<Pool> | null | undefined
-  return typeof p?.sessionId === 'string' && Array.isArray(p.tasks) && p.tasks.every(isTask)
+  return typeof p?.sessionId === 'string' && typeof p.cwd === 'string' && Array.isArray(p.tasks) && p.tasks.every(isTask)
 }
 
 // A pool file must hold the session its name says; a copy such as backup1.json would otherwise

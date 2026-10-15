@@ -242,6 +242,26 @@ describe('buildOverview', () => {
     expect(row.tasks[0].detail).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/)
   })
 
+  it('replaces control characters in a cwd but keeps its spaces', () => {
+    const dirty = '/src/my project\n\u001b]0;x\u0007/sub dir'
+    const clean = '/src/my project??]0;x?/sub dir'
+    const [fromPool] = buildOverview(input({ pools: [{ id: 'S', pool: pool('S', [{}], { cwd: dirty }) }], live: [live('S')] }))
+    const [fromSession] = buildOverview(input({ live: [live('S', { cwd: dirty })] }))
+    expect(fromPool.cwd).toBe(clean)
+    expect(fromSession.cwd).toBe(clean)
+    expect(fromPool.cwd).not.toMatch(/[\u0000-\u001f\u007f]/)
+  })
+
+  it('still looks up checks by the real cwd of the pool', () => {
+    const cwd = '/src/my project\u001b'
+    const [row] = buildOverview(input({
+      pools: [{ id: 'S', pool: pool('S', [{ status: 'done', evidence: { kind: 'ci', ref: 'u1' } }], { cwd }) }],
+      live: [live('S')],
+      checks: new Map<string, Check>([[checkKey({ kind: 'ci', ref: 'u1' }, cwd), 'fail']]),
+    }))
+    expect(row.tasks[0].mark).toBe('✗')
+  })
+
   it('does not clip a question or a blocked reason', () => {
     const long = 'q'.repeat(120)
     const [row] = buildOverview(input({
@@ -374,10 +394,12 @@ describe('buildOverview', () => {
   it('does not call a child an orphan while its parent is live without a pool, or ended with one', () => {
     const child = (id: string, parent: string) => ({ id, pool: pool(id, [{}], { parent: { sessionId: parent, taskId: 't1' } }) })
     const rows = buildOverview(input({
-      pools: [child('K1', 'L'), child('K2', 'D'), { id: 'D', pool: pool('D', [{ children: ['K2'] }], { updatedAt: NOW - 1000 }) }],
+      // D was last written two days ago, so only its live child K2 brings it onto the screen
+      pools: [child('K1', 'L'), child('K2', 'D'), { id: 'D', pool: pool('D', [{ children: ['K2'] }], { updatedAt: NOW - 2 * DAY }) }],
       live: [live('L'), live('K1'), live('K2')],
     }))
     const all = flatten(rows).map(l => l.row)
+    expect(rows.find(r => r.sessionId === 'D')).toMatchObject({ state: 'ended', children: [{ sessionId: 'K2' }] })
     expect(all.find(r => r.sessionId === 'K1')!.orphan).toBe(false)
     expect(all.find(r => r.sessionId === 'K2')!.orphan).toBe(false)
     expect(all.find(r => r.sessionId === 'L')).toMatchObject({ orphan: false, hasPool: false })

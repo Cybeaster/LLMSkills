@@ -278,6 +278,37 @@ describe('store', () => {
     expect(() => readPool(h, 's1')).toThrow(/is not a pool; fix or delete it/)
   })
 
+  it.each([
+    ['a numeric cwd', { cwd: 5 }],
+    ['a null cwd', { cwd: null }],
+    ['no cwd', { cwd: undefined }],
+  ])('flags a pool with %s as unreadable', (_name, over) => {
+    const h = home()
+    writeFileSync(join(h, 's1.json'), JSON.stringify({ ...newPool('s1', '/r', 1), ...over }))
+    expect(listPools(h)).toEqual([{ id: 's1', error: expect.stringMatching(/s1\.json is not a pool; fix or delete it$/) }])
+    expect(() => readPool(h, 's1')).toThrow(/is not a pool; fix or delete it/)
+  })
+
+  it.each([
+    ['an escape code', 't\u001b[31m1'],
+    ['a newline', 't1\n'],
+    ['a space', 't 1'],
+    ['an empty string', ''],
+    ['a slash', 't/1'],
+    ['a non-ASCII letter', 'tä'],
+  ])('flags a pool whose task id holds %s as unreadable', (_name, id) => {
+    const h = home()
+    writeFileSync(join(h, 's1.json'), JSON.stringify({ ...newPool('s1', '/r', 1), tasks: [{ id, text: 'x', status: 'pending' }] }))
+    expect(listPools(h)).toEqual([{ id: 's1', error: expect.stringMatching(/s1\.json is not a pool; fix or delete it$/) }])
+  })
+
+  it.each(['t1', 't12', 'T-3', 'task_4', '7'])('accepts the task id %s', id => {
+    const h = home()
+    const tasks = [{ id, text: 'x', status: 'pending' }]
+    writeFileSync(join(h, 's1.json'), JSON.stringify({ ...newPool('s1', '/r', 1), tasks }))
+    expect(listPools(h)).toEqual([{ id: 's1', pool: expect.objectContaining({ tasks }) }])
+  })
+
   it('accepts every task shape the CLI writes', () => {
     const h = home()
     const tasks = [
