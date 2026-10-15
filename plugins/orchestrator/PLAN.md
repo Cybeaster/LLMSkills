@@ -6057,7 +6057,7 @@ describe('orch reply', () => {
       throw new HerdrError('herdr agent prompt failed: timed out after 10000ms')
     }
     const lost = await run(['reply', 'course-go', 'strict'], ctx)
-    expect(lost.stderr).toMatch(/may not have got the reply.*timed out.*orch reply course-go --task t1 --mark-only/s)
+    expect(lost.stderr).toMatch(/may not have got the reply.*timed out.*orch reply s-go --task t1 --mark-only/s)
     expect(readPool(ctx.orchHome, 's-go')!.tasks[0].needsInput).toBe('Strict or lenient?')
   })
 
@@ -6161,10 +6161,11 @@ describe('orch reply', () => {
       const q = `line one\nline "two" ${'x'.repeat(300)}`
       writePool(ctx.orchHome, askTask(plan(newPool('s-q', '/r', 1), ['a'], 2), 't1', q, 3))
       ctx.herdr.agents.push({ name: 'q', paneId: 'p-q', status: 'idle', sessionId: 's-q' })
-      await run(['reply', 'q', '--', 'a\x1b[31mb\x00c\r\nd\te'], ctx)
+      await run(['reply', 'q', '--', 'a\x1b[31mb\x00c\u202ed\u200be\r\nf\tg'], ctx)
       const sent = ctx.herdr.calls[1][2]
       const quoted = JSON.stringify(`line one line "two" ${'x'.repeat(300)}`.slice(0, 200))
-      expect(sent).toBe(`[orch reply to: ${quoted}] a[31mbc\nd\te`)
+      // herdr gets one line; the control and format characters are gone
+      expect(sent).toBe(`[orch reply to: ${quoted}] a[31mbcde f g`)
     })
 
     it('refuses a reply over 4000 characters instead of cutting it', async () => {
@@ -6228,6 +6229,31 @@ describe('orch reply', () => {
     expect((await run(['reply', 's-old', '--mark-only'], ctx)).code).toBe(0)
     expect(readPool(ctx.orchHome, 's-old')!.tasks[0].needsInput).toBeUndefined()
   })
+
+  it('keeps the newlines for SendMessage', async () => {
+    const ctx = makeCtx()
+    asking(ctx, 's-ext', 'api-fix', false)
+    const out = await run(['reply', 'api-fix', '--', 'one\ntwo'], ctx)
+    expect(JSON.parse(out.stdout).text).toBe('[orch reply to: "Strict or lenient?"] one\ntwo')
+  })
+
+  it('cuts the question at 200 code points, not in the middle of an emoji', async () => {
+    const ctx = makeCtx()
+    writeSession(ctx, { pid: 14, sessionId: 's-e', name: 'e' })
+    const q = `${'a'.repeat(199)}😀tail`
+    writePool(ctx.orchHome, askTask(plan(newPool('s-e', '/r', 1), ['a'], 2), 't1', q, 3))
+    ctx.herdr.agents.push({ name: 'e', paneId: 'p-e', status: 'idle', sessionId: 's-e' })
+    await run(['reply', 'e', '--', 'x'], ctx)
+    expect(ctx.herdr.calls[1][2]).toBe(`[orch reply to: "${'a'.repeat(199)}😀"] x`)
+  })
+
+  it('says an old ended session with no overview row has ended', async () => {
+    const ctx = makeCtx({ now: () => 500_000_000 })
+    writePool(ctx.orchHome, askTask(plan(newPool('s-old', '/r', 1), ['a'], 2), 't1', 'q', 3))
+    const out = await run(['reply', 's-old', '--', 'x'], ctx)
+    expect(out.code).toBe(1)
+    expect(out.stderr).toMatch(/has ended/)
+  })
 })
 ```
 
@@ -6256,7 +6282,8 @@ export const EXIT_SENDMESSAGE = 3
 export const MAX_REPLY = 4000
 
 // everything but newline and tab: a reply is typed into a pane, so an escape sequence must not get through
-const cleanText = (s: string) => s.replace(/(?![\n\t])\p{Cc}/gu, '')
+// plus format characters (bidi overrides, zero-width), which would hide what is typed
+const cleanText = (s: string) => s.replace(/(?![\n\t])\p{Cc}|\p{Cf}/gu, '')
 
 export async function reply(ctx: Ctx, query: string, text: string | undefined, markOnly: boolean, taskId?: string): Promise<Out> {
   const rows = await collect(ctx)
@@ -6282,12 +6309,15 @@ export async function reply(ctx: Ctx, query: string, text: string | undefined, m
     const row = flatten(rows).map(l => l.row).find(r => r.sessionId === sessionId)
     if (!row || row.state === 'ended') throw new OrchError(`${name} has ended; its question stays open`)
     if (row.state === 'waiting') throw new OrchError(`${name} is waiting on a dialog (${row.waitingFor}); answer that in the session first`)
-    const message = `[orch reply to: ${JSON.stringify(oneLine(asked).slice(0, 200))}] ${body}`
+    const quoted = JSON.stringify(Array.from(oneLine(asked)).slice(0, 200).join(''))
+    const frame = (t: string) => `[orch reply to: ${quoted}] ${t}`
     if (!row.paneId) {
       // Not in herdr: /orch delivers it with SendMessage, then runs orch reply --mark-only --task.
-      const payload = { route: 'sendmessage', sessionId, name, cwd: pool?.cwd ?? row.cwd, taskId: task.id, text: message }
+      const payload = { route: 'sendmessage', sessionId, name, cwd: pool?.cwd ?? row.cwd, taskId: task.id, text: frame(body) }
       return { code: EXIT_SENDMESSAGE, stdout: `${JSON.stringify(payload)}\n`, stderr: '' }
     }
+    // herdr agent prompt is not known to take a multi-line argument as one prompt, so it gets one line
+    const message = frame(oneLine(body))
     const blocked = new OrchError(`${name} is waiting on a permission prompt; answer that in its pane first`)
     // a reply from the phone should answer within one Bash call, so wait at most 90 s for the session to rest
     let state: string
@@ -6313,7 +6343,7 @@ export async function reply(ctx: Ctx, query: string, text: string | undefined, m
       // herdr says a failed or timed-out prompt may still have arrived: never invite a blind resend
       throw new OrchError(
         `${name} may not have got the reply (${e instanceof Error ? e.message : String(e)}); ` +
-          `check its pane, then run orch reply ${name} --task ${task.id} --mark-only if it arrived`,
+          `check its pane, then run orch reply ${sessionId} --task ${task.id} --mark-only if it arrived`,
       )
     }
   }
