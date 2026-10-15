@@ -7763,7 +7763,7 @@ Show the person every local Claude session and let them act on one. This is used
 
 `README.md`:
 
-```markdown
+````markdown
 # orchestrator
 
 One view over every Claude Code session running on this machine.
@@ -7797,13 +7797,13 @@ If Claude Code's Bash sandbox is on, `orch` inside it cannot see other sessions 
 
 | Key | Does |
 | --- | --- |
-| `↑↓` / `jk` | move |
+| `↑↓` / `jk` | move (scroll, in a session's pool) |
 | `enter` | open the session's pool |
-| `esc` / `h` | back |
+| `esc` / `←` / `h` | back (cancels a picker) |
 | `f` | focus the session's herdr pane |
 | `o` | show the session's claude.ai link |
-| `l` | attach the session under a parent task |
-| `/` | filter |
+| `l` | (list only) attach the session under a parent task |
+| `/` | filter: type, `enter` keeps it, `esc` clears it (also clears a kept filter in the list) |
 | `r` | refresh now (it refreshes every 3 s) |
 | `q` | quit |
 
@@ -7818,7 +7818,7 @@ npm run check:bundle   # after committing: fails if the committed bundles are st
 ```
 
 Pools live in `~/.claude/orchestrator/<sessionId>.json` (`ORCH_HOME` overrides); hook errors go to `orch.log` there.
-```
+````
 
 - [ ] **Step 4: Add the marketplace entry**
 
