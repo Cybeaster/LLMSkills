@@ -1,8 +1,8 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "writing-skills",
-  "version": "0.1.0",
-  "description": "Skills for writing working text: ru-style turns «Пиши, сокращай» (Ilyakhov, Sarycheva) into a writing procedure for specs, designs, reports and a brainstorm's questions and options.",
+  "version": "0.2.0",
+  "description": "Skills for writing working text: ru-style turns «Пиши, сокращай» (Ilyakhov, Sarycheva) into a writing procedure for specs, designs, reports and a brainstorm's questions and options — writes, checks, fixes and scores Russian text.",
   "author": {
     "name": "Cybeaster",
     "email": "cybeastermail@gmail.com"

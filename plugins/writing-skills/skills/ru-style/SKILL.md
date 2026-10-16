@@ -1,21 +1,54 @@
 ---
 name: ru-style
-description: "Write working text by «Пиши, сокращай» (Ильяхов, Сарычева, 2025) — reader first, then structure, then sentences and words. Use when composing or restructuring text someone reads to decide or act: a design or spec, a brainstorm's questions and options, a report, memo, status update, proposal, work email or slides; or when the user cites the book or Ильяхов. Proofreading or scoring existing Russian text belongs to a proofreading skill such as ru-text."
+description: "Write, check, fix and score Russian text — typography, grammar, punctuation and style — by «Пиши, сокращай» (Ильяхов, Сарычева) and the ru-text rule set. Use when composing or restructuring text someone reads to decide or act: a design or spec, a brainstorm's questions and options, a report, memo, status update, proposal, work email or slides; when asked to proofread or fix Russian text (вычитай, проверь текст, поправь, отредактируй, причеши); when a score is wanted (оцени текст); and silently for typography on any Russian output."
 ---
 
-# Пиши, сокращай
+# ru-style
 
-The method of Максим Ильяхов and Людмила Сарычева, «Пиши, сокращай: Как создавать сильный текст» (4th ed., Альпина Паблишер, 2024; cover title «2025»), turned into a writing procedure. The book's subject is the working text: its reader is busy and motivated, wants the point, and will act on it. Every text in a brainstorm is one — the clarifying question, the options, the design, the spec.
+One skill for Russian text. It writes working text by the method of «Пиши, сокращай» (Максим Ильяхов, Людмила Сарычева, 4-е изд., Альпина Паблишер, 2024), and it checks, fixes and scores Russian text against a full rule set: typography, grammar, punctuation, style and the patterns of machine-written prose. The typography, grammar, punctuation, AI-text, UX and business-writing material comes from ru-text by Arseniy Kamyshev (MIT); `references/sources.md` credits both. «с.» in the references is the page of the book's 4th edition that covers a rule.
 
-Rules and the book's examples in `references/` are retold in our own words, next to our own examples; «с.» there is the page of the book's 4th edition (2024) that covers the rule. `NOTICE.md` says what is and is not taken from the book.
+## Always on: typography
 
-## The book's mottos
+Apply to all Russian output, silently: fix, don't announce. A person's explicit style request (casual, academic, SEO, literary) overrides these defaults where they conflict.
+
+| Rule | Wrong | Correct |
+|---|---|---|
+| Primary quotes: guillemets | "текст" | «текст» |
+| Nested quotes: lapki | «"вложенные"» | «„вложенные“» |
+| Em dash, NBSP before it | слово - слово | слово — слово |
+| En dash for ranges, no spaces | 10-15 дней | 10–15 дней |
+| NBSP after single-letter words | в начале (breakable) | в\u00A0начале |
+| Ellipsis: single character | ... | … |
+| Digit groups with thin spaces | 1000000 | 1 000 000 |
+| Decimal comma (not dot) | 3.14 | 3,14 |
+| Ordinal with hyphen | 1ый, 2ой | 1-й, 2-й |
+| Numero sign | No. 5, #5 | № 5 |
+| Abbreviations with NBSP | т.д., т.е. | т. д., т. е. |
+| Ruble sign after number, NBSP | 1500₽ | 1 500 ₽ |
+| Percent glued (non-GOST) | 100 % | 100% |
+
+Dashes: at most 1–2 per paragraph — a parallel row counts as one, dialogue dashes as none; trim to the limit, not to zero. Full rules: `references/typography.md`.
+
+## Modes
+
+Pick one mode per request.
+
+| The request | Mode |
+|---|---|
+| Compose or restructure a text | Write |
+| «вычитай», «проверь текст», a gate that names this skill; or your own Russian output before it goes out | Check |
+| «поправь», «отредактируй», «причеши», "fix the text in <file>" | Fix |
+| «оцени текст», a number is wanted | Score |
+
+### Write
+
+#### The book's mottos
 
 The twelve rules from the book's opening spread. Think with them while writing:
 
 Польза, ясность, связность, чистота · Сократи и наполни · Не усложняй · Пиши о людях · Читатель сам решит · Говори прямо, формулируй по-своему · Текст о себе — не о себе · Приведи пример · Споткнулся — упрости · Где польза, там внимание · Сразу к делу · Ты нужен читателю
 
-## Writing a new text: top-down
+#### Writing a new text: top-down
 
 Work in this order; each step ends on its criterion.
 
@@ -37,7 +70,7 @@ An existing draft is edited bottom-up: words and sentences, then paragraphs, the
 | Slides or a visual mockup | слайд — капсула смысла: a heading that states the conclusion, one visual centre | `genres.md` «Слайды» |
 | About yourself, a company, press release, cold letter, landing page | the genre's schema | `genres.md` |
 
-## Brainstorm texts
+#### Brainstorm texts
 
 | Text | Shape |
 |---|---|
@@ -46,7 +79,7 @@ An existing draft is edited bottom-up: words and sentences, then paragraphs, the
 | Design section | The first sentence is the decision; then why; then the rejected alternative and what it would have cost. One running example goes through every section. |
 | Spec | Договор с читателем on top: for whom, what it does not cover, what it builds on. Then «Основные положения» as a list, sections with the gist directly under each heading, bold only in headings, comparisons as tables and flows as diagrams. It ends with the decision you need from the reader. |
 
-## Where a model's draft lands
+#### Where a model's draft lands
 
 The book's last chapter describes machine text as a term paper compiled from everything already written on the topic: averaged, general, missing the author's experience. Your first draft starts there. Each pattern below is a rule from the book; check the draft for all of them.
 
@@ -62,19 +95,61 @@ The book's last chapter describes machine text as a term paper compiled from eve
 
 The Fix column is enough to apply each row; open the cited rule only when a case is unclear.
 
+### Check
+
+Check reports; it never edits the analysed text or file. It runs at one of two depths, chosen by these rules, not by preference.
+
+**Full** — whenever a person asked for the check, a gate names this skill, or triage escalated. An explicit request is never answered with triage. Read, in order:
+
+1. Typography — `typography.md`: quotes, dashes, spaces (non-breaking after single-letter words, in digit groups, before units; `%` glued to its number), ellipsis, abbreviations, special characters. Check spaces by codepoint, not by eye.
+2. Quick table — `anti-patterns.md`: bureaucratese and nominalization, passive voice, sentence bloat, tautology and pleonasm.
+3. Words and sentences — `word.md` (stop words, vagueness, jargon, ratings, clichés, numbers) and `sentence.md` (who acts, overloaded sentences, paragraphs and lists, bureaucratese).
+4. Text — `text.md`, plus `working-docs.md` for a spec, report or memo: reader and useful action, structure, intro and ending, tone, depth.
+5. Domain, when the text type is clear — interface text: `ux-writing.md`; email, messenger, meeting notes: `business-writing.md`; grammar: `editorial-grammar.md` and `editorial-punctuation.md`; a genre: `genres.md`.
+6. Machine-written prose — `ai-text.md`: the «Neuroslop index», then the AD rules with their carve-outs. AD-14 and AD-15 are charged to the document as a whole, not to a sentence.
+
+**Triage** — only for a self-initiated check of your own or found text when no instruction names this skill. Load three things: this SKILL.md, the «Neuroslop index» section of `ai-text.md`, and all of `word.md` and the «Примеры канцелярита» entry of `sentence.md`. Report only what one line decides: typography and confirmed catalogue hits; judge inflected forms yourself («данные» the noun is not «данный»). A neuroslop tell is never a triage finding — it is a reason to escalate. Escalate to full, silently, when a neuroslop candidate appears, five findings are confirmed, or the text is bound for a reader. A triage report names itself: «Быстрая проверка: типографика и стоп-слова. Полная вычитка не выполнялась.»
+
+**Output:** the corrected text; then the changes grouped by category (typography / style / grammar / domain), each with its severity (critical / high / medium / low) and the rule behind it (file and section).
+
+### Fix
+
+Run Check at full depth, then apply the corrections to the text or file the person named, and to nothing else. Report the change list in Check's format. Quotations, code blocks and third-party text inside the document stay as they are; report an issue there if it matters. Insert non-breaking spaces into a file only when the person asked for typesetting or the file's format keeps them; otherwise list them as findings — a target that strips them shows no change, and an inserted one breaks exact-string search on that file.
+
+### Score
+
+Read-only, like Check.
+
+1. Read `scoring.md` for the rubric and its anchors.
+2. Identify the domain: interface text adds `ux-writing.md`, business email adds `business-writing.md` to the reader-precision dimension.
+3. Score each dimension 0.0–10.0, quoting 1–3 fragments: Т типографика (0.15; `typography.md`), Ч чистота языка (0.25; `word.md`, `sentence.md`, `anti-patterns.md`), Г грамотность (0.20; `editorial-grammar.md`, `editorial-punctuation.md`), С структура (0.20; `text.md`, `ai-text.md`), Ц точность для читателя (0.20; the domain file).
+4. Caps: any dimension below 3.0 → total at most 5.0; typography or grammar below 4.0 → total at most 7.0; the strictest cap wins.
+5. S = round₁(Т×0.15 + Ч×0.25 + Г×0.20 + С×0.20 + Ц×0.20). Under 50 words, open with a reliability caveat.
+6. Report exactly in the shape of `scoring.md` «Output format».
+
 ## Boundaries
 
-- A rule flags; the author decides. The book insists nothing is deleted mechanically: a stop word that carries meaning stays.
-- Text and sentence rules hold in any language; the word lists in `word.md` are Russian.
-- Proofreading or scoring an existing Russian text belongs to a proofreading skill such as `ru-text`; when one is installed, its typography rules govern Russian output.
+- A rule flags; the author decides. A stop word that carries meaning stays.
+- On typography, grammar and punctuation the ru-text material decides; on composition — what to say, in what order, with which sentence and word — the book's material decides.
+- Someone else's words stay theirs: quotations, code and third-party text are reproduced as is.
+- Text and sentence rules hold in any language; the word lists, typography and grammar rules are Russian.
 - Copy the owner wrote stays verbatim.
 
 ## References
 
 | File | Holds | Load when |
 |---|---|---|
-| `references/text.md` | reader and useful action, gathering material, structures, intros and endings, tone, depth and examples | every new text: steps 1, 2 and 5 |
-| `references/working-docs.md` | reports, memos and conclusions; what the book says about machine text | a spec, design doc, report or status |
-| `references/sentence.md` | people and actions, overloaded sentences, paragraphs and lists, канцелярит | step 4, and any edit of a draft |
-| `references/word.md` | stop words, parentheticals, vagueness, jargon, imposed ratings, clichés — with full word lists, grouped by meaning | step 4 on Russian text |
-| `references/genres.md` | text about yourself, company text, press release, cold letter, slides, landing page | that genre; slides or mockups |
+| `references/text.md` | reader and useful action, gathering material, structures, intros and endings, tone, depth, register | Write steps 1, 2, 5; Check step 4 |
+| `references/working-docs.md` | reports, memos, specs; machine-written text; newsroom workflow | a spec, design doc, report or status |
+| `references/sentence.md` | who acts, overloaded sentences, paragraphs and lists, bureaucratese | Write step 4; Check step 3 |
+| `references/word.md` | the stop-word catalogue, vagueness, jargon, ratings, clichés, numbers and facts | Write step 4 on Russian text; Check step 3; triage |
+| `references/genres.md` | text about yourself, company text, press release, cold letter, slides, landing page | that genre |
+| `references/typography.md` | quotes, dashes, spaces, ellipsis, numbers and dates | Check step 1; any typesetting question |
+| `references/anti-patterns.md` | the wrong → right quick table | Check step 2 |
+| `references/editorial-grammar.md` | capitalization, agreement, pleonasm, lists, numbers in text | grammar; Score Г |
+| `references/editorial-punctuation.md` | commas, dashes and colons in complex sentences | punctuation; Score Г |
+| `references/ux-writing.md` | buttons, errors, empty states, hints, notifications, forms | interface text |
+| `references/business-writing.md` | email, messenger, tone, meeting notes, saying no | business correspondence |
+| `references/ai-text.md` | the neuroslop index and AD-1…AD-18 | Check step 6; triage |
+| `references/scoring.md` | the 0–10 rubric and its report shape | Score |
+| `references/sources.md` | credits | — |

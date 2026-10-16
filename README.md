@@ -22,7 +22,7 @@ plugins/
     .claude-plugin/plugin.json
     .codex-plugin/plugin.json
     skills/
-      ru-style/                     # writes working text by «Пиши, сокращай»: specs, designs, reports
+      ru-style/                     # writes, checks, fixes and scores Russian text (Пиши, сокращай + ru-text)
 ```
 
 `plugins/<name>/skills/<skill>/SKILL.md` is where Claude Code's plugin format and Codex's
