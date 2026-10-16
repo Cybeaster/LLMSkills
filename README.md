@@ -18,6 +18,11 @@ plugins/
     skills/                         # read by BOTH; nothing is duplicated
       project-mentor/               # mentors a beginner through their first project
       explain-this-project/         # explains an unfamiliar codebase from zero
+  writing-skills/
+    .claude-plugin/plugin.json
+    .codex-plugin/plugin.json
+    skills/
+      ru-style/                     # writes working text by «Пиши, сокращай»: specs, designs, reports
 ```
 
 `plugins/<name>/skills/<skill>/SKILL.md` is where Claude Code's plugin format and Codex's
@@ -30,6 +35,7 @@ compatibility layout *both* look for skills, so the tree needs no per-agent copy
 ```
 /plugin marketplace add Cybeaster/LLMSkills
 /plugin install learning-skills@claude-skills
+/plugin install writing-skills@claude-skills
 ```
 
 **Codex**
@@ -37,10 +43,25 @@ compatibility layout *both* look for skills, so the tree needs no per-agent copy
 ```
 codex plugin marketplace add Cybeaster/LLMSkills
 codex plugin add learning-skills@llm-skills
+codex plugin add writing-skills@llm-skills
 ```
 
 The marketplace *names* differ (`claude-skills` vs `llm-skills`) because each agent reads its
 own manifest; the repository argument is the same.
+
+**npx skills, any agent**
+
+The [`skills`](https://github.com/vercel-labs/skills) CLI installs a single skill straight from
+this repository into Claude Code, Codex and the other agents it supports:
+
+```
+npx skills add Cybeaster/LLMSkills --list              # every skill in the repository
+npx skills add Cybeaster/LLMSkills --skill ru-style -g # one skill, for your user
+npx skills update -g                                   # later: pull the latest version
+```
+
+Without `-g` the skill goes into the current project. The CLI asks which agents to install into;
+`-a claude-code` (or `-a codex`) picks one and skips the question.
 
 **Without a plugin, either agent**
 

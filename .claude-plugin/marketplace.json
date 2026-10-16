@@ -14,6 +14,11 @@
       "name": "orchestrator",
       "source": "./plugins/orchestrator",
       "description": "One view over every local Claude Code session: task pools with evidence, child sessions under their parent task, a TUI, and /orch for your phone."
+    },
+    {
+      "name": "writing-skills",
+      "source": "./plugins/writing-skills",
+      "description": "Skills for writing working text: ru-style turns «Пиши, сокращай» (Ilyakhov, Sarycheva) into a writing procedure for specs, designs, reports and a brainstorm's questions and options."
     }
   ]
 }
