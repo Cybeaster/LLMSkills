@@ -7,7 +7,7 @@ description: "Write working text by «Пиши, сокращай» (Ильяхо
 
 The method of Максим Ильяхов and Людмила Сарычева, «Пиши, сокращай: Как создавать сильный текст» (4th ed., Альпина Паблишер, 2024; cover title «2025»), turned into a writing procedure. The book's subject is the working text: its reader is busy and motivated, wants the point, and will act on it. Every text in a brainstorm is one — the clarifying question, the options, the design, the spec.
 
-Rules in `references/` are restated in our own words with our own examples; «с.» there is the page of the book's 4th edition (2024) that covers the rule. `NOTICE.md` says what is and is not taken from the book.
+Rules and the book's examples in `references/` are retold in our own words, next to our own examples; «с.» there is the page of the book's 4th edition (2024) that covers the rule. `NOTICE.md` says what is and is not taken from the book.
 
 ## The book's mottos
 
@@ -76,5 +76,5 @@ The Fix column is enough to apply each row; open the cited rule only when a case
 | `references/text.md` | reader and useful action, gathering material, structures, intros and endings, tone, depth and examples | every new text: steps 1, 2 and 5 |
 | `references/working-docs.md` | reports, memos and conclusions; what the book says about machine text | a spec, design doc, report or status |
 | `references/sentence.md` | people and actions, overloaded sentences, paragraphs and lists, канцелярит | step 4, and any edit of a draft |
-| `references/word.md` | stop words, parentheticals, vagueness, jargon, imposed ratings, clichés — with the book's word lists | step 4 on Russian text |
+| `references/word.md` | stop words, parentheticals, vagueness, jargon, imposed ratings, clichés — with full word lists, grouped by meaning | step 4 on Russian text |
 | `references/genres.md` | text about yourself, company text, press release, cold letter, slides, landing page | that genre; slides or mockups |

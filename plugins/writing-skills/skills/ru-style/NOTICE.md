@@ -4,8 +4,8 @@
 
 Максим Ильяхов, Людмила Сарычева. «Пиши, сокращай: Как создавать сильный текст». 4-е изд. — М.: Альпина Паблишер, 2024. The book and its updates: https://book.glvrd.ru
 
-**Taken from the book:** its ideas — the rules, their names, and the page of the 4th edition that covers each one. The twelve mottos in `SKILL.md` are quoted from the book's opening spread.
+**Taken from the book:** its ideas — the rules, their names, the page of the 4th edition that covers each one, and the situations its examples show. The twelve mottos in `SKILL.md` are quoted from the book's opening spread.
 
-**Not taken from the book:** its text, examples and word lists. Every rule is restated in our own words, every example was written for this skill, and each word list is a short selection of common markers.
+**How it is used:** every rule is restated in our own words. The book's examples are retold in new wording with changed details (marked «Пример по книге»), next to examples written for this skill. The word lists are the everyday vocabulary the book flags, grouped and ordered our own way. The book's text is not reproduced.
 
-The repository's MIT license covers the wording of this skill. The method belongs to its authors; for the full method, with its reasoning and the authors' examples, read the book.
+The repository's MIT license covers the wording of this skill. The method belongs to its authors; for the full method and its reasoning, read the book.
