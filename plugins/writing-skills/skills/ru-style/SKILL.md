@@ -1,6 +1,6 @@
 ---
 name: ru-style
-description: "Write, check, fix and score Russian text — typography, grammar, punctuation and style — by «Пиши, сокращай» (Ильяхов, Сарычева) and the ru-text rule set. Use when composing or restructuring text someone reads to decide or act: a design or spec, a brainstorm's questions and options, a report, memo, status update, proposal, work email or slides; when asked to proofread or fix Russian text (вычитай, проверь текст, поправь, отредактируй, причеши); when a score is wanted (оцени текст); and silently for typography on any Russian output."
+description: "Write, check, fix and score Russian text — typography, grammar, punctuation and style — by «Пиши, сокращай» (Ильяхов, Сарычева) and the ru-text rule set. Use when composing or restructuring text someone reads to decide or act: a design or spec, a brainstorm's questions and options, a report, memo, status update, proposal, work email or slides; when asked to proofread or fix Russian text (вычитай, проверь текст, поправь, отредактируй, причеши); when a score is wanted (оцени текст); when the user cites the book or Ильяхов; and silently for typography on any Russian output."
 ---
 
 # ru-style
@@ -22,22 +22,25 @@ Apply to all Russian output, silently: fix, don't announce. A person's explicit 
 | Digit groups with thin spaces | 1000000 | 1 000 000 |
 | Decimal comma (not dot) | 3.14 | 3,14 |
 | Ordinal with hyphen | 1ый, 2ой | 1-й, 2-й |
-| Numero sign | No. 5, #5 | № 5 |
-| Abbreviations with NBSP | т.д., т.е. | т. д., т. е. |
+| Numero sign | No. 5, #5 | № 5 |
+| Abbreviations with NBSP | т.д., т.е. | т. д., т. е. |
 | Ruble sign after number, NBSP | 1500₽ | 1 500 ₽ |
 | Percent glued (non-GOST) | 100 % | 100% |
 
 Dashes: at most 1–2 per paragraph — a parallel row counts as one, dialogue dashes as none; trim to the limit, not to zero. Full rules: `references/typography.md`.
 
+In a file, non-breaking spaces follow Fix's rule: insert them only when the person asked for typesetting or the format keeps them.
+
 ## Modes
 
-Pick one mode per request.
+Pick one mode per request. One combination is allowed: Write, then self-review of the draft before it goes out.
 
 | The request | Mode |
 |---|---|
-| Compose or restructure a text | Write |
-| «вычитай», «проверь текст», a gate that names this skill; or your own Russian output before it goes out | Check |
-| «поправь», «отредактируй», «причеши», "fix the text in <file>" | Fix |
+| Compose a text, or rewrite or restructure a given text into a new one | Write |
+| Your own draft before it goes out — after Write, or any Russian reply | Self-review (in Check): triage depth, fixes applied silently, no report |
+| A person asks to have a text checked: «вычитай», «проверь текст», a gate that names this skill | Check |
+| A request to edit a given text: «поправь», «отредактируй», «причеши», "fix the text in <file>" | Fix |
 | «оцени текст», a number is wanted | Score |
 
 ### Write
@@ -97,7 +100,9 @@ The Fix column is enough to apply each row; open the cited rule only when a case
 
 ### Check
 
-Check reports; it never edits the analysed text or file. It runs at one of two depths, chosen by these rules, not by preference.
+Check reports; it never edits the analysed text or file. It is for text a person asks to have checked. It runs at one of two depths, chosen by these rules, not by preference. When the host can run a subagent, run a full Check or a Score in one and return only the report — the full rule set is large (~300k characters) and does not belong in the caller's context.
+
+**Self-review** — your own draft before it goes out: after Write, or before any Russian reply. Check it at triage depth, escalating by triage's rules; fix the draft silently and append no report. It is the one path that edits, because the text is yours.
 
 **Full** — whenever a person asked for the check, a gate names this skill, or triage escalated. An explicit request is never answered with triage. Read, in order:
 
@@ -105,10 +110,11 @@ Check reports; it never edits the analysed text or file. It runs at one of two d
 2. Quick table — `anti-patterns.md`: bureaucratese and nominalization, passive voice, sentence bloat, tautology and pleonasm.
 3. Words and sentences — `word.md` (stop words, vagueness, jargon, ratings, clichés, numbers) and `sentence.md` (who acts, overloaded sentences, paragraphs and lists, bureaucratese).
 4. Text — `text.md`, plus `working-docs.md` for a spec, report or memo: reader and useful action, structure, intro and ending, tone, depth.
-5. Domain, when the text type is clear — interface text: `ux-writing.md`; email, messenger, meeting notes: `business-writing.md`; grammar: `editorial-grammar.md` and `editorial-punctuation.md`; a genre: `genres.md`.
-6. Machine-written prose — `ai-text.md`: the «Neuroslop index», then the AD rules with their carve-outs. AD-14 and AD-15 are charged to the document as a whole, not to a sentence.
+5. Grammar and punctuation, always — `editorial-grammar.md` (capitalization, agreement, pleonasm, lists, numbers in text) and `editorial-punctuation.md` (commas, dashes and colons in complex sentences).
+6. Domain, when the text type is clear — interface text: `ux-writing.md`; email, messenger, meeting notes: `business-writing.md`; a genre: `genres.md`.
+7. Machine-written prose — `ai-text.md`: the «Neuroslop index», then the AD rules with their carve-outs. AD-14 and AD-15 are charged to the document as a whole, not to a sentence.
 
-**Triage** — only for a self-initiated check of your own or found text when no instruction names this skill. Load three things: this SKILL.md, the «Neuroslop index» section of `ai-text.md`, and all of `word.md` and the «Примеры канцелярита» entry of `sentence.md`. Report only what one line decides: typography and confirmed catalogue hits; judge inflected forms yourself («данные» the noun is not «данный»). A neuroslop tell is never a triage finding — it is a reason to escalate. Escalate to full, silently, when a neuroslop candidate appears, five findings are confirmed, or the text is bound for a reader. A triage report names itself: «Быстрая проверка: типографика и стоп-слова. Полная вычитка не выполнялась.»
+**Triage** — only for a self-initiated check of your own or found text when no instruction names this skill. An instruction names it when it asks to check or proofread a text («вычитай», «проверь»); a standing instruction to use this skill for all Russian text does not. No search tool on this host → no triage: run the full check. Load four things: this SKILL.md; the «Neuroslop index» section of `ai-text.md`; the `word.md` entries «Стоп-слова», «Вводные конструкции», «Неопределённое», «Общеизвестное», «Навязанные оценки», «Усилитель», «Рекламные штампы», «Паразиты времени», «Заумные слова»; the «Примеры канцелярита» entry of `sentence.md`. Report only what one line decides: typography and confirmed catalogue hits; judge inflected forms yourself («данные» the noun is not «данный»). A neuroslop tell is never a triage finding — it is a reason to escalate. Escalate to full, silently, when a neuroslop candidate appears, five findings are confirmed, or the text is a deliverable the person will publish or send on (a document, a post, a letter); a chat reply is not one. A triage report names itself: «Быстрая проверка: типографика и стоп-слова. Полная вычитка не выполнялась.»
 
 **Output:** the corrected text; then the changes grouped by category (typography / style / grammar / domain), each with its severity (critical / high / medium / low) and the rule behind it (file and section).
 
@@ -118,11 +124,11 @@ Run Check at full depth, then apply the corrections to the text or file the pers
 
 ### Score
 
-Read-only, like Check.
+Read-only, like Check, and run in a subagent the same way when the host can.
 
 1. Read `scoring.md` for the rubric and its anchors.
 2. Identify the domain: interface text adds `ux-writing.md`, business email adds `business-writing.md` to the reader-precision dimension.
-3. Score each dimension 0.0–10.0, quoting 1–3 fragments: Т типографика (0.15; `typography.md`), Ч чистота языка (0.25; `word.md`, `sentence.md`, `anti-patterns.md`), Г грамотность (0.20; `editorial-grammar.md`, `editorial-punctuation.md`), С структура (0.20; `text.md`, `ai-text.md`), Ц точность для читателя (0.20; the domain file).
+3. Score each dimension 0.0–10.0, quoting 1–3 fragments: Т типографика (0.15; `typography.md`), Ч чистота языка (0.25; `word.md`, `sentence.md`, `anti-patterns.md`), Г грамотность (0.20; `editorial-grammar.md`, `editorial-punctuation.md`), С структура (0.20; `text.md`, `ai-text.md`), Ц точность для читателя (0.20; the domain file). If a dimension has no issues, write «Замечаний нет».
 4. Caps: any dimension below 3.0 → total at most 5.0; typography or grammar below 4.0 → total at most 7.0; the strictest cap wins.
 5. S = round₁(Т×0.15 + Ч×0.25 + Г×0.20 + С×0.20 + Ц×0.20). Under 50 words, open with a reliability caveat.
 6. Report exactly in the shape of `scoring.md` «Output format».
@@ -146,10 +152,10 @@ Read-only, like Check.
 | `references/genres.md` | text about yourself, company text, press release, cold letter, slides, landing page | that genre |
 | `references/typography.md` | quotes, dashes, spaces, ellipsis, numbers and dates | Check step 1; any typesetting question |
 | `references/anti-patterns.md` | the wrong → right quick table | Check step 2 |
-| `references/editorial-grammar.md` | capitalization, agreement, pleonasm, lists, numbers in text | grammar; Score Г |
-| `references/editorial-punctuation.md` | commas, dashes and colons in complex sentences | punctuation; Score Г |
+| `references/editorial-grammar.md` | capitalization, agreement, pleonasm, lists, numbers in text | Check step 5; Score Г |
+| `references/editorial-punctuation.md` | commas, dashes and colons in complex sentences | Check step 5; Score Г |
 | `references/ux-writing.md` | buttons, errors, empty states, hints, notifications, forms | interface text |
 | `references/business-writing.md` | email, messenger, tone, meeting notes, saying no | business correspondence |
-| `references/ai-text.md` | the neuroslop index and AD-1…AD-18 | Check step 6; triage |
+| `references/ai-text.md` | the neuroslop index and AD-1…AD-18 | Check step 7; triage |
 | `references/scoring.md` | the 0–10 rubric and its report shape | Score |
 | `references/sources.md` | credits | — |

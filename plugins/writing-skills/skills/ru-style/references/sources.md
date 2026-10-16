@@ -1,14 +1,21 @@
 # Sources and Attribution
 
-This plugin would not exist without the extraordinary work of the people listed
-below. Their books, articles, and tools have transformed the culture of Russian
-text on the internet, raising standards for millions of readers and writers.
-Thank you for your dedication and generosity in sharing knowledge.
+ru-style joins two bodies of work.
 
-All formulations in this plugin are the author's own. No content is quoted
-verbatim. Listed authors and publishers have not endorsed, reviewed, or
-approved this plugin. References are provided for further study and as a
-tribute to the works that inspired this project.
+**ru-text** by Arseniy Kamyshev supplies the typography, grammar, punctuation,
+anti-pattern, AI-text, UX-writing, business-writing and scoring material. Those
+formulations are his, used under the MIT License (see «Merged into ru-style»
+below). The sixteen sources listed below are the ones ru-text credits; ru-text
+states that its formulations are its author's own and that it quotes none of
+them verbatim.
+
+**«Пиши, сокращай»** (entry 6) supplies the composition method — reader,
+structure, sentences, words. Its rules are restated in this skill's own words.
+The twelve mottos in `SKILL.md` are quoted from the book's opening spread.
+
+Listed authors and publishers have not endorsed, reviewed, or approved this
+skill. References are provided for further study and as a tribute to the works
+that inspired it.
 
 ## Branch 1 — Typography
 
@@ -20,7 +27,7 @@ tribute to the works that inspired this project.
 
 ## Branch 2 — Info-Style and Clear Writing
 
-6. **Максим Ильяхов «Пиши, сокращай»** (2017, updated 2025) — foundation of info-style: removing filler, fighting канцелярит, reader-first writing — [buy: book.glvrd.ru](https://book.glvrd.ru)
+6. **Максим Ильяхов, Людмила Сарычева «Пиши, сокращай»** (4-е изд., Альпина Паблишер, 2024) — foundation of info-style: removing filler, fighting канцелярит, reader-first writing — [buy: book.glvrd.ru](https://book.glvrd.ru)
 7. **Максим Ильяхов «Ясно, понятно»** (2019) — advanced info-style: text structure, persuasion, visual-textual integration — [buy: book.glvrd.ru](https://book.glvrd.ru)
 8. **Редполитика Т–Ж** (2017–present, 56+ pages) — tone of voice, formatting, numbers, business writing standards — [journal.tinkoff.ru/manual/](https://journal.tinkoff.ru/manual/)
 9. **Контур — Гайды** (2020–present) — UX writing for B2B software: interface text, errors, onboarding — [guides.kontur.ru](https://guides.kontur.ru)
@@ -43,4 +50,4 @@ tribute to the works that inspired this project.
 
 ## Merged into ru-style
 
-The typography, grammar, punctuation, anti-pattern, AI-text, UX-writing, business-writing and scoring material in this skill comes from **ru-text** by Arseniy Kamyshev (https://github.com/talkstream/ru-text), MIT License, Copyright (c) 2026 Arseniy Kamyshev. The composition method — reader, structure, sentences, words — comes from Максим Ильяхов, Людмила Сарычева «Пиши, сокращай: Как создавать сильный текст», 4-е изд., Альпина Паблишер, 2024.
+The typography, grammar, punctuation, anti-pattern, AI-text, UX-writing, business-writing and scoring material in this skill comes from **ru-text** by Arseniy Kamyshev (https://github.com/talkstream/ru-text, merged at commit `2117f7d675b209497cf07f0d82e8403363909a7a`), MIT License, Copyright (c) 2026 Arseniy Kamyshev. The composition method — reader, structure, sentences, words — comes from Максим Ильяхов, Людмила Сарычева «Пиши, сокращай: Как создавать сильный текст», 4-е изд., Альпина Паблишер, 2024.

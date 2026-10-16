@@ -296,10 +296,8 @@ their canonical home: they are the lists a checker walks. Count such a fragment 
 **Ч — Clarity**, and do not report it twice because it appears in two files. Where a row
 below overlaps an entry of `word.md` or `sentence.md`, it gives that entry's replacement.
 
-The other thirty-six are here and nowhere else. Measured on 28.07.2026: 42 entries here,
-92 in the stop-word catalogue those entries now carry, 6 in both. A plan step that would have
-replaced this section with a pointer to the catalogue was written on the assumption that it
-mostly duplicated it; it does not, and following it would have deleted thirty-six rules.
+These are ru-text's counts on 28.07.2026: 42 entries here, 92 in its stop-word catalogue,
+6 in both. The section is not a copy of the catalogue.
 
 dead|live
 произвести ремонт|отремонтировать

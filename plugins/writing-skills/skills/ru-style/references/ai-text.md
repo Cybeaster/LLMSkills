@@ -1,10 +1,10 @@
 # Addenda — rules added from usage experience
 
-The rules below were added later, from real editorial practice, and were not part of the
-plugin's initial rule set. Like the rest of the plugin, they are independently formulated; the
-16 sources in `sources.md` informed the work, but no rule is taken or copied from them. They are
-supported by academic references. Kept separate for traceability: initial rule set vs. experiential
-additions.
+The rules below are ru-text's addenda: its author added them later, from real editorial practice,
+and they were not part of ru-text's initial rule set. They are the ru-text author's own
+formulations; the 16 sources in `sources.md` informed the work, but no rule is taken or copied from
+them. They are supported by academic references. Kept separate for traceability: initial rule set
+vs. experiential additions.
 
 ## Table of Contents
 
@@ -215,7 +215,7 @@ AD-2.4. Diagnostic test: read aloud. If several consecutive sentences are subjec
 
 **Severity:** Low. Secondary signal in the **С — Structure** dimension (supporting **Ч — Clarity**). Cannot trigger non-compensatory caps alone.
 
-**Acknowledged:** proposed by @V8-Software in issue #9 (2026-04-16).
+**Acknowledged:** proposed in ru-text issue #9 (github.com/talkstream/ru-text, 2026-04-16).
 
 ---
 
@@ -248,7 +248,7 @@ AD-3.3. Qualifiers like «то есть», «другими словами», «
 
 **Severity:** Low. Secondary signal in the **Ч — Clarity** dimension. Cannot trigger non-compensatory caps alone.
 
-**Acknowledged:** proposed by @V8-Software in issue #9 (2026-04-16) as «Примитивизация»; renamed to avoid terminological collision with `text.md` «Информационный стиль: кратко, ясно, убедительно».
+**Acknowledged:** proposed in ru-text issue #9 (github.com/talkstream/ru-text, 2026-04-16) as «Примитивизация»; renamed to avoid terminological collision with `text.md` «Информационный стиль: кратко, ясно, убедительно».
 
 ---
 
@@ -286,7 +286,7 @@ AD-4.3. Legitimate use: rebutting a cited source, an earlier paragraph of the sa
 
 **Severity:** Low. Secondary signal in the **С — Structure** dimension (supporting **Ч — Clarity**). Cannot trigger non-compensatory caps alone.
 
-**Acknowledged:** proposed by @V8-Software in issue #9 (2026-04-16).
+**Acknowledged:** proposed in ru-text issue #9 (github.com/talkstream/ru-text, 2026-04-16).
 
 ---
 
@@ -335,7 +335,7 @@ AD-5.3. Apply the diagnostic: would a reader infer conscious will or resistance 
 
 **Severity:** Low. Secondary signal in the **Ч — Clarity** dimension (supporting **Г — Grammar**), with explicit technical-context exception. Cannot trigger non-compensatory caps alone.
 
-**Acknowledged:** proposed by @V8-Software in issue #9 (2026-04-16) with the example «Алгоритм стремится → Алгоритм становится». That example is preserved here as a *counter-example* illustrating the exception boundary, per deep-research review of mathematical and ML usage norms.
+**Acknowledged:** proposed in ru-text issue #9 (github.com/talkstream/ru-text, 2026-04-16) with the example «Алгоритм стремится → Алгоритм становится». That example is preserved here as a *counter-example* illustrating the exception boundary, per deep-research review of mathematical and ML usage norms.
 
 
 ---
@@ -552,7 +552,7 @@ AD-9.2. Rewrite by deleting the flourish and promoting the first substantive sen
 
 AD-9.3 (single-count with the `word.md` stop-words). The throat-clearing openers «стоит отметить, что», «следует подчеркнуть», «нельзя не отметить» (`word.md` «Стоп-слова»), «не секрет, что» (`word.md` «Общеизвестное») and «в современном мире» (`word.md` «Паразиты времени») are already stop-words — apply them there and count once. AD-9 adds the dive-in family («давайте разберёмся», «погрузимся», «важно понимать») not listed in `word.md`, plus the cluster signal. Never charge one fragment to both `word.md` and AD-9.
 
-AD-9.4 (carve-out — genuine connective). «Итак» as a real summative connective that closes a reasoning chain, or a resumptive connective that picks up a narrative thread (cf. `editorial-punctuation.md:119`), is not flagged; only the empty opener «Итак,» that introduces nothing.
+AD-9.4 (carve-out — genuine connective). «Итак» as a real summative connective that closes a reasoning chain, or a resumptive connective that picks up a narrative thread (cf. the «итак» row of `editorial-punctuation.md` «B. Comma traps»: «introductory, conclusion»), is not flagged; only the empty opener «Итак,» that introduces nothing.
 
 AD-9.5 (carve-out — real tutorial). «Давайте разберём» / «давайте посмотрим» in a genuine step-by-step walkthrough, where the next sentence actually begins with concrete steps, is not flagged. The target is the decorative promise with no follow-through.
 
@@ -573,7 +573,7 @@ AD-9.7 (carve-out — dialogue register). «Давайте разберёмся�
 
 | Acceptable | Reason |
 |---|---|
-| Итак, из трёх замеров следует: задержка не выше 200 мс. | Genuine summative connective closing a chain (cf. editorial-punctuation.md:119). |
+| Итак, из трёх замеров следует: задержка не выше 200 мс. | Genuine summative connective closing a chain (cf. the «итак» row of `editorial-punctuation.md`: «introductory, conclusion»). |
 | Давайте разберём по шагам. Шаг 1: откройте файл. | Real tutorial; the next sentence delivers concrete steps. |
 | Важно понимать разницу между TCP и UDP — от неё зависит выбор протокола. | The «важно» clause carries a real consequence (cf. AD-7.4). |
 
@@ -849,7 +849,7 @@ AD-14.5 (relationship to AD-8 — not a double charge). AD-8 flags individual as
 
 AD-14.6 (carve-out — human dialogue). An interview, a Q&A with a human respondent, a play, a chat-support excerpt, a quoted exchange: dialogue between people is a genre, not a tell (cf. AD-8.4).
 
-AD-14.7 (carve-out — the transcript was what was asked for). Where the user's brief is a transcript — documentation of a session, a teaching example showing prompts and outputs — the style priority stated in `SKILL.md` applies and these defaults do not override the request.
+AD-14.7 (carve-out — the transcript was what was asked for). Where the user's brief is a transcript — documentation of a session, a teaching example showing prompts and outputs — the style-request rule in `SKILL.md` «Always on: typography» applies and these defaults do not override the request.
 
 **Examples:**
 
@@ -899,7 +899,7 @@ AD-15.1. Charge the document when all three hold: (1) a query phrase is repeated
 
 AD-15.2. Rewrite by answering the question once and with specifics: name the options and the criterion by which one is chosen, with prices where they decide it.
 
-AD-15.3 (carve-out — the user's explicit brief). Where the user asks for SEO copy, the style priority stated in `SKILL.md` applies: their request overrides these defaults. State what the trade-off costs and write what was asked.
+AD-15.3 (carve-out — the user's explicit brief). Where the user asks for SEO copy, the style-request rule in `SKILL.md` «Always on: typography» applies: their request overrides these defaults. State what the trade-off costs and write what was asked.
 
 AD-15.4 (carve-out — functional repetition). Technical writing repeats an identifier because a pronoun would be ambiguous — «поле `updated_at` меняется при каждой записи, поле `created_at` — нет». Reference works, glossaries and legal texts repeat the term by design. The defect is the addressee, not the repetition.
 

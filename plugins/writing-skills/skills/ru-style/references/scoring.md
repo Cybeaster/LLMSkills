@@ -1,7 +1,7 @@
 # Scoring: text quality assessment (0–10)
 
 Analytic rubric for evaluating Russian text quality across 5 dimensions.
-Context-aware LLM evaluation against a corpus of over 2,000 independently formulated linguistic atoms (informed by 16 published sources; see sources.md).
+Context-aware LLM evaluation against this skill's rule set: the book's rules and ru-text's corpus of over 2,000 linguistic atoms (informed by 16 published sources; see sources.md).
 
 ## Table of Contents
 
