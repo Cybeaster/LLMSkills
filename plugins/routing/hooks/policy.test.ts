@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { check, merge, rank, MODELS, EFFORTS, type Policy } from './policy.ts'
+import { check, merge, rank, ruleText, denyText, MODELS, EFFORTS, type Policy } from './policy.ts'
 
 const P: Policy = {
   classes: {
@@ -64,4 +64,19 @@ test('layers override per field', async () => {
   expect(m.classes.search).toEqual({ model: 'opus', effort: 'low' })
   expect(m.classes.review).toEqual(P.classes.review)
   expect(m.spawn).toEqual({ model: 'opus', effort: 'high' })
+})
+
+test('the rule text carries every class, the spawn floor and the workflow rule', async () => {
+  const t = ruleText(P)
+  expect(t).toMatch(/\| `\[search\]` \| haiku \| low \|/)
+  expect(t).toMatch(/\| `\[review\]` \| fable \| xhigh \|/)
+  expect(t).toMatch(/opus \/ xhigh/)
+  expect(t).toMatch(/opts\.model.*opts\.effort/)
+  expect(t).toMatch(/\[override\]/)
+})
+
+test('the deny text says why and shows the table', async () => {
+  const t = denyText(P, 'description has no [class] tag')
+  expect(t).toMatch(/^routing: description has no \[class\] tag/)
+  expect(t).toMatch(/\| `\[content\]` \| opus \| xhigh \|/)
 })

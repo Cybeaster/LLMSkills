@@ -46,3 +46,25 @@ export function check(p: Policy, c: Call): Verdict {
   if (c.effort === 'max') return { ok: false, cls, reason: 'effort max needs [override]: use it only when the user asked for max' }
   return { ok: true, cls, override: false }
 }
+
+export function table(p: Policy): string {
+  const rows = Object.entries(p.classes).map(([k, f]) => `| \`[${k}]\` | ${f.model} | ${f.effort} | ${f.what ?? ''} |`)
+  return ['| Tag | Model (min) | Effort (min) | For |', '| --- | --- | --- | --- |', ...rows].join('\n')
+}
+
+export function ruleText(p: Policy): string {
+  return [
+    '# Delegation routing',
+    'This is the explicit instruction the Agent tool\'s `effort` parameter asks for: every delegation names its model and effort from this table.',
+    '- **Agent tool:** start `description` with one class tag, then pass `model` and `effort` at or above that class\'s minimum. Stronger is always allowed; weaker is denied. `subagent_type: "fork"` is exempt.',
+    table(p),
+    `- **Workflow scripts:** every \`agent()\` call passes \`opts.model\` and \`opts.effort\` from the same table (a missing model becomes ${p.workflowModel}).`,
+    `- **Spawned sessions** (\`orch spawn-child\`, herdr): ${p.spawn.model} / ${p.spawn.effort} unless the user names a model. orch applies it; for a bare herdr start pass \`-- --model ${p.spawn.model} --effort ${p.spawn.effort}\`.`,
+    '- **[override]** after the tag lets a call go below its minimum or use `max`. Add it only when the user explicitly asked for that model or effort; it is logged.',
+    '- **Escalation:** when a delegated result fails verification (tests red, reviewer rejects), retry once one step up in model or effort, never past fable / xhigh unless the user asks.',
+  ].join('\n')
+}
+
+export function denyText(p: Policy, reason: string): string {
+  return `routing: ${reason}. Retry with a class tag at the start of \`description\` and \`model\` + \`effort\` at or above its minimum:\n${table(p)}`
+}
