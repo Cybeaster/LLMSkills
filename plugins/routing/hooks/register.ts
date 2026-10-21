@@ -1,6 +1,6 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { check, denyText, merge, ruleText, type Layer, type Policy } from './policy.ts'
-import { logPath, makeLogger } from './log.ts'
+import { logPath } from './log.ts'
 
 async function readJson<T>($: EngineInterface, path: string): Promise<T | undefined> {
   try {
@@ -16,25 +16,45 @@ async function loadPolicy($: EngineInterface): Promise<Policy> {
   const base = await readJson<Policy>($, `${$.plugin.root}/policy.json`)
   if (!base) throw new Error('routing: the plugin policy.json is missing or broken')
   const user = home ? await readJson<Layer>($, `${home}/.claude/routing/policy.json`) : undefined
-  return merge(base, user, await readJson<Layer>($, '.claude/routing.json'))
+  return merge(base, user, await readJson<Layer>($, await projectFile($)))
+}
+
+// <project root>/.claude/routing.json, so a subagent or a shell `cd` elsewhere still finds it; relative if the root is unknown
+async function projectFile($: EngineInterface): Promise<string> {
+  const root = await $.session.root().catch(() => '')
+  return root ? `${root.replace(/\/+$/, '')}/.claude/routing.json` : '.claude/routing.json'
 }
 
 // One chain for every row: $.fs has no append, so two hooks must never read-modify-write the file at once.
 let tail: Promise<void> = Promise.resolve()
 
 function logRow($: EngineInterface, row: object): Promise<void> {
-  const fs = {
-    exists: (p: string) => $.fs.exists(p),
-    read: (p: string) => $.fs.read(p),
-    write: (p: string, t: string) => $.fs.write(p, t),
-  }
-  const path = async () => logPath((await $.env.get('HOME')) ?? '', new Date(), await $.session.id())
-  tail = tail.then(() => makeLogger(fs, path)(row))
+  tail = tail
+    .then(async () => {
+      const path = logPath((await $.env.get('HOME')) ?? '', new Date(), await $.session.id())
+      const prev = (await $.fs.exists(path)) ? await $.fs.read(path) : ''
+      await $.fs.write(path, prev + JSON.stringify(row) + '\n')
+    })
+    .catch(() => {}) // a lost row never fails the call it describes
   return tail
+}
+
+// workflow agents whose first turn.step has not come yet; a remote agent never steps, so the oldest are dropped
+const PENDING_CAP = 500
+const pending = new Set<string>()
+
+function awaitFirstStep(agentId: string) {
+  pending.add(agentId)
+  for (const id of pending) {
+    if (pending.size <= PENDING_CAP) break
+    pending.delete(id)
+  }
 }
 
 export const register: Register = on => {
   on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
+    // only the model's own calls are held to the table; another plugin's programmatic call passes
+    if (next.origin.plugin !== 'engine') return next(e)
     const p = await loadPolicy($)
     const v = check(p, e)
     const row = { ts: new Date().toISOString(), surface: 'agent', cls: v.cls, model: e.model, effort: e.effort, subagentType: e.subagent_type, label: e.description }
@@ -47,27 +67,23 @@ export const register: Register = on => {
     return ran
   }).catch(($, e, next) => next(e)) // fail open: routing is cost and quality, not security
 
-  // a workflow agent's first request is the first place its real effort shows
-  const pending = new Map<string, object>()
-
   on('agent.spawn', async ($, e, next) => {
     if (!e.workflow || e.resume) return next(e)
     const p = await loadPolicy($)
     const model = e.model ?? p.workflowModel
     const r = await next({ ...e, model })
-    const row = { ts: new Date().toISOString(), surface: 'workflow', runId: e.workflow.runId, agentIndex: e.workflow.agentIndex, label: e.description, model, verdict: e.model ? 'allow' : 'filled' }
+    const row = { ts: new Date().toISOString(), surface: 'workflow', runId: e.workflow.runId, agentIndex: e.workflow.agentIndex, label: e.description, model }
     if (r.deny !== undefined) await logRow($, { ...row, verdict: 'deny', reason: r.deny })
-    else if (r.agentId) pending.set(r.agentId, row)
-    else await logRow($, row) // a remote agent has no local loop, so no turn.step will name it
+    else {
+      await logRow($, { ...row, agentId: r.agentId, verdict: e.model ? 'allow' : 'filled' })
+      if (r.agentId) awaitFirstStep(r.agentId)
+    }
     return r
   }).catch(($, e, next) => next(e))
 
+  // an agent's first request is the first place its real effort shows: a second row, keyed by agentId
   on('turn.step', async function* ($, e, next) {
-    const row = e.agentId ? pending.get(e.agentId) : undefined
-    if (row && e.agentId) {
-      pending.delete(e.agentId)
-      await logRow($, { ...row, effort: e.effort })
-    }
+    if (e.agentId && pending.delete(e.agentId)) await logRow($, { ts: new Date().toISOString(), surface: 'workflow', agentId: e.agentId, verdict: 'effort', effort: e.effort })
     return yield* next(e)
   }).catch(async function* ($, e, next) {
     return yield* next(e)
