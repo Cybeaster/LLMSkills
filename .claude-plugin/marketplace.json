@@ -14,6 +14,11 @@
       "name": "orchestrator",
       "source": "./plugins/orchestrator",
       "description": "One view over every local Claude Code session: task pools with evidence, child sessions under their parent task, a TUI, and /orch for your phone."
+    },
+    {
+      "name": "routing",
+      "source": "./plugins/routing",
+      "description": "Picks the model and effort for delegated work by task class, enforces it on Agent calls, and logs every choice."
     }
   ]
 }

@@ -1,0 +1,13 @@
+{
+  "classes": {
+    "search": { "model": "haiku", "effort": "low", "what": "grep sweeps, finding files, reading logs" },
+    "mechanical": { "model": "haiku", "effort": "medium", "what": "renames, applying a known fix, bulk reformatting" },
+    "implement": { "model": "opus", "effort": "high", "what": "writing code from a clear plan or spec" },
+    "content": { "model": "opus", "effort": "xhigh", "what": "course lessons, interview questions, RU/EN prose" },
+    "review": { "model": "fable", "effort": "xhigh", "what": "code review, audits, adversarial verification of findings" },
+    "design": { "model": "fable", "effort": "xhigh", "what": "specs, root-cause debugging, trade-offs" },
+    "research": { "model": "opus", "effort": "high", "what": "web or docs research with synthesis" }
+  },
+  "spawn": { "model": "opus", "effort": "xhigh" },
+  "workflowModel": "opus"
+}
