@@ -1,5 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { check, denyText, merge, type Layer, type Policy } from './policy.ts'
+import { check, denyText, merge, ruleText, type Layer, type Policy } from './policy.ts'
 import { logPath, makeLogger } from './log.ts'
 
 async function readJson<T>($: EngineInterface, path: string): Promise<T | undefined> {
@@ -46,4 +46,36 @@ export const register: Register = on => {
     await logRow($, { ...row, override: v.override, verdict: v.exempt ? 'exempt' : 'allow', outcome: ran.deny !== undefined ? 'denied' : ran.isError ? 'error' : 'ok' })
     return ran
   }).catch(($, e, next) => next(e)) // fail open: routing is cost and quality, not security
+
+  // a workflow agent's first request is the first place its real effort shows
+  const pending = new Map<string, object>()
+
+  on('agent.spawn', async ($, e, next) => {
+    if (!e.workflow || e.resume) return next(e)
+    const p = await loadPolicy($)
+    const model = e.model ?? p.workflowModel
+    const r = await next({ ...e, model })
+    const row = { ts: new Date().toISOString(), surface: 'workflow', runId: e.workflow.runId, agentIndex: e.workflow.agentIndex, label: e.description, model, verdict: e.model ? 'allow' : 'filled' }
+    if (r.deny !== undefined) await logRow($, { ...row, verdict: 'deny', reason: r.deny })
+    else if (r.agentId) pending.set(r.agentId, row)
+    else await logRow($, row) // a remote agent has no local loop, so no turn.step will name it
+    return r
+  }).catch(($, e, next) => next(e))
+
+  on('turn.step', async function* ($, e, next) {
+    const row = e.agentId ? pending.get(e.agentId) : undefined
+    if (row && e.agentId) {
+      pending.delete(e.agentId)
+      await logRow($, { ...row, effort: e.effort })
+    }
+    return yield* next(e)
+  }).catch(async function* ($, e, next) {
+    return yield* next(e)
+  })
+
+  on('prompt.compose', async ($, e, next) => {
+    const r = await next(e)
+    if (!e.tools.includes('Agent') && !e.tools.includes('Workflow')) return r
+    return { ...r, sections: [...r.sections, { id: 'routing:policy', text: ruleText(await loadPolicy($)), scope: 'session' as const }] }
+  }).catch(($, e, next) => next(e))
 }
