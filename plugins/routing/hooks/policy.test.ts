@@ -80,3 +80,72 @@ test('the deny text says why and shows the table', async () => {
   expect(t).toMatch(/^routing: description has no \[class\] tag/)
   expect(t).toMatch(/\| `\[content\]` \| opus \| xhigh \|/)
 })
+
+test('prototype keys are not classes', async () => {
+  for (const tag of ['constructor', 'toString', 'hasOwnProperty']) {
+    const v = check(P, { description: `[${tag}] x`, model: 'haiku', effort: 'low' })
+    expect(v.ok).toBe(false)
+    expect(!v.ok && v.reason).toMatch(/is not a class/)
+  }
+})
+
+test('max needs [override] in any case', async () => {
+  expect(check(P, { description: '[review] x', model: 'fable', effort: 'MAX' }).ok).toBe(false)
+  expect(check(P, { description: '[review] x', model: 'fable', effort: 'Max' }).ok).toBe(false)
+  expect(check(P, { description: '[review] [override] x', model: 'fable', effort: 'MAX' }).ok).toBe(true)
+})
+
+test('the class tag is read case-insensitively', async () => {
+  expect(check(P, { description: '[Search] x', model: 'haiku', effort: 'low' })).toEqual({ ok: true, cls: 'search', override: false })
+  expect(check(P, { description: '  [REVIEW] x', model: 'fable', effort: 'xhigh' })).toEqual({ ok: true, cls: 'review', override: false })
+})
+
+test('[override] may come before the class tag', async () => {
+  expect(check(P, { description: '[override] [content] x', model: 'sonnet', effort: 'low' })).toEqual({ ok: true, cls: 'content', override: true })
+  expect(check(P, { description: '[override][search] x', model: 'haiku', effort: 'low' })).toEqual({ ok: true, cls: 'search', override: true })
+})
+
+test('the class tag must still open the description', async () => {
+  const bare = check(P, { description: '[override] x', model: 'haiku', effort: 'low' })
+  expect(!bare.ok && bare.reason).toMatch(/no \[class\] tag/)
+  expect(check(P, { description: 'find [search] x', model: 'haiku', effort: 'low' }).ok).toBe(false)
+  expect(check(P, { description: '[override] find [search] x', model: 'haiku', effort: 'low' }).ok).toBe(false)
+})
+
+test('a layer with a bad model or effort cannot weaken or blank a floor', async () => {
+  const bad = { model: null, effort: 'turbo', what: 'x' } as unknown as Record<string, string>
+  const m = merge(
+    P,
+    {
+      classes: {
+        triage: { effort: 'low' },
+        junk: { model: 'gpt-5', effort: 'low' },
+        search: { model: 'gpt-5' },
+        review: bad,
+        content: { model: 7 as unknown as string, effort: 'high' },
+      },
+      spawn: { model: null as unknown as string, effort: 'nope' },
+      workflowModel: 'gpt-5',
+    },
+    { workflowModel: null as unknown as string },
+  )
+  expect(Object.hasOwn(m.classes, 'triage')).toBe(false)
+  expect(Object.hasOwn(m.classes, 'junk')).toBe(false)
+  expect(m.classes.search).toEqual({ model: 'haiku', effort: 'low' })
+  expect(m.classes.review).toEqual({ model: 'fable', effort: 'xhigh', what: 'x' })
+  expect(m.classes.content).toEqual({ model: 'opus', effort: 'high' })
+  expect(m.spawn).toEqual({ model: 'opus', effort: 'xhigh' })
+  expect(m.workflowModel).toBe('opus')
+  const triage = check(m, { description: '[triage] x', model: 'opus', effort: 'high' })
+  expect(!triage.ok && triage.reason).toMatch(/\[triage\] is not a class/)
+  for (const t of [ruleText(m), denyText(m, 'r')]) {
+    expect(t).not.toMatch(/undefined|null/)
+  }
+})
+
+test('a valid new class and valid layer values still apply', async () => {
+  const m = merge(P, { classes: { triage: { model: 'sonnet', effort: 'medium' } }, spawn: { model: 'fable' }, workflowModel: 'sonnet' })
+  expect(m.classes.triage).toEqual({ model: 'sonnet', effort: 'medium' })
+  expect(m.spawn).toEqual({ model: 'fable', effort: 'xhigh' })
+  expect(m.workflowModel).toBe('sonnet')
+})
