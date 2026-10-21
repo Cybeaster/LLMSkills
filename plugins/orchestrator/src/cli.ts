@@ -29,7 +29,7 @@ const HELP = `orch — task pools for Claude Code sessions
   orch status --all [--json]             every session
   orch link <child> <parent> <taskId> [--brief <file>]
                                          attach a session under a parent task
-  orch spawn-child <taskId> --name <n> --cwd <dir> --brief <file> [--prompt <text>]
+  orch spawn-child <taskId> --name <n> --cwd <dir> --brief <file> [--prompt <text>] [--model <m>] [--effort <level>]
   orch reply <session> [--task <id>] -- "text"
                                          answer a session's open question (the -- keeps a text that starts with a dash)
   orch reply <session> [--task <id>] --mark-only
@@ -208,7 +208,7 @@ async function cmdLink(ctx: Ctx, args: string[]): Promise<Out> {
 async function cmdSpawn(ctx: Ctx, args: string[]): Promise<Out> {
   const { values, positionals } = parseArgs({
     args,
-    options: { name: { type: 'string' }, cwd: { type: 'string' }, brief: { type: 'string' }, prompt: { type: 'string' } },
+    options: { name: { type: 'string' }, cwd: { type: 'string' }, brief: { type: 'string' }, prompt: { type: 'string' }, model: { type: 'string' }, effort: { type: 'string' } },
     allowPositionals: true,
   })
   return spawnChild(ctx, {
@@ -217,6 +217,8 @@ async function cmdSpawn(ctx: Ctx, args: string[]): Promise<Out> {
     cwd: need(values.cwd, '--cwd'),
     brief: need(values.brief, '--brief'),
     prompt: values.prompt,
+    model: values.model,
+    effort: values.effort,
   })
 }
 

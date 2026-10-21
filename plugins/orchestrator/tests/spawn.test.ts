@@ -14,6 +14,33 @@ function parent(ctx: TestCtx) {
 }
 
 describe('orch spawn-child', () => {
+  it('starts the child on the policy spawn default, flags first', async () => {
+    const ctx = makeCtx()
+    Object.assign(ctx.env, { HERDR_ENV: '1', HERDR_WORKSPACE_ID: 'w1' })
+    parent(ctx)
+    mkdirSync(join(ctx.claudeHome, 'routing'), { recursive: true })
+    writeFileSync(join(ctx.claudeHome, 'routing', 'policy.json'), JSON.stringify({ spawn: { model: 'fable' } }))
+    await run(['spawn-child', 't2', '--name', 'a', '--cwd', '.', '--brief', 'brief.md'], ctx)
+    expect(ctx.herdr.calls[1].slice(-4)).toEqual(['--model', 'fable', '--effort', 'xhigh'])
+    await run(['spawn-child', 't2', '--name', 'b', '--cwd', '.', '--brief', 'brief.md', '--model', 'haiku', '--effort', 'low'], ctx)
+    expect(ctx.herdr.calls.find(c => c[0] === 'startClaude' && c[1] === 'b')!.slice(-4)).toEqual(['--model', 'haiku', '--effort', 'low'])
+  })
+
+  it('puts the model and effort in the command printed outside herdr', async () => {
+    const ctx = makeCtx()
+    parent(ctx)
+    const out = await run(['spawn-child', 't2', '--name', 'go', '--cwd', '.', '--brief', 'brief.md'], ctx)
+    expect(out.stdout).toMatch(/claude --remote-control='go' --model 'opus' --effort 'xhigh' '/)
+  })
+
+  it('refuses an effort that is not a level', async () => {
+    const ctx = makeCtx()
+    parent(ctx)
+    const out = await run(['spawn-child', 't2', '--name', 'go', '--cwd', '.', '--brief', 'brief.md', '--effort', 'huge'], ctx)
+    expect(out.code).toBe(1)
+    expect(out.stderr).toMatch(/--effort must be one of low, medium, high, xhigh, max/)
+  })
+
   it('opens a herdr tab, links the child, then sends the intro', async () => {
     const ctx = makeCtx()
     Object.assign(ctx.env, { HERDR_ENV: '1', HERDR_WORKSPACE_ID: 'w1' })
@@ -23,7 +50,7 @@ describe('orch spawn-child', () => {
     expect(out.code).toBe(0)
     expect(JSON.parse(out.stdout)).toEqual({ sessionId: 's-child', agent: 'course-go-2', paneId: 'w9:p1' })
     expect(ctx.herdr.calls[0]).toEqual(['createTab', 'w1', ctx.cwd, 'course-go-2'])
-    expect(ctx.herdr.calls[1]).toEqual(['startClaude', 'course-go-2', 'w9:p1', '--remote-control', 'course-go-2'])
+    expect(ctx.herdr.calls[1]).toEqual(['startClaude', 'course-go-2', 'w9:p1', '--remote-control', 'course-go-2', '--model', 'opus', '--effort', 'xhigh'])
     const [, target, intro] = ctx.herdr.calls[2]
     expect(target).toBe('course-go-2')
     expect(intro).toMatch(/child session of "Courses".*t2: "Course per language".*Read .*brief\.md first/s)
