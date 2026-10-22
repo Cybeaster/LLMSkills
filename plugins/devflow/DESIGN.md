@@ -54,24 +54,31 @@ State: `~/.claude/state/devflow/<session_id>.json` (outside every repo, so workt
 share nothing and nothing dirties git). Every mode fails open: bad stdin, no `jq`, no config → exit 0, silent.
 
 - **prompt** (UserPromptSubmit): a feature-shaped prompt (positive verbs build/add/implement/new
-  feature/сделай/добавь/фича…, with negatives anchored at the start: `^(fix|how|what|why|почему|как)\b`,
-  and `test`/`тест` excluded) arms the session once and injects: "Feature work here goes through
-  devflow:requirements → devflow:design (not grilling / superpowers:brainstorming)."
+  feature/сделай/добавь/фича…, plus brainstorm / design doc / спроектир…, with negatives anchored at the
+  start: `^(fix|how|what|why|почему|как|что|зачем|исправь|почини|поправь)\b`, and `test`/`тест`
+  excluded) arms the session once and injects: "Feature work here goes through
+  devflow:requirements → devflow:design (not grilling / superpowers:brainstorming)." `[no-devflow]` in a
+  prompt disarms the session for good; a typed `/impeccable critique …` stamps `critique_at`.
 - **skill** (PostToolUse Skill): records `requirements_at`, `design_at`, `plan_at`, `critique_at`
   (`impeccable:impeccable` whose args contain `critique`, or `/impeccable critique`). At
-  `devflow:requirements` start and at the `writing-plans` / `executing-plans` /
-  `subagent-driven-development` hand-off, if `analyticsSkill` is set: one reminder to run it and put
-  the **Analytics delta** in the spec / plan.
+  `devflow:requirements` start, if `analyticsSkill` is set: one reminder to run it and put the
+  **Analytics delta** in the spec. At the `writing-plans` / `executing-plans` /
+  `subagent-driven-development` hand-off: one reminder that the plan repeats both delta lines, naming
+  `analyticsSkill` when it is set.
 - **edit** (PreToolUse Edit|Write|MultiEdit|NotebookEdit):
   - a path under `specDir` → remember it as this session's spec;
   - a path under `codePaths` while armed → deny unless this session's spec exists on disk with
     `## Решения`, `## Дизайн` and `## Work split` (checked on disk at that moment, so Edit and Write
     are judged the same and no unrelated file unlocks it); the deny names what is missing;
   - a path under `uiPaths` with a `uiExtensions` suffix → `ui_edit_at = now`.
+  - no `codePaths` → no gate; no `uiExtensions` → every file under `uiPaths` counts.
 - **bash** (PreToolUse Bash): `git worktree add` outside `<repo>/<worktreeDir>/` is denied (ported).
+  `<repo>` is the main worktree; the path resolves against the cwd (or `-C`), and one nested inside an
+  existing worktree is denied too.
 - **stop** (Stop): if `ui_edit_at > critique_at` → block once with "UI changed since the last
   impeccable critique: run `impeccable:impeccable` critique and fix what it finds"; `stop_hook_active`
-  prevents a loop. Nothing else blocks Stop.
+  prevents a loop. If a critique ran after that block, the continuation Stop counts the fixes made since
+  as critiqued. Nothing else blocks Stop.
 
 ## Done means
 

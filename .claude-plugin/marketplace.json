@@ -6,6 +6,11 @@
   },
   "plugins": [
     {
+      "name": "devflow",
+      "source": "./plugins/devflow",
+      "description": "Feature work in one flow: requirements in rounds, one design doc carrying every decision, code gated on that doc, UI critiqued before it ships, analytics asked about at the hand-offs."
+    },
+    {
       "name": "learning-skills",
       "source": "./plugins/learning-skills",
       "description": "Skills for learning to code: mentoring a beginner through building their first project, and explaining unfamiliar codebases from zero."
