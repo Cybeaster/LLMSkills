@@ -33,6 +33,15 @@ describe('orch spawn-child', () => {
     expect(out.stdout).toMatch(/claude --remote-control='go' --model 'opus' --effort 'xhigh' '/)
   })
 
+  it('ignores a spawn model that is not a string', async () => {
+    const ctx = makeCtx()
+    parent(ctx)
+    mkdirSync(join(ctx.claudeHome, 'routing'), { recursive: true })
+    writeFileSync(join(ctx.claudeHome, 'routing', 'policy.json'), JSON.stringify({ spawn: { model: 7 } }))
+    const out = await run(['spawn-child', 't2', '--name', 'go', '--cwd', '.', '--brief', 'brief.md'], ctx)
+    expect(out.stdout).toMatch(/--model 'opus' --effort 'xhigh'/)
+  })
+
   it('refuses an effort that is not a level', async () => {
     const ctx = makeCtx()
     parent(ctx)

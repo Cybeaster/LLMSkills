@@ -1296,7 +1296,8 @@ var FALLBACK = { model: "opus", effort: "xhigh" };
 function spawnDefaults(ctx) {
   try {
     const spawn2 = JSON.parse(readFileSync4(join5(ctx.claudeHome, "routing", "policy.json"), "utf8")).spawn ?? {};
-    return { model: spawn2.model || FALLBACK.model, effort: spawn2.effort || FALLBACK.effort };
+    const str2 = (v, d) => typeof v === "string" && v ? v : d;
+    return { model: str2(spawn2.model, FALLBACK.model), effort: str2(spawn2.effort, FALLBACK.effort) };
   } catch {
     return FALLBACK;
   }

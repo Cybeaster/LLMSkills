@@ -9,7 +9,8 @@ const FALLBACK = { model: 'opus', effort: 'xhigh' }
 export function spawnDefaults(ctx: Ctx): { model: string; effort: string } {
   try {
     const spawn = JSON.parse(readFileSync(join(ctx.claudeHome, 'routing', 'policy.json'), 'utf8')).spawn ?? {}
-    return { model: spawn.model || FALLBACK.model, effort: spawn.effort || FALLBACK.effort }
+    const str = (v: unknown, d: string) => (typeof v === 'string' && v ? v : d)
+    return { model: str(spawn.model, FALLBACK.model), effort: str(spawn.effort, FALLBACK.effort) }
   } catch {
     return FALLBACK
   }
