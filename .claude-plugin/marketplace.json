@@ -19,6 +19,11 @@
       "name": "routing",
       "source": "./plugins/routing",
       "description": "Picks the model and effort for delegated work by task class, enforces it on Agent calls, and logs every choice."
+    },
+    {
+      "name": "writing-skills",
+      "source": "./plugins/writing-skills",
+      "description": "Writing skills: ru-style writes, checks, fixes and scores Russian text — «Пиши, сокращай» (Ильяхов, Сарычева) plus the ru-text rule set."
     }
   ]
 }

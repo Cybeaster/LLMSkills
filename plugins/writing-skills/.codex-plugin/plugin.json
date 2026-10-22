@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "writing-skills",
+  "version": "0.2.0",
+  "description": "Writing skills: ru-style writes, checks, fixes and scores Russian text — «Пиши, сокращай» (Ильяхов, Сарычева) plus the ru-text rule set.",
+  "author": {
+    "name": "Cybeaster",
+    "email": "cybeastermail@gmail.com"
+  },
+  "repository": "https://github.com/Cybeaster/LLMSkills",
+  "license": "MIT",
+  "keywords": ["writing", "russian", "editing", "specs", "brainstorming"]
+}

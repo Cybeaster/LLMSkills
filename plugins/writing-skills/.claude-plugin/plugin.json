@@ -1,0 +1,9 @@
+{
+  "name": "writing-skills",
+  "description": "Writing skills: ru-style writes, checks, fixes and scores Russian text — «Пиши, сокращай» (Ильяхов, Сарычева) plus the ru-text rule set.",
+  "version": "0.2.0",
+  "author": {
+    "name": "Cybeaster",
+    "email": "cybeastermail@gmail.com"
+  }
+}
