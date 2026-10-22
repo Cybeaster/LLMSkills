@@ -1,6 +1,6 @@
 {
   "name": "routing",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Picks the model and effort for delegated work by task class: holds Agent calls to the policy, logs workflow agents, and shows Claude the table.",
   "author": { "name": "Cybeaster", "email": "cybeastermail@gmail.com" }
 }

@@ -1,5 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { check, denyText, merge, ruleText, type Layer, type Policy } from './policy.ts'
+import { agentHeader, check, classOf, denyText, merge, ruleText, type Budget, type Layer, type Policy } from './policy.ts'
 import { logPath } from './log.ts'
 
 async function readJson<T>($: EngineInterface, path: string): Promise<T | undefined> {
@@ -51,6 +51,25 @@ function awaitFirstStep(agentId: string) {
   }
 }
 
+// an allowed Agent call's class, model and effort, kept by tool_use_id until its agent.spawn reads them:
+// AgentSpawnInput has no effort, so the spawn learns it here
+const BUDGET_CAP = 200
+const budgets = new Map<string, Budget>()
+
+function keepBudget(id: string, b: Budget) {
+  budgets.set(id, b)
+  for (const k of budgets.keys()) {
+    if (budgets.size <= BUDGET_CAP) break
+    budgets.delete(k)
+  }
+}
+
+function takeBudget(id: string): Budget | undefined {
+  const b = budgets.get(id)
+  budgets.delete(id)
+  return b
+}
+
 export const register: Register = on => {
   on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
     // only the model's own calls are held to the table; another plugin's programmatic call passes
@@ -62,16 +81,26 @@ export const register: Register = on => {
       await logRow($, { ...row, verdict: 'deny', reason: v.reason })
       return { deny: denyText(p, v.reason) }
     }
-    const ran = await next(e)
+    if (!v.exempt) keepBudget(e.tool_use_id, { cls: v.cls, model: e.model, effort: e.effort })
+    const ran = await next(e).finally(() => budgets.delete(e.tool_use_id)) // the spawn has run by now, or never will
     await logRow($, { ...row, override: v.override, verdict: v.exempt ? 'exempt' : 'allow', outcome: ran.deny !== undefined ? 'denied' : ran.isError ? 'error' : 'ok' })
     return ran
   }).catch(($, e, next) => next(e)) // fail open: routing is cost and quality, not security
 
+  // every new non-fork agent (subagent, teammate, workflow agent) is told its class, budget and the floors:
+  // prompt.compose never shapes a subagent's system prompt, so its task prompt is the only place to say it
   on('agent.spawn', async ($, e, next) => {
-    if (!e.workflow || e.resume) return next(e)
+    if (e.fork || e.resume) return next(e)
     const p = await loadPolicy($)
+    if (!e.workflow) {
+      const b = takeBudget(e.tool_use_id)
+      const header = agentHeader(p, { cls: b?.cls ?? classOf(e.description), model: e.model ?? b?.model, effort: b?.effort })
+      return next({ ...e, prompt: `${header}\n\n${e.prompt}` })
+    }
     const model = e.model ?? p.workflowModel
-    const r = await next({ ...e, model })
+    // a run that keeps its script out of SDK events has a placeholder prompt; the engine ignores the rewrite there
+    const header = agentHeader(p, { cls: classOf(e.description), model })
+    const r = await next({ ...e, model, prompt: `${header}\n\n${e.prompt}` })
     const row = { ts: new Date().toISOString(), surface: 'workflow', runId: e.workflow.runId, agentIndex: e.workflow.agentIndex, label: e.description, model }
     if (r.deny !== undefined) await logRow($, { ...row, verdict: 'deny', reason: r.deny })
     else {

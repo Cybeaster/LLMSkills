@@ -43,10 +43,15 @@ export function merge(base: Policy, ...layers: (Layer | undefined)[]): Policy {
   return p
 }
 
+// the class a description is tagged with, lower-cased; undefined when no tag opens it
+export function classOf(description: string | undefined): string | undefined {
+  return TAG.exec(description ?? '')?.[1]?.toLowerCase()
+}
+
 export function check(p: Policy, c: Call): Verdict {
   if (c.subagent_type === 'fork') return { ok: true, override: false, exempt: true }
   const desc = c.description ?? ''
-  const cls = TAG.exec(desc)?.[1]?.toLowerCase()
+  const cls = classOf(desc)
   if (!cls) return { ok: false, reason: 'description has no [class] tag' }
   const f = Object.hasOwn(p.classes, cls) ? p.classes[cls] : undefined
   if (!f) return { ok: false, cls, reason: `[${cls}] is not a class` }
@@ -81,4 +86,23 @@ export function ruleText(p: Policy): string {
 
 export function denyText(p: Policy, reason: string): string {
   return `routing: ${reason}. Retry with a class tag at the start of \`description\` and \`model\` + \`effort\` at or above its minimum:\n${table(p)}`
+}
+
+// what a subagent is told about itself; `cls` counts only when the policy has it
+export type Budget = { cls?: string; model?: string; effort?: string }
+
+// the floors on one line: `search haiku/low · mechanical haiku/medium · ...`
+export function floors(p: Policy): string {
+  return Object.entries(p.classes).map(([k, f]) => `${k} ${f.model}/${f.effort}`).join(' · ')
+}
+
+// the header put before a subagent's task prompt: its own class and budget, then the delegation floors
+export function agentHeader(p: Policy, b: Budget): string {
+  const cls = b.cls && Object.hasOwn(p.classes, b.cls) ? `[${b.cls}]` : 'unclassified'
+  const effort = b.effort ? ` at effort ${b.effort}` : ''
+  return [
+    `[routing] You run as ${cls} on ${b.model ?? 'inherited'}${effort}. Stay within that budget: don't over-explore.`,
+    'If you delegate (Agent tool / workflow agent()), follow these floors — tag the description with one class and pass model + effort at or above it:',
+    floors(p),
+  ].join('\n')
 }

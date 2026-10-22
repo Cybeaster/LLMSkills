@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { check, merge, rank, ruleText, denyText, MODELS, EFFORTS, type Policy } from './policy.ts'
+import { agentHeader, check, classOf, floors, merge, rank, ruleText, denyText, MODELS, EFFORTS, type Policy } from './policy.ts'
 
 const P: Policy = {
   classes: {
@@ -148,4 +148,38 @@ test('a valid new class and valid layer values still apply', async () => {
   expect(m.classes.triage).toEqual({ model: 'sonnet', effort: 'medium' })
   expect(m.spawn).toEqual({ model: 'fable', effort: 'xhigh' })
   expect(m.workflowModel).toBe('sonnet')
+})
+
+test('classOf reads the opening tag, past one [override]', async () => {
+  expect(classOf('[Search] find callers')).toBe('search')
+  expect(classOf('[override] [content] x')).toBe('content')
+  expect(classOf('find [search] x')).toBeUndefined()
+  expect(classOf(undefined)).toBeUndefined()
+})
+
+test('floors are one line, one entry per class', async () => {
+  expect(floors(P)).toBe('search haiku/low · content opus/xhigh · review fable/xhigh')
+})
+
+test('the agent header names the class, model and effort, then the floors', async () => {
+  const h = agentHeader(P, { cls: 'search', model: 'haiku', effort: 'low' })
+  const [first, second, third, ...rest] = h.split('\n')
+  expect(first).toBe("[routing] You run as [search] on haiku at effort low. Stay within that budget: don't over-explore.")
+  expect(second).toMatch(/^If you delegate \(Agent tool \/ workflow agent\(\)\)/)
+  expect(third).toBe(floors(P))
+  expect(rest).toEqual([])
+  expect(h.length - floors(P).length).toBeLessThan(350)
+})
+
+test('the agent header says unclassified, inherited, and drops an unknown effort', async () => {
+  expect(agentHeader(P, {})).toMatch(/^\[routing\] You run as unclassified on inherited\. Stay/)
+  expect(agentHeader(P, { cls: 'misc', model: 'opus' })).toMatch(/^\[routing\] You run as unclassified on opus\. Stay/)
+  expect(agentHeader(P, { cls: 'constructor', model: 'opus' })).toMatch(/You run as unclassified/)
+  expect(agentHeader(P, { model: 'opus' })).not.toMatch(/effort (undefined|low)/)
+})
+
+test('the agent header is pure: the same input gives the same text', async () => {
+  const b = { cls: 'review', model: 'fable', effort: 'xhigh' }
+  expect(agentHeader(P, b)).toBe(agentHeader(P, { ...b }))
+  expect(b).toEqual({ cls: 'review', model: 'fable', effort: 'xhigh' })
 })

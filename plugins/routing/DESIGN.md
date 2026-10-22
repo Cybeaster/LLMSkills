@@ -15,7 +15,31 @@ on mechanical work. The main session's own model and its `effortLevel: xhigh` ar
 | --- | --- |
 | `Agent` tool calls | `tool.call` hook: denies a call without a `[class]` tag, `model` and `effort` at or above the class floor |
 | `Workflow` `agent()` calls | the prompt section tells Claude to pass `opts.model` + `opts.effort`; the `agent.spawn` hook fills a missing model with `workflowModel` and logs the agent at once; a `turn.step` hook logs the effort its first request really carried as a second row |
+| Subagent and workflow-agent task prompts | `agent.spawn` hook: every new non-fork agent (subagent, teammate, workflow agent; not a resume) gets a `[routing]` header before its prompt: its class, model, effort, and the floors on one line |
 | Spawned sessions (`orch spawn-child`, herdr) | fixed `spawn` floor (`opus` / `xhigh`) unless the user names a model; orch passes `--model`/`--effort` (orchestrator plugin) |
+
+## Subagents
+
+`prompt.compose` shapes only the main session's system prompt (its input has no `agentId`), so a
+subagent never sees the routing section, yet its own `Agent` calls are held to the table like any
+other. The `agent.spawn` hook closes that gap through the task prompt instead:
+
+```
+[routing] You run as [search] on haiku at effort low. Stay within that budget: don't over-explore.
+If you delegate (Agent tool / workflow agent()), follow these floors — tag the description with one class and pass model + effort at or above it:
+search haiku/low · mechanical haiku/medium · implement opus/high · …
+```
+
+- Rendered by `agentHeader()` in `policy.ts` from the merged policy, like the section and the deny text.
+- The class comes from the description tag (`classOf()`, the same parser `check()` uses); an untagged or
+  unknown tag reads `unclassified`, no model reads `inherited`.
+- An `Agent` spawn's effort is not on `AgentSpawnInput`: the allowed `tool.call` keeps `{ cls, model,
+  effort }` by `tool_use_id` (at most 200, the oldest dropped; deleted once the call settles) and the
+  spawn takes it. A workflow agent's effort is unknown at spawn, so its header leaves effort out and
+  names the filled model.
+- Forks (they inherit the parent's context) and resumes (a content rewrite is ignored) are untouched.
+- A workflow run that keeps its script out of SDK events hands the hook a placeholder prompt and the
+  engine drops the rewrite; that agent starts without the header, by design.
 
 ## Policy table (floors — stronger is allowed)
 

@@ -7,7 +7,8 @@ const lookup = (files: Map<string, string>, path: string) =>
 
 // Stands for the engine beneath the plugin: an in-memory disk, HOME, a session id, a project root when
 // given, and an Agent tool that succeeds. `policy: null` makes the plugin's own policy.json unreadable.
-function engine(on: On, files: Map<string, string>, opts: { root?: string; policy?: string | null } = {}) {
+// `hold` keeps the Agent tool running until it resolves, as a real call runs while its agent starts.
+function engine(on: On, files: Map<string, string>, opts: { root?: string; policy?: string | null; hold?: (tool_use_id: string) => Promise<void> } = {}) {
   mock.env(on, { HOME: '/home/t' })
   on('session.id', () => ({ value: 's1' }))
   const { root } = opts
@@ -19,8 +20,10 @@ function engine(on: On, files: Map<string, string>, opts: { root?: string; polic
     return { value: hit ?? opts.policy ?? POLICY }
   })
   on('fs.write', (_, e) => (files.set(e.path, e.text), { value: undefined }))
-  on('tool.call', () => ({ result: { agentId: 'a0' } }))
+  on('tool.call', async (_, e) => (await opts.hold?.(e.tool_use_id), { result: { agentId: 'a0' } }))
 }
+
+const SPAWN_BASE = { provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: true, fork: false } as const
 
 const POLICY = JSON.stringify({
   classes: { search: { model: 'haiku', effort: 'low' }, content: { model: 'opus', effort: 'xhigh' } },
@@ -199,4 +202,68 @@ test('the policy section is added when Agent is offered', async ($, on) => {
   expect(r.sections[1]).toMatchObject({ scope: 'session', text: expect.stringMatching(/# Delegation routing/) })
   const none = await $.prompt.compose({ model: 'm', promptModel: 'm', surfaces: [], tools: ['Bash'], outputStyle: null, traits: [] })
   expect(none.sections).toHaveLength(1)
+})
+
+// An Agent call whose tool starts its agent mid-call, as the real one does, under the call's tool_use_id.
+// A hook beneath the plugin may not call $.agent.spawn itself, so the tool holds while the test raises it.
+function agentCalls(on: On) {
+  const waiting: { id: string; go: () => void }[] = []
+  let seen: () => void = () => {}
+  engine(on, new Map(), { hold: id => new Promise<void>(go => (waiting.push({ id, go }), seen())) })
+  return async ($: { tool: { call: (i: never) => Promise<{ deny?: string }> }; agent: { spawn: (i: never) => Promise<unknown> } }, call: { description: string; prompt: string; model?: string; effort?: string; subagent_type?: string }) => {
+    const arrived = new Promise<void>(r => (seen = r))
+    const ran = $.tool.call({ tool: 'Agent', ...call } as never)
+    await arrived
+    const w = waiting.shift()!
+    const fork = call.subagent_type === 'fork'
+    await $.agent.spawn({ ...SPAWN_BASE, tool_use_id: w.id, prompt: call.prompt, description: call.description, model: call.model, subagentType: call.subagent_type ?? 'general-purpose', fork } as never)
+    w.go()
+    return ran
+  }
+}
+
+// what the agent beneath the plugin was started with
+function spawned(on: On) {
+  const got: { prompt?: string; model?: string }[] = []
+  on('agent.spawn', (_, e) => (got.push({ prompt: e.prompt, model: e.model }), { model: e.model ?? 'inherit', agentId: `g${got.length}` }))
+  return got
+}
+
+test('a tagged Agent spawn is told its class, model, effort and the floors', async ($, on) => {
+  const agentCall = agentCalls(on)
+  const got = spawned(on)
+  const r = await agentCall($, { description: '[search] find callers', prompt: 'TASK', model: 'haiku', effort: 'low' })
+  expect(r.deny).toBeUndefined()
+  expect(got).toHaveLength(1)
+  const lines = (got[0]?.prompt ?? '').split('\n')
+  expect(lines[0]).toBe("[routing] You run as [search] on haiku at effort low. Stay within that budget: don't over-explore.")
+  expect(lines[1]).toMatch(/follow these floors/)
+  expect(lines[2]).toBe('search haiku/low · content opus/xhigh')
+  expect(lines.slice(3)).toEqual(['', 'TASK'])
+})
+
+test('a workflow agent gets the header with its filled model and no effort', async ($, on) => {
+  engine(on, new Map())
+  const got = spawned(on)
+  await $.agent.spawn(SPAWN)
+  expect(got[0]?.model).toBe('opus')
+  expect(got[0]?.prompt).toMatch(/^\[routing\] You run as unclassified on opus\. Stay within that budget/)
+  expect(got[0]?.prompt).toMatch(/\nsearch haiku\/low · content opus\/xhigh\n\np$/)
+  await $.agent.spawn({ ...SPAWN, description: '[content] lesson 3', model: 'fable' })
+  expect(got[1]?.prompt).toMatch(/^\[routing\] You run as \[content\] on fable\. Stay/)
+})
+
+test('a fork and a resume start with their prompt untouched', async ($, on) => {
+  const agentCall = agentCalls(on)
+  const got = spawned(on)
+  await agentCall($, { description: 'carry on', prompt: 'FORK', subagent_type: 'fork' })
+  await $.agent.spawn({ ...SPAWN_BASE, tool_use_id: 'tu9', prompt: 'RESUME', description: '[search] x', subagentType: 'Explore', resume: { agentId: 'old' } } as never)
+  expect(got.map(g => g.prompt)).toEqual(['FORK', 'RESUME'])
+})
+
+test('a spawn with no Agent call behind it is unclassified on an inherited model', async ($, on) => {
+  engine(on, new Map())
+  const got = spawned(on)
+  await $.agent.spawn({ ...SPAWN_BASE, tool_use_id: 'tu7', prompt: 'X', description: 'plain', subagentType: 'general-purpose' } as never)
+  expect(got[0]?.prompt).toMatch(/^\[routing\] You run as unclassified on inherited\. Stay/)
 })
