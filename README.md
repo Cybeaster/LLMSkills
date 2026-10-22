@@ -18,6 +18,8 @@ plugins/
     skills/                         # read by BOTH; nothing is duplicated
       project-mentor/               # mentors a beginner through their first project
       explain-this-project/         # explains an unfamiliar codebase from zero
+  orchestrator/                     # task pools, child sessions, TUI, /orch
+  routing/                          # model + effort policy for delegated work
 ```
 
 `plugins/<name>/skills/<skill>/SKILL.md` is where Claude Code's plugin format and Codex's
