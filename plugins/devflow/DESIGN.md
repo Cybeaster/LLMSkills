@@ -31,6 +31,30 @@ arms the session the same way when it starts.
 | `hooks/devflow.sh` | One script, modes `prompt` / `skill` / `edit` / `bash` / `stop` / `end` (below). |
 | `.claude/devflow.json` (in the project) | Turns devflow on for that repo and configures it. **No file → every hook is silent.** |
 
+## Vendoring
+
+A project may carry devflow itself, so a fresh clone works with no plugin install: byte-identical copies of
+`skills/requirements` → `.claude/skills/requirements`, `skills/design` → `.claude/skills/design` and
+`hooks/devflow.sh` → `.claude/hooks/devflow.sh`, wired from the project's `.claude/settings.json` as
+`bash "$CLAUDE_PROJECT_DIR/.claude/hooks/devflow.sh" <mode>` with the events and matchers of `hooks.json`
+(the exact block is in the README; a test keeps it in step with `hooks.json`).
+
+**One copy runs.** With the plugin also installed, both copies fire on every event. First thing after
+reading stdin, before any mode (`end` included), the script looks for `<root>/.claude/hooks/devflow.sh`
+with root = the payload cwd's git toplevel, the main worktree, and `$CLAUDE_PROJECT_DIR` (all three,
+so a session launched in the main checkout whose cwd is a worktree carrying its own copy still finds
+the copy it was wired to). If one exists and none of them is the running script (`realpath` of
+`${BASH_SOURCE[0]}`, else `cd … && pwd -P` plus the name), it exits 0 silently. The check is by
+location, not content, which is why the copies can stay byte-identical. Fails open as before: with no
+cwd or no git it simply finds no project copy.
+
+**Bare skill names.** Vendored skills appear as `requirements` / `design` beside the plugin's
+`devflow:requirements` / `devflow:design`. Only the project's copy (the running script is a project
+copy) treats the bare names as devflow's: they arm and stamp like the prefixed ones, and its messages
+(the nudge first among them) name the bare skills. The plugin's copy never does, since outside a
+vendoring project `design` may be any skill. The skills' own hand-offs read "devflow:design (or `design`
+where the project vendors devflow)".
+
 ## The one design doc
 
 `<specDir>/<YYYY-MM-DD>-<slug>.md`, one per feature:
@@ -113,7 +137,10 @@ the flow, it does not contain a determined one.
    that never arms, arming by the flow's skills and `armingSkills`, gate deny/allow and the spec
    fallback, armed UI edit → Stop block → critique → Stop free (unarmed never blocks), the prompt
    regex, SessionEnd cleanup, fail-open on garbage stdin.
-2. `claude plugin validate plugins/devflow` passes.
+2. `claude plugin validate plugins/devflow` passes. The vendoring tests: the plugin copy is silent in
+   every mode when a project copy exists (worktrees and `$CLAUDE_PROJECT_DIR` included, with and without
+   `realpath`), the project copy runs, bare skill names arm only from the project copy, and the README's
+   settings block mirrors `hooks.json`.
 3. Live in ItAbyss: a `claude -p` feature prompt gets the devflow nudge; once the flow starts, a code
    edit with no spec is denied; with a spec it passes.
 4. ItAbyss carries only `.claude/devflow.json`, the Notion gate and `itabyss-analytics-events`; its

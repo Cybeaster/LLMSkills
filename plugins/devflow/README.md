@@ -76,6 +76,58 @@ worktree's. Every key is optional.
 | `gate` | none (plain approval) | Text `devflow:design` follows as the project's review step before the plan; also shown on arming and in the nudge. |
 | `contractsDir` | none | Where behavior contracts live; the skills check it for the Behavior-contract delta. |
 
+## Vendoring
+
+A project can carry devflow itself, so a fresh clone works with no plugin install. Copy these three paths
+byte-identically (no edits: the copy decides it is the project's by its location):
+
+| From the plugin | Into the project |
+| --- | --- |
+| `skills/requirements/` | `.claude/skills/requirements/` |
+| `skills/design/` | `.claude/skills/design/` |
+| `hooks/devflow.sh` | `.claude/hooks/devflow.sh` |
+
+and wire the hooks in the project's `.claude/settings.json`, the same events and matchers as `hooks/hooks.json`:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/devflow.sh\" prompt", "timeout": 10 }] }
+    ],
+    "PostToolUse": [
+      { "matcher": "Skill", "hooks": [{ "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/devflow.sh\" skill", "timeout": 10 }] }
+    ],
+    "PreToolUse": [
+      { "matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [{ "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/devflow.sh\" edit", "timeout": 10 }] },
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/devflow.sh\" bash", "timeout": 10 }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/devflow.sh\" stop", "timeout": 10 }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/devflow.sh\" end", "timeout": 10 }] }
+    ]
+  }
+}
+```
+
+Merge these arrays into any hooks the project already has. `.claude/devflow.json` still turns devflow on.
+
+**With the plugin installed too**, both copies fire on every event. The plugin's copy yields: when
+`<root>/.claude/hooks/devflow.sh` exists (root = the cwd's git toplevel, the main worktree, or
+`$CLAUDE_PROJECT_DIR`) and is not the running script (compared by real path), it exits silently, `end`
+included. The project's copy is that file, so it runs. Byte-identical copies make this safe: the check is
+by location, not by content.
+
+**Skill names.** A vendored skill appears bare (`requirements`, `design`) beside the plugin's
+`devflow:requirements` / `devflow:design`. The project's copy of the hook treats both spellings as
+devflow's: either arms the session and stamps its step, the nudge names the bare skills first, and the
+gate's messages name the bare skills. The plugin's copy never takes a bare name, since outside a vendoring
+project `design` may be some other skill.
+
+To update, copy the three paths again from the new plugin version.
+
 ## Depends on
 
 Needs `bash`, `git` and `jq`. Claude Code only: the hooks are what hold the flow together.

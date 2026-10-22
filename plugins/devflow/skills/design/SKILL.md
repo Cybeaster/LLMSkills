@@ -1,6 +1,6 @@
 ---
 name: design
-description: 'Use when the requirements of a feature are settled and it needs its design, in place of superpowers:brainstorming for that step - devflow:requirements handed off with "decisions settled", or the user points at a spec with ## Решения and asks for approaches, architecture, the design doc, "спроектируй", "предложи подходы", "дизайн фичи". Unsettled requirements go to devflow:requirements first.'
+description: 'Use when the requirements of a feature are settled and it needs its design, in place of superpowers:brainstorming for that step - devflow:requirements (or `requirements` where the project vendors devflow) handed off with "decisions settled", or the user points at a spec with ## Решения and asks for approaches, architecture, the design doc, "спроектируй", "предложи подходы", "дизайн фичи". Unsettled requirements go to that requirements skill first.'
 ---
 
 # Design

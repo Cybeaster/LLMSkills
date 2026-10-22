@@ -34,8 +34,9 @@ new() { # a fresh session id in $S
 	S="sess-$n"
 }
 
+RUN=$HOOK # the copy of the script under test: the plugin's, or a project's vendored copy
 hook() { # hook <mode> <payload> -> $OUT, $RC
-	OUT=$(printf '%s' "$2" | "$BASH_BIN" "$HOOK" "$1" 2>>"$T/stderr")
+	OUT=$(printf '%s' "$2" | "$BASH_BIN" "$RUN" "$1" 2>>"$T/stderr")
 	RC=$?
 }
 
@@ -499,6 +500,116 @@ new
 context "a worktree's own config wins" PostToolUse skill "$(p_skill "$W" devflow:requirements)" "design/" "src/"
 
 # ==================================================================================================
+echo "# vendored: the plugin yields to a project copy"
+V="$T/vendored"
+mkrepo "$V" "$CFG"
+mkdir -p "$V/.claude/hooks"
+cp "$HOOK" "$V/.claude/hooks/devflow.sh"
+VH="$V/.claude/hooks/devflow.sh"
+check "fixture: the project copy is byte-identical" cmp -s "$HOOK" "$VH"
+RUN=$HOOK
+new
+silent "plugin copy, vendored project: feature prompt" prompt "$(p_prompt "$V" "$FEATURE")"
+silent "plugin copy, vendored project: requirements skill" skill "$(p_skill "$V" devflow:requirements)"
+silent "plugin copy, vendored project: writing-plans skill" skill "$(p_skill "$V" superpowers:writing-plans)"
+silent "plugin copy, vendored project: impeccable critique" skill "$(p_skill "$V" impeccable:impeccable "critique x")"
+silent "plugin copy, vendored project: [no-devflow]" prompt "$(p_prompt "$V" "skip [no-devflow]")"
+check "plugin copy, vendored project: no state written" test ! -e "$DEVFLOW_STATE_DIR/$S.json"
+RUN=$VH
+arm "$V"
+RUN=$HOOK
+silent "plugin copy, vendored project: code edit (armed by the project copy)" edit "$(p_edit "$V" Edit "$V/webapp/lib/x.ts")"
+silent "plugin copy, vendored project: worktree outside" bash "$(p_bash "$V" "git worktree add /tmp/feat")"
+RUN=$VH
+MODE=edit
+denies "project copy: code edit gated" "$(p_edit "$V" Edit "$V/webapp/lib/x.ts")" "webapp/lib/x.ts" "no spec yet"
+spec "$V/docs/specs/2026-10-22-a.md" req design split
+hook edit "$(p_edit "$V" Write "$V/docs/specs/2026-10-22-a.md")"
+hook edit "$(p_edit "$V" Edit "$V/webapp/components/A.tsx")"
+RUN=$HOOK
+silent "plugin copy, vendored project: stop after a UI edit" stop "$(p_stop "$V")"
+silent "plugin copy, vendored project: session end" end "$(p_end "$V")"
+check "... leaves the state to the project copy" test -s "$DEVFLOW_STATE_DIR/$S.json"
+RUN=$VH
+context "project copy: feature prompt nudges" UserPromptSubmit prompt "$(p_prompt "$V" "Add another panel")" "requirements"
+MODE=bash
+denies "project copy: worktree outside denied" "$(p_bash "$V" "git worktree add /tmp/feat")" "$V/.worktrees/"
+blocks "project copy: stop blocks after a UI edit" "$(p_stop "$V")"
+silent "project copy: session end" end "$(p_end "$V")"
+check "... deletes the state" test ! -e "$DEVFLOW_STATE_DIR/$S.json"
+rm -f "$V/docs/specs/2026-10-22-a.md"
+new
+OUT=$(p_prompt "$V" "$FEATURE" | "$BASH_BIN" "$V/.claude/hooks/../hooks/devflow.sh" prompt 2>>"$T/stderr")
+check "project copy reached through a non-canonical path still runs" contains_all "$OUT" "requirements" >/dev/null
+mkdir -p "$T/links"
+ln -s "$V/.claude" "$T/links/claude"
+new
+OUT=$(p_prompt "$V" "$FEATURE" | "$BASH_BIN" "$T/links/claude/hooks/devflow.sh" prompt 2>>"$T/stderr")
+check "project copy reached through a symlink still runs" contains_all "$OUT" "requirements" >/dev/null
+new
+OUT=$(jq -cn --arg s "$S" '{session_id: $s, prompt: "Add a CSV export"}' | CLAUDE_PROJECT_DIR="$V" "$BASH_BIN" "$HOOK" prompt 2>>"$T/stderr")
+check "no cwd in the payload: the plugin yields to CLAUDE_PROJECT_DIR's copy" test -z "$OUT"
+
+echo "# vendored: bare skill names"
+new
+RUN=$VH
+context "project copy: bare requirements arms" PostToolUse skill "$(p_skill "$V" requirements)" "armed" "\`requirements\`"
+check "... and stamps requirements_at" jq -e '.requirements_at > 0' "$DEVFLOW_STATE_DIR/$S.json"
+MODE=edit
+denies "... code edit denied, naming the vendored skill" "$(p_edit "$V" Edit "$V/webapp/lib/x.ts")" "Run requirements:" "then design adds"
+lacks "... not the plugin's name" "devflow:requirements"
+new
+context "project copy: bare design arms" PostToolUse skill "$(p_skill "$V" design)" "armed"
+check "... and stamps design_at" jq -e '.design_at > 0' "$DEVFLOW_STATE_DIR/$S.json"
+new
+context "project copy: devflow:requirements (plugin also installed) arms" PostToolUse skill "$(p_skill "$V" devflow:requirements)" "armed"
+new
+context "project copy: the nudge names the bare skills" UserPromptSubmit prompt "$(p_prompt "$V" "$FEATURE")" \
+	"\`requirements\` → \`design\`" "devflow:requirements → devflow:design" "not grilling / superpowers:brainstorming" "Start with the Skill tool: requirements"
+RUN=$HOOK
+new
+silent "plugin copy, no vendoring: bare requirements does not arm" skill "$(p_skill "$G" requirements)"
+silent "... code stays free" edit "$(p_edit "$G" Edit "$G/webapp/lib/x.ts")"
+silent "plugin copy, no vendoring: bare design does not arm" skill "$(p_skill "$G" design)"
+silent "... code stays free" edit "$(p_edit "$G" Edit "$G/webapp/lib/x.ts")"
+context "plugin copy, no vendoring: the nudge names the plugin skills only" UserPromptSubmit prompt "$(p_prompt "$G" "$FEATURE")" \
+	"Start with the Skill tool: devflow:requirements"
+lacks "... without the bare names" "\`requirements\`"
+
+echo "# vendored: worktrees"
+git -C "$V" worktree add -q "$V/.worktrees/feat" -b feat 2>/dev/null
+VW="$V/.worktrees/feat"
+check "fixture: the worktree has no copy of its own" test ! -e "$VW/.claude/hooks/devflow.sh"
+new
+silent "plugin copy, worktree of a vendored project: yields to the main copy" prompt "$(p_prompt "$VW" "$FEATURE")"
+RUN=$VH
+context "main copy, session in the worktree: runs" UserPromptSubmit prompt "$(p_prompt "$VW" "$FEATURE")" "requirements"
+mkdir -p "$VW/.claude/hooks"
+cp "$HOOK" "$VW/.claude/hooks/devflow.sh"
+new
+OUT=$(p_skill "$VW" requirements | CLAUDE_PROJECT_DIR="$V" "$BASH_BIN" "$VH" skill 2>>"$T/stderr")
+check "the copy wired at CLAUDE_PROJECT_DIR runs when the worktree has its own copy" contains_all "$OUT" "armed" >/dev/null
+new
+OUT=$(p_skill "$VW" requirements | "$BASH_BIN" "$VW/.claude/hooks/devflow.sh" skill 2>>"$T/stderr")
+check "the worktree's own copy runs" contains_all "$OUT" "armed" >/dev/null
+new
+OUT=$(p_prompt "$VW" "$FEATURE" | CLAUDE_PROJECT_DIR="$V" "$BASH_BIN" "$HOOK" prompt 2>>"$T/stderr")
+check "the plugin copy still yields" test -z "$OUT"
+
+echo "# vendored: no realpath on PATH"
+NB="$T/norealpath"
+mkdir -p "$NB"
+for x in jq git dirname basename cat ls grep sed mktemp mv rm rmdir mkdir date tr paste sleep head touch; do
+	y=$(command -v "$x") && ln -s "$y" "$NB/$x"
+done
+new
+OUT=$(p_prompt "$V" "$FEATURE" | PATH="$NB" "$BASH_BIN" "$HOOK" prompt 2>>"$T/stderr")
+check "no realpath: the plugin copy still yields" test -z "$OUT"
+OUT=$(p_prompt "$V" "$FEATURE" | PATH="$NB" "$BASH_BIN" "$VH" prompt 2>>"$T/stderr")
+check "no realpath: the project copy still runs" contains_all "$OUT" "requirements" >/dev/null
+RUN=$HOOK
+
+# ==================================================================================================
 echo "# session end"
 new
 hook prompt "$(p_prompt "$R" "$FEATURE")"
@@ -513,6 +624,9 @@ printf '{"armed":true}' >"$DEVFLOW_STATE_DIR/$S.json"
 silent "SessionEnd from a repo without config" end "$(p_end "$N")"
 check "... still deletes the state" test ! -e "$DEVFLOW_STATE_DIR/$S.json"
 check "hooks.json wires SessionEnd to the end mode" jq -e '.hooks.SessionEnd[0].hooks[0].command | endswith("devflow.sh\" end")' "$here/../hooks/hooks.json"
+VB=$(awk '/^## Vendoring/ { v = 1 } v && /^```json/ { f = 1; next } f && /^```/ { exit } f' "$here/../README.md")
+check "README's vendoring settings.json block mirrors hooks.json" jq -en --argjson r "${VB:-null}" --slurpfile h "$here/../hooks/hooks.json" \
+	'($h[0] | tojson | gsub("\\$\\{CLAUDE_PLUGIN_ROOT\\}/hooks/"; "$CLAUDE_PROJECT_DIR/.claude/hooks/") | fromjson) == $r'
 
 # ==================================================================================================
 echo "# environment"

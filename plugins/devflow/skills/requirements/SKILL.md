@@ -10,7 +10,7 @@ Draw a feature's requirements out of the user in **rounds**, before anything is 
 ## Setup
 
 1. Read `.claude/devflow.json` at the repo root. In a linked worktree that has none, read the one in this repository's main worktree (the first entry of `git worktree list`). Take `specDir`, `contractsDir` and `analyticsSkill` when present. With no file at all, end the turn on one question, where to keep the spec (➡️ `docs/specs`), and create nothing until the user answers; their answer is `specDir` for this spec. Creating `.claude/devflow.json` stays the user's call, because that file switches devflow's hooks on for the repo.
-2. Create the spec before round 1: `<specDir>/<YYYY-MM-DD>-<slug>.md`, today's date and a short kebab slug of the feature. It holds a `# <title>` line, one line of goal, and an empty `## Решения`. Only that heading: `## Дизайн` and `## Work split` are devflow:design's, and the devflow hook opens code edits once all three headings are on disk, so writing them early unlocks code before a design exists.
+2. Create the spec before round 1: `<specDir>/<YYYY-MM-DD>-<slug>.md`, today's date and a short kebab slug of the feature. It holds a `# <title>` line, one line of goal, and an empty `## Решения`. Only that heading: `## Дизайн` and `## Work split` belong to devflow:design (or `design` where the project vendors devflow), and the devflow hook opens code edits once all three headings are on disk, so writing them early unlocks code before a design exists.
 3. Gather the facts round 1 needs (see **Facts**): how the touched area works today, what already exists, which files in `contractsDir` cover it.
 
 Write questions and the spec in the language the user writes in. The three headings stay exactly as written here, since the hook matches them.
@@ -33,7 +33,7 @@ Number each question, give one recommendation, and word the question so "yes" ac
 
 Round 1 always carries these three, beside the rest of the frontier:
 
-- **UI**: does it change what a user sees, and which surfaces? A yes sends devflow:design through a canvas and an impeccable critique.
+- **UI**: does it change what a user sees, and which surfaces? A yes sends the design step through a canvas and an impeccable critique.
 - **Analytics**: does it need product analytics events, and which decision would they inform? With `analyticsSkill` set, that skill picks the events at design time; here settle only whether.
 - **Behavior contracts**: which contracts change? Name the `contractsDir` files that cover the touched surface and recommend; "none" is a valid answer.
 
@@ -58,4 +58,4 @@ A running subagent holds back only the questions that need its answer; ask the r
 
 ## Done
 
-The frontier is empty: every branch visited, every decision written in `## Решения`, nothing assumed in silence. Ask once whether the decisions are settled. On yes, invoke `devflow:design` with the Skill tool, args `decisions settled, do not re-ask: <spec path>`.
+The frontier is empty: every branch visited, every decision written in `## Решения`, nothing assumed in silence. Ask once whether the decisions are settled. On yes, invoke `devflow:design` (or `design` where the project vendors devflow) with the Skill tool, args `decisions settled, do not re-ask: <spec path>`.

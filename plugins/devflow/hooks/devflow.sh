@@ -11,8 +11,10 @@
 #
 # Only an armed session (devflow:requirements, devflow:design or an `armingSkills` wrapper started) is
 # gated; ordinary work is never blocked. Silent unless the repo has .claude/devflow.json (looked up in the
-# cwd's toplevel, then in the main worktree's). Fails open: no jq, bad stdin, no git, bad config or
-# state -> exit 0 with no output. The gate is advisory: it sees file tools, not shell writes.
+# cwd's toplevel, then in the main worktree's). A project may vendor this script as
+# .claude/hooks/devflow.sh: then any other copy (the installed plugin's) exits silently and only the
+# project's runs, and that copy also takes the bare skill names `requirements` / `design`. Fails open:
+# no jq, bad stdin, no git, bad config or state -> exit 0 with no output. The gate is advisory: it sees file tools, not shell writes.
 # State: ${DEVFLOW_STATE_DIR:-~/.claude/state/devflow}/<session_id>.json, times in epoch milliseconds.
 set -u
 
@@ -21,6 +23,47 @@ command -v jq >/dev/null 2>&1 || exit 0
 input=$(cat 2>/dev/null) || exit 0
 printf '%s' "$input" | jq -e 'type == "object"' >/dev/null 2>&1 || exit 0
 j() { printf '%s' "$input" | jq -r "($1) // empty | strings" 2>/dev/null; }
+
+# git_common <dir>: absolute physical path of the repository's common git dir (shared by its worktrees)
+git_common() {
+	local c
+	c=$(git -C "$1" rev-parse --git-common-dir 2>/dev/null) || return 1
+	case "$c" in /*) ;; *) c="$1/$c" ;; esac
+	(cd "$c" 2>/dev/null && pwd -P)
+}
+# rp <file>: the file's canonical path (realpath, else its physical directory + its name)
+rp() {
+	if command -v realpath >/dev/null 2>&1; then
+		realpath "$1" 2>/dev/null
+	else
+		(cd "$(dirname "$1")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename "$1")")
+	fi
+}
+
+cwd=$(j '.cwd')
+[ -n "$cwd" ] || cwd=${CLAUDE_PROJECT_DIR:-}
+top="" common="" main=""
+if [ -n "$cwd" ] && [ -d "$cwd" ]; then
+	top=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null) || top=""
+	common=$(git_common "$cwd") || common=""
+	[ -n "$common" ] && main=$(dirname "$common") # the main worktree's toplevel: <main>/.git is the common dir
+fi
+
+# Yield to a vendored project copy (<root>/.claude/hooks/devflow.sh, root = the cwd's toplevel, the main
+# worktree or CLAUDE_PROJECT_DIR): when one exists and this script is none of them, it is the plugin's
+# copy running beside the project's, so it stays out of the way, `end` included.
+self=$(rp "${BASH_SOURCE[0]}")
+vendored="" other=""
+for r in "$top" "$main" "${CLAUDE_PROJECT_DIR:-}"; do
+	[ -n "$r" ] && [ -f "$r/.claude/hooks/devflow.sh" ] || continue
+	if [ -n "$self" ] && [ "$(rp "$r/.claude/hooks/devflow.sh")" = "$self" ]; then vendored=1; else other=1; fi
+done
+[ -z "$vendored" ] && [ -n "$other" ] && exit 0
+if [ -n "$vendored" ]; then # the skills this project ships under their bare names
+	REQ=requirements DES=design
+else
+	REQ=devflow:requirements DES=devflow:design
+fi
 
 sid=$(j '.session_id')
 case "$sid" in '' | *[!A-Za-z0-9._-]*) exit 0 ;; esac
@@ -31,20 +74,7 @@ if [ "$mode" = end ]; then # the state is ours whatever the repo, so no config i
 	rm -rf "$sfile.lock"
 	exit 0
 fi
-cwd=$(j '.cwd')
-[ -n "$cwd" ] || cwd=${CLAUDE_PROJECT_DIR:-}
-[ -n "$cwd" ] && [ -d "$cwd" ] || exit 0
-
-# git_common <dir>: absolute physical path of the repository's common git dir (shared by its worktrees)
-git_common() {
-	local c
-	c=$(git -C "$1" rev-parse --git-common-dir 2>/dev/null) || return 1
-	case "$c" in /*) ;; *) c="$1/$c" ;; esac
-	(cd "$c" 2>/dev/null && pwd -P)
-}
-top=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null) || exit 0
-common=$(git_common "$cwd") || exit 0
-main=$(dirname "$common") # the main worktree's toplevel: <main>/.git is the common dir
+[ -n "$top" ] && [ -n "$common" ] || exit 0 # no cwd, or not a git repository
 
 cfg="$top/.claude/devflow.json"
 [ -f "$cfg" ] || cfg="$main/.claude/devflow.json"
@@ -230,7 +260,11 @@ prompt)
 		last=$(num "$(get nudged_at)")
 		[ $((n - last)) -lt 1800000 ] && exit 0
 		put --argjson n "$n" '.nudged_at = $n'
-		msg="[devflow] Feature work here goes through devflow:requirements → devflow:design (not grilling / superpowers:brainstorming). Start with the Skill tool: devflow:requirements"
+		if [ -n "$vendored" ]; then
+			msg="[devflow] Feature work here goes through \`requirements\` → \`design\` (devflow, vendored in this project; with the plugin installed also devflow:requirements → devflow:design), not grilling / superpowers:brainstorming. Start with the Skill tool: requirements"
+		else
+			msg="[devflow] Feature work here goes through devflow:requirements → devflow:design (not grilling / superpowers:brainstorming). Start with the Skill tool: devflow:requirements"
+		fi
 		[ -n "$armingSkills" ] && msg="$msg, or the project's entry: $(csv "$armingSkills")"
 		msg="$msg.$(gateLine)"
 		[ -n "$codePaths" ] && msg="$msg Once the flow starts, edits under $(csv "$codePaths") wait until the spec in $specDir/ has $sections."
@@ -242,16 +276,18 @@ prompt)
 skill)
 	s=$(j '.tool_input.skill')
 	[ -n "$s" ] || exit 0
+	k=$s # the name matched below: a vendored project's bare requirements / design are devflow's
+	if [ -n "$vendored" ]; then case "$s" in requirements | design) k="devflow:$s" ;; esac; fi
 	a=$(j '.tool_input.args')
 	n=$(now_ms)
 	msg=""
 	handoff=""
 	# 1. arm when the feature flow starts (devflow's own skills or a project wrapper)
 	arming=""
-	case "$s" in devflow:requirements | devflow:design) arming=1 ;; esac
+	case "$k" in devflow:requirements | devflow:design) arming=1 ;; esac
 	while IFS= read -r e; do
 		[ -n "$e" ] || continue
-		case "$s" in "$e" | *:"$e") arming=1 ;; esac
+		case "$k" in "$e" | *:"$e") arming=1 ;; esac
 	done <<EOF
 $armingSkills
 EOF
@@ -263,10 +299,10 @@ EOF
 		msg="$msg$(gateLine)"
 	fi
 	# 2. stamps and hand-off reminders
-	case "$s" in
+	case "$k" in
 	devflow:requirements)
 		put --argjson n "$n" '.requirements_at = $n'
-		[ -n "$analyticsSkill" ] && msg="${msg:+$msg }[devflow] Requirements started. Round 1 settles whether this needs analytics; when it does, run the \`$analyticsSkill\` skill before devflow:design writes the spec's **Analytics delta** (the events it adds, or \"none — <reason>\")."
+		[ -n "$analyticsSkill" ] && msg="${msg:+$msg }[devflow] Requirements started. Round 1 settles whether this needs analytics; when it does, run the \`$analyticsSkill\` skill before $DES writes the spec's **Analytics delta** (the events it adds, or \"none — <reason>\")."
 		;;
 	devflow:design) put --argjson n "$n" '.design_at = $n' ;;
 	writing-plans | *:writing-plans)
@@ -318,15 +354,15 @@ edit)
 		if [ -z "$sp" ]; then
 			case "$specDir" in /*) sd=$specDir ;; *) sd="$froot/${specDir#./}" ;; esac
 			if [ -z "$(newest_complete "${sd%/}")" ]; then
-				why="this session has no spec yet and none in $specDir/ is complete. Run devflow:requirements: it creates $specDir/<YYYY-MM-DD>-<slug>.md and settles ## Решения, then devflow:design adds ## Дизайн and ## Work split."
+				why="this session has no spec yet and none in $specDir/ is complete. Run $REQ: it creates $specDir/<YYYY-MM-DD>-<slug>.md and settles ## Решения, then $DES adds ## Дизайн and ## Work split."
 			fi
 		elif [ ! -f "$sp" ]; then
-			why="this session's spec $(show "$sp") is not on disk. Write it (devflow:requirements, then devflow:design)."
+			why="this session's spec $(show "$sp") is not on disk. Write it ($REQ, then $DES)."
 		else
 			miss=$(missing "$sp")
 			if [ -n "$miss" ]; then
-				next="devflow:design writes ## Дизайн and ## Work split."
-				case "$miss" in *Решения*) next="devflow:requirements writes ## Решения, then $next" ;; esac
+				next="$DES writes ## Дизайн and ## Work split."
+				case "$miss" in *Решения*) next="$REQ writes ## Решения, then $next" ;; esac
 				why="this session's spec $(show "$sp") is missing $miss. $next"
 			fi
 		fi
