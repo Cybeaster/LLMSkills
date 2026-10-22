@@ -1288,6 +1288,20 @@ function trySelf(ctx) {
   }
 }
 
+// src/routing.ts
+import { readFileSync as readFileSync4 } from "node:fs";
+import { join as join5 } from "node:path";
+var EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+var FALLBACK = { model: "opus", effort: "xhigh" };
+function spawnDefaults(ctx) {
+  try {
+    const spawn2 = JSON.parse(readFileSync4(join5(ctx.claudeHome, "routing", "policy.json"), "utf8")).spawn ?? {};
+    return { model: spawn2.model || FALLBACK.model, effort: spawn2.effort || FALLBACK.effort };
+  } catch {
+    return FALLBACK;
+  }
+}
+
 // src/spawn.ts
 var q = (s) => `'${s.replace(/'/g, `'\\''`)}'`;
 var SESSION_ID_WAIT_MS = 6e4;
@@ -1306,13 +1320,18 @@ async function spawnChild(ctx, o) {
   if (!parent || !task) throw new OrchError(`no task ${o.taskId} in this pool: run orch plan first`);
   const cwd = workDir(ctx, o.cwd);
   const brief = briefFile(ctx, o.brief);
+  const defaults = spawnDefaults(ctx);
+  const model = o.model || defaults.model;
+  const effort = o.effort || defaults.effort;
+  if (!EFFORTS.includes(effort)) throw new OrchError(`--effort must be one of ${EFFORTS.join(", ")}`);
+  const runAs = ["--model", model, "--effort", effort];
   const intro = `You are a child session of "${oneLine(parent.title) || parentId}", working on its task ${task.id}: "${oneLine(task.text)}". Read ${brief} first, then run \`orch plan\` for your part and tick each task with evidence.` + (o.prompt ? `
 
 ${o.prompt}` : "");
   const shown = oneLine(intro);
   if (ctx.env.HERDR_ENV !== "1" || !ctx.env.HERDR_WORKSPACE_ID) {
     const name2 = agentName(o.name, []);
-    const cmd = `cd ${q(oneLine(cwd))} && ORCH_PARENT=${parentId} ORCH_PARENT_TASK=${task.id} ORCH_BRIEF=${q(oneLine(brief))} claude --remote-control=${q(name2)} ${q(shown)}`;
+    const cmd = `cd ${q(oneLine(cwd))} && ORCH_PARENT=${parentId} ORCH_PARENT_TASK=${task.id} ORCH_BRIEF=${q(oneLine(brief))} claude --remote-control=${q(name2)} --model ${q(model)} --effort ${q(effort)} ${q(shown)}`;
     return ok(`Not inside herdr. Start the child yourself:
 ${cmd}
 `);
@@ -1323,7 +1342,7 @@ ${cmd}
   const promptCmd = (target) => `herdr agent prompt ${target} ${q(shown)}`;
   const noId = `If that says the session has no id yet, run orch status --all and link by its id.`;
   try {
-    await ctx.herdr.startClaude({ name, paneId, args: ["--remote-control", name] });
+    await ctx.herdr.startClaude({ name, paneId, args: ["--remote-control", name, ...runAs] });
   } catch (e) {
     const trust = e instanceof HerdrError && e.herdrCode === "agent_not_ready";
     throw new OrchError(
@@ -1369,7 +1388,7 @@ var HELP = `orch \u2014 task pools for Claude Code sessions
   orch status --all [--json]             every session
   orch link <child> <parent> <taskId> [--brief <file>]
                                          attach a session under a parent task
-  orch spawn-child <taskId> --name <n> --cwd <dir> --brief <file> [--prompt <text>]
+  orch spawn-child <taskId> --name <n> --cwd <dir> --brief <file> [--prompt <text>] [--model <m>] [--effort <level>]
   orch reply <session> [--task <id>] -- "text"
                                          answer a session's open question (the -- keeps a text that starts with a dash)
   orch reply <session> [--task <id>] --mark-only
@@ -1531,7 +1550,7 @@ async function cmdLink(ctx, args) {
 async function cmdSpawn(ctx, args) {
   const { values, positionals } = parseArgs({
     args,
-    options: { name: { type: "string" }, cwd: { type: "string" }, brief: { type: "string" }, prompt: { type: "string" } },
+    options: { name: { type: "string" }, cwd: { type: "string" }, brief: { type: "string" }, prompt: { type: "string" }, model: { type: "string" }, effort: { type: "string" } },
     allowPositionals: true
   });
   return spawnChild(ctx, {
@@ -1539,7 +1558,9 @@ async function cmdSpawn(ctx, args) {
     name: need(values.name, "--name"),
     cwd: need(values.cwd, "--cwd"),
     brief: need(values.brief, "--brief"),
-    prompt: values.prompt
+    prompt: values.prompt,
+    model: values.model,
+    effort: values.effort
   });
 }
 async function cmdReply(ctx, args) {

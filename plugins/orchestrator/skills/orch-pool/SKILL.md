@@ -16,7 +16,7 @@ The person runs many Claude sessions at once and follows them through one overvi
    - `orch task done t1 --evidence cmd:"npm test"` (orch runs it in your current directory and refuses a failing one; it stops a command after 110 s, so never use watch modes or servers here, and run longer suites yourself and tick with `commit:`, `ci:` or `note:`)
    - `note:<text>` or no evidence is shown as *claimed*, not done.
    Use `orch task start <id>` when you begin a step and `orch task block <id> "why"` when stuck.
-3. **Fan out through orch.** To hand parts to other sessions, write a brief file first (spec, conventions, what to report back), then for each part: `orch spawn-child <taskId> --name <short-name> --cwd <dir> --brief <file>`. Never open child sessions by hand; they would not show under your task.
+3. **Fan out through orch.** To hand parts to other sessions, write a brief file first (spec, conventions, what to report back), then for each part: `orch spawn-child <taskId> --name <short-name> --cwd <dir> --brief <file> [--model <m>] [--effort <level>]`. Without them the child starts on the `spawn` entry of `~/.claude/routing/policy.json`, else opus / xhigh. Never open child sessions by hand; they would not show under your task.
 
 ## When you need the person
 

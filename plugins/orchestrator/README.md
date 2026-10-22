@@ -35,6 +35,14 @@ If Claude Code's Bash sandbox is on, `orch` inside it cannot see other sessions 
 
 The exclusion does not cover compound calls like `cd x && orch …`.
 
+## Spawning a child
+
+```bash
+orch spawn-child <taskId> --name <n> --cwd <dir> --brief <file> [--prompt <text>] [--model <m>] [--effort <level>]
+```
+
+Without them the child starts on the `spawn` entry of `~/.claude/routing/policy.json`, else opus / xhigh.
+
 ## TUI keys
 
 | Key | Does |

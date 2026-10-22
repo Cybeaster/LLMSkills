@@ -4,11 +4,12 @@ import { oneLine } from './evidence.js'
 import { linkSessions } from './link.js'
 import { ok, type Out } from './out.js'
 import { briefFile, workDir } from './paths.js'
+import { EFFORTS, spawnDefaults } from './routing.js'
 import { resolveSelf } from './self.js'
 import { HerdrError } from './sources/herdr.js'
 import { readPool } from './store.js'
 
-export type SpawnOptions = { taskId: string; name: string; cwd: string; brief: string; prompt?: string }
+export type SpawnOptions = { taskId: string; name: string; cwd: string; brief: string; prompt?: string; model?: string; effort?: string }
 
 const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
 
@@ -32,6 +33,11 @@ export async function spawnChild(ctx: Ctx, o: SpawnOptions): Promise<Out> {
   if (!parent || !task) throw new OrchError(`no task ${o.taskId} in this pool: run orch plan first`)
   const cwd = workDir(ctx, o.cwd)
   const brief = briefFile(ctx, o.brief)
+  const defaults = spawnDefaults(ctx)
+  const model = o.model || defaults.model
+  const effort = o.effort || defaults.effort
+  if (!EFFORTS.includes(effort)) throw new OrchError(`--effort must be one of ${EFFORTS.join(', ')}`)
+  const runAs = ['--model', model, '--effort', effort]
 
   const intro =
     `You are a child session of "${oneLine(parent.title) || parentId}", working on its task ${task.id}: "${oneLine(task.text)}". ` +
@@ -42,7 +48,7 @@ export async function spawnChild(ctx: Ctx, o: SpawnOptions): Promise<Out> {
 
   if (ctx.env.HERDR_ENV !== '1' || !ctx.env.HERDR_WORKSPACE_ID) {
     const name = agentName(o.name, [])
-    const cmd = `cd ${q(oneLine(cwd))} && ORCH_PARENT=${parentId} ORCH_PARENT_TASK=${task.id} ORCH_BRIEF=${q(oneLine(brief))} claude --remote-control=${q(name)} ${q(shown)}`
+    const cmd = `cd ${q(oneLine(cwd))} && ORCH_PARENT=${parentId} ORCH_PARENT_TASK=${task.id} ORCH_BRIEF=${q(oneLine(brief))} claude --remote-control=${q(name)} --model ${q(model)} --effort ${q(effort)} ${q(shown)}`
     return ok(`Not inside herdr. Start the child yourself:\n${cmd}\n`)
   }
 
@@ -52,7 +58,7 @@ export async function spawnChild(ctx: Ctx, o: SpawnOptions): Promise<Out> {
   const promptCmd = (target: string) => `herdr agent prompt ${target} ${q(shown)}`
   const noId = `If that says the session has no id yet, run orch status --all and link by its id.`
   try {
-    await ctx.herdr.startClaude({ name, paneId, args: ['--remote-control', name] })
+    await ctx.herdr.startClaude({ name, paneId, args: ['--remote-control', name, ...runAs] })
   } catch (e) {
     // Observed in the Task 0 spike: in a folder Claude has never opened, the new session stops at
     // "Do you trust this folder?" and herdr reports agent_not_ready.

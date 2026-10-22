@@ -1,6 +1,6 @@
 {
   "name": "orchestrator",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "One view over every local Claude Code session: each session keeps a task pool with evidence, children nest under the task that spawned them, and /orch works from your phone.",
   "author": { "name": "Cybeaster", "email": "cybeastermail@gmail.com" }
 }
