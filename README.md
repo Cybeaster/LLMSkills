@@ -12,6 +12,7 @@ agent. Only the packaging differs, and both manifests sit side by side.
 .claude-plugin/marketplace.json     # marketplace manifest — Claude Code
 .agents/plugins/marketplace.json    # marketplace manifest — Codex
 plugins/
+  devflow/                          # requirements → design → plan, gated by hooks
   learning-skills/
     .claude-plugin/plugin.json      # plugin manifest — Claude Code
     .codex-plugin/plugin.json       # plugin manifest — Codex

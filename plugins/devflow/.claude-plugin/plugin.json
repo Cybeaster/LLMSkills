@@ -1,0 +1,6 @@
+{
+  "name": "devflow",
+  "version": "0.1.0",
+  "description": "Feature work in one flow: requirements drawn out in rounds, one design doc carrying every decision, code gated until that doc is complete, UI critiqued before it ships, analytics asked about at the hand-offs.",
+  "author": { "name": "Cybeaster", "email": "cybeastermail@gmail.com" }
+}
