@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# devflow hook: one script, five modes (DESIGN.md -> Hooks).
+# devflow hook: one script, six modes (DESIGN.md -> Hooks).
 #
-#   prompt  UserPromptSubmit                                arm the session on a feature-shaped prompt
-#   skill   PostToolUse Skill                               stamp requirements / design / plan / critique,
-#                                                           remind about the delta lines at the hand-offs
+#   prompt  UserPromptSubmit                                nudge a feature-shaped prompt toward the flow
+#   skill   PostToolUse Skill                               arm when the flow starts; stamp requirements /
+#                                                           design / plan / critique; remind at the hand-offs
 #   edit    PreToolUse Edit|Write|MultiEdit|NotebookEdit    remember the spec, gate code, stamp UI edits
 #   bash    PreToolUse Bash                                 worktrees only under <repo>/<worktreeDir>/
-#   stop    Stop                                            block once while UI changed since the last critique
+#   stop    Stop                                            armed: block once while UI is uncritiqued
+#   end     SessionEnd                                      delete the session's state
 #
-# Silent unless the repo has .claude/devflow.json (looked up in the cwd's toplevel, then in the main
-# worktree's). Fails open: no jq, bad stdin, no git, bad config or state -> exit 0 with no output.
+# Only an armed session (devflow:requirements, devflow:design or an `armingSkills` wrapper started) is
+# gated; ordinary work is never blocked. Silent unless the repo has .claude/devflow.json (looked up in the
+# cwd's toplevel, then in the main worktree's). Fails open: no jq, bad stdin, no git, bad config or
+# state -> exit 0 with no output. The gate is advisory: it sees file tools, not shell writes.
 # State: ${DEVFLOW_STATE_DIR:-~/.claude/state/devflow}/<session_id>.json, times in epoch milliseconds.
 set -u
 
@@ -21,6 +24,13 @@ j() { printf '%s' "$input" | jq -r "($1) // empty | strings" 2>/dev/null; }
 
 sid=$(j '.session_id')
 case "$sid" in '' | *[!A-Za-z0-9._-]*) exit 0 ;; esac
+sdir=${DEVFLOW_STATE_DIR:-$HOME/.claude/state/devflow}
+sfile="$sdir/$sid.json"
+if [ "$mode" = end ]; then # the state is ours whatever the repo, so no config is needed to drop it
+	rm -f "$sfile"
+	rm -rf "$sfile.lock"
+	exit 0
+fi
 cwd=$(j '.cwd')
 [ -n "$cwd" ] || cwd=${CLAUDE_PROJECT_DIR:-}
 [ -n "$cwd" ] && [ -d "$cwd" ] || exit 0
@@ -46,6 +56,8 @@ conf=$(jq -r '
 	@sh "specDir=\(.specDir | str("docs/specs"))",
 	@sh "worktreeDir=\(.worktreeDir | str(".worktrees"))",
 	@sh "analyticsSkill=\(.analyticsSkill | str(""))",
+	@sh "gate=\(.gate | str(""))",
+	@sh "armingSkills=\(.armingSkills | list)",
 	@sh "codePaths=\(.codePaths | list)",
 	@sh "uiPaths=\(.uiPaths | list)",
 	@sh "uiExtensions=\(.uiExtensions | list)"' "$cfg" 2>/dev/null) || exit 0
@@ -122,8 +134,28 @@ EOF
 	return 1
 }
 
-sdir=${DEVFLOW_STATE_DIR:-$HOME/.claude/state/devflow}
-sfile="$sdir/$sid.json"
+# missing <spec>: the required sections it lacks, comma-separated
+missing() {
+	local m=""
+	grep -qE '^##+[[:space:]]+Решения' "$1" || m="$m, ## Решения"
+	grep -qE '^##+[[:space:]]+Дизайн' "$1" || m="$m, ## Дизайн"
+	grep -qiE '^##+[[:space:]]+work split' "$1" || m="$m, ## Work split"
+	printf '%s' "${m#, }"
+}
+
+# newest_complete <dir>: the most recently modified .md in dir that has all three sections
+newest_complete() {
+	[ -d "$1" ] || return 1
+	local f
+	ls -1t "$1" 2>/dev/null | while IFS= read -r f; do
+		case "$f" in *.md) ;; *) continue ;; esac
+		[ -f "$1/$f" ] && [ -z "$(missing "$1/$f")" ] && {
+			printf '%s' "$1/$f"
+			break
+		}
+	done
+}
+
 lockd=""
 unlock() {
 	[ -n "$lockd" ] && rmdir "$lockd" 2>/dev/null
@@ -167,7 +199,12 @@ deny() {
 show() { # a path relative to the repo when it is inside it
 	case "$1" in "$top"/*) printf '%s' "${1#"$top"/}" ;; "$main"/*) printf '%s' "${1#"$main"/}" ;; *) printf '%s' "$1" ;; esac
 }
-codeList() { printf '%s' "$codePaths" | paste -sd, - | sed 's/,/, /g'; }
+csv() { printf '%s' "$1" | paste -sd, - | sed 's/,/, /g'; }
+sections="## Решения, ## Дизайн and ## Work split"
+gateLine() { # " Project gate: <text>." when a gate is configured
+	[ -n "$gate" ] || return 0
+	case "$gate" in *[.!?]) printf ' Project gate: %s' "$gate" ;; *) printf ' Project gate: %s.' "$gate" ;; esac
+}
 
 # ---- modes ---------------------------------------------------------------------------------------
 
@@ -180,18 +217,23 @@ prompt)
 		if test("^\\s*/(impeccable:)?impeccable\\s+critique\\b"; "i") then "critique"
 		elif test("\\[no-devflow\\]"; "i") then "waive"
 		elif test("\\b(build|add|implement|create|introduce|brainstorm)\\b|\\bnew feature\\b|\\bdesign doc\\b|\\b(сделай|сделаем|добавь|добавим|создай|создадим|реализуй|реализуем|внедри|внедрим)\\b|\\bспроектир|\\bфич"; "i")
-		  and (test("^\\W*(fix|how|what|why|почему|как|что|зачем|исправь|почини|поправь)\\b"; "i") | not)
+		  and (test("^\\W*((fix|how|what|why|почему|как|что|зачем|исправь|почини|поправь|commit|push|merge|rebase|build|run|deploy|review|screenshot|log)\\b|фикс)"; "i") | not)
+		  and (test("\\bPR\\b|\\bpull request|\\b(implement|execute|follow)\\s+(the\\s+)?plan\\b|\\b(выполни|исполни|реализуй)\\s+план|коммит|\\b(за)?пуш|\\bветк|ревью|скриншот|\\bлог(и|ов|ах|ам|ом|е|у|а)?\\b"; "i") | not)
 		  and (test("\\btest|тест"; "i") | not)
 		then "feature" else "" end' 2>/dev/null)
 	case "$verdict" in
 	critique) put --argjson n "$(now_ms)" '.critique_at = $n' ;;
 	waive) put '.armed = false | .waived = true' ;;
-	feature)
-		[ "$(get armed)" = true ] && exit 0
+	feature) # a nudge, never an arm: at most once per 30 minutes, so a later feature is nudged again
 		[ "$(get waived)" = true ] && exit 0
-		put --argjson n "$(now_ms)" '.armed = true | .armed_at = $n'
-		msg="[devflow] Feature work here goes through devflow:requirements → devflow:design (not grilling / superpowers:brainstorming). Start with the Skill tool: devflow:requirements."
-		[ -n "$codePaths" ] && msg="$msg Edits under $(codeList) stay blocked until this session's spec in $specDir/ has ## Решения, ## Дизайн and ## Work split."
+		n=$(now_ms)
+		last=$(num "$(get nudged_at)")
+		[ $((n - last)) -lt 1800000 ] && exit 0
+		put --argjson n "$n" '.nudged_at = $n'
+		msg="[devflow] Feature work here goes through devflow:requirements → devflow:design (not grilling / superpowers:brainstorming). Start with the Skill tool: devflow:requirements"
+		[ -n "$armingSkills" ] && msg="$msg, or the project's entry: $(csv "$armingSkills")"
+		msg="$msg.$(gateLine)"
+		[ -n "$codePaths" ] && msg="$msg Once the flow starts, edits under $(csv "$codePaths") wait until the spec in $specDir/ has $sections."
 		ctx UserPromptSubmit "$msg If the user says this is not a feature, they can resend with [no-devflow]."
 		;;
 	esac
@@ -204,10 +246,27 @@ skill)
 	n=$(now_ms)
 	msg=""
 	handoff=""
+	# 1. arm when the feature flow starts (devflow's own skills or a project wrapper)
+	arming=""
+	case "$s" in devflow:requirements | devflow:design) arming=1 ;; esac
+	while IFS= read -r e; do
+		[ -n "$e" ] || continue
+		case "$s" in "$e" | *:"$e") arming=1 ;; esac
+	done <<EOF
+$armingSkills
+EOF
+	if [ -n "$arming" ] && [ "$(get armed)" != true ]; then
+		put --argjson n "$n" '.armed = true | .armed_at = $n | del(.waived)'
+		msg="[devflow] Feature flow armed for this session (\`$s\`)."
+		[ -n "$codePaths" ] && msg="$msg Edits under $(csv "$codePaths") wait until this session's spec in $specDir/ has $sections."
+		[ -n "$uiPaths" ] && msg="$msg UI edits under $(csv "$uiPaths") need an impeccable critique before the turn ends."
+		msg="$msg$(gateLine)"
+	fi
+	# 2. stamps and hand-off reminders
 	case "$s" in
 	devflow:requirements)
 		put --argjson n "$n" '.requirements_at = $n'
-		[ -n "$analyticsSkill" ] && msg="[devflow] Requirements started. Round 1 settles whether this needs analytics; when it does, run the \`$analyticsSkill\` skill before devflow:design writes the spec's **Analytics delta** (the events it adds, or \"none — <reason>\")."
+		[ -n "$analyticsSkill" ] && msg="${msg:+$msg }[devflow] Requirements started. Round 1 settles whether this needs analytics; when it does, run the \`$analyticsSkill\` skill before devflow:design writes the spec's **Analytics delta** (the events it adds, or \"none — <reason>\")."
 		;;
 	devflow:design) put --argjson n "$n" '.design_at = $n' ;;
 	writing-plans | *:writing-plans)
@@ -248,23 +307,27 @@ edit)
 		exit 0
 	fi
 
-	# 2. feature code while armed needs the spec on disk with all three sections
-	if [ -n "$codePaths" ] && in_list "$rel" "$codePaths" && [ "$(get armed)" = true ]; then
+	armed=$(get armed)
+	[ "$armed" = true ] || exit 0 # ordinary work: nothing to gate, nothing to critique
+
+	# 2. feature code needs a spec on disk with all three sections: this session's, or, when it
+	#    edited none, the newest complete one in specDir
+	if [ -n "$codePaths" ] && in_list "$rel" "$codePaths"; then
 		sp=$(get spec)
 		why=""
 		if [ -z "$sp" ]; then
-			why="this session has no spec yet. Run devflow:requirements: it creates $specDir/<YYYY-MM-DD>-<slug>.md and settles ## Решения, then devflow:design adds ## Дизайн and ## Work split."
+			case "$specDir" in /*) sd=$specDir ;; *) sd="$froot/${specDir#./}" ;; esac
+			if [ -z "$(newest_complete "${sd%/}")" ]; then
+				why="this session has no spec yet and none in $specDir/ is complete. Run devflow:requirements: it creates $specDir/<YYYY-MM-DD>-<slug>.md and settles ## Решения, then devflow:design adds ## Дизайн and ## Work split."
+			fi
 		elif [ ! -f "$sp" ]; then
 			why="this session's spec $(show "$sp") is not on disk. Write it (devflow:requirements, then devflow:design)."
 		else
-			miss=""
-			grep -qE '^##+[[:space:]]+Решения' "$sp" || miss="$miss, ## Решения"
-			grep -qE '^##+[[:space:]]+Дизайн' "$sp" || miss="$miss, ## Дизайн"
-			grep -qiE '^##+[[:space:]]+work split' "$sp" || miss="$miss, ## Work split"
+			miss=$(missing "$sp")
 			if [ -n "$miss" ]; then
 				next="devflow:design writes ## Дизайн and ## Work split."
 				case "$miss" in *Решения*) next="devflow:requirements writes ## Решения, then $next" ;; esac
-				why="this session's spec $(show "$sp") is missing ${miss#, }. $next"
+				why="this session's spec $(show "$sp") is missing $miss. $next"
 			fi
 		fi
 		[ -n "$why" ] && deny "[devflow] Blocked: $rel is feature code, and $why Code edits open once the spec has all three sections. If the user says this is not a feature, they can resend with [no-devflow]."
@@ -328,6 +391,7 @@ bash)
 	;;
 
 stop)
+	[ "$(get armed)" = true ] || exit 0 # an unarmed session (a bug fix, a waiver) never blocks
 	ui=$(num "$(get ui_edit_at)")
 	[ "$ui" -gt 0 ] || exit 0
 	cr=$(num "$(get critique_at)")

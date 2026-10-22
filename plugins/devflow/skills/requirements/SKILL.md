@@ -1,17 +1,17 @@
 ---
 name: requirements
-description: 'Use first for any new feature or behavior change in a codebase, before design, plans or code, and in place of grilling or superpowers:brainstorming whenever the thing being grilled or brainstormed is a feature to build. Triggers - "new feature", "build / add / implement X", "grill me", "brainstorm", "requirements", "design doc", "новая фича", "спроектируем фичу", "сделай / добавь", "давай продумаем". Not for bug fixes, refactors or questions about existing code.'
+description: 'Use when the user wants to work out a new feature or a change to how a product behaves - its requirements, a spec, a design doc - before plans or code, in place of grilling or superpowers:brainstorming when the subject is such a feature. Triggers - "new feature", "grill me" or "brainstorm" about a feature, "requirements", "design doc", "spec", "новая фича", "спроектируем фичу", "давай продумаем фичу". Not for small tweaks (a flag, an option, a one-file change), bug fixes, refactors or questions about existing code.'
 ---
 
 # Requirements
 
-Draw a feature's requirements out of the user in **rounds**, before anything is designed, and write each decision into the feature's **spec** the moment it is settled. Facts come from the codebase, found by subagents. Decisions come from the user.
+Draw a feature's requirements out of the user in **rounds**, before anything is designed, and write each decision into the feature's **spec** the moment it is settled. Facts come from the codebase. Decisions come from the user.
 
 ## Setup
 
-1. Read `.claude/devflow.json` at the repo root. In a linked worktree that has none, read the one in this repository's main worktree (the first entry of `git worktree list`). No file means the defaults. Take `specDir` (default `docs/specs`), `contractsDir` and `analyticsSkill` when present.
+1. Read `.claude/devflow.json` at the repo root. In a linked worktree that has none, read the one in this repository's main worktree (the first entry of `git worktree list`). Take `specDir`, `contractsDir` and `analyticsSkill` when present. With no file at all, end the turn on one question, where to keep the spec (➡️ `docs/specs`), and create nothing until the user answers; their answer is `specDir` for this spec. Creating `.claude/devflow.json` stays the user's call, because that file switches devflow's hooks on for the repo.
 2. Create the spec before round 1: `<specDir>/<YYYY-MM-DD>-<slug>.md`, today's date and a short kebab slug of the feature. It holds a `# <title>` line, one line of goal, and an empty `## Решения`. Only that heading: `## Дизайн` and `## Work split` are devflow:design's, and the devflow hook opens code edits once all three headings are on disk, so writing them early unlocks code before a design exists.
-3. Send fact-finding subagents (see **Facts**) for what round 1 needs: how the touched area works today, what already exists, which files in `contractsDir` cover it. Work from their reports; your own context stays on the decisions.
+3. Gather the facts round 1 needs (see **Facts**): how the touched area works today, what already exists, which files in `contractsDir` cover it.
 
 Write questions and the spec in the language the user writes in. The three headings stay exactly as written here, since the hook matches them.
 
@@ -35,7 +35,7 @@ Round 1 always carries these three, beside the rest of the frontier:
 
 - **UI**: does it change what a user sees, and which surfaces? A yes sends devflow:design through a canvas and an impeccable critique.
 - **Analytics**: does it need product analytics events, and which decision would they inform? With `analyticsSkill` set, that skill picks the events at design time; here settle only whether.
-- **Behavior contracts**: which contracts change? Name the `contractsDir` files that cover the touched surface (a subagent finds them) and recommend; "none" is a valid answer.
+- **Behavior contracts**: which contracts change? Name the `contractsDir` files that cover the touched surface and recommend; "none" is a valid answer.
 
 When the request bundles independent features, round 1 opens with which one this spec covers; the others get specs of their own.
 
@@ -47,12 +47,14 @@ After each reply:
 
 ## Facts
 
-How things are today is a fact: a subagent looks it up, and the user is never asked it. You read `devflow.json` and the spec yourself; everything else (code, docs, contracts, history, even a directory listing) comes back from a subagent dispatched with the Agent tool, its `description` starting with a routing class tag and its `model` and `effort` set explicitly. Independent lookups go out in parallel, in one message:
+How things are today is a fact: look it up, and never ask the user for it. A trivial lookup you do yourself with Glob, Grep or Read: one file, one listing, `devflow.json`, the spec. Real investigation (how an area works, what calls what, which contracts cover a surface, the history behind it) goes to subagents via the Agent tool, so your context stays on the decisions. Independent lookups go out in parallel, in one message.
+
+With the routing plugin installed, each Agent `description` starts with a class tag and the call sets `model` and `effort` at or above that class's floor, or the plugin denies it; without the plugin, the tags are optional:
 
 - `[search]`, model `haiku`, effort `low`: find files, read what exists, list the contracts.
 - `[research]`, model `opus`, effort `high`: library or web documentation.
 
-The routing plugin, when installed, holds Agent calls to these floors. A running subagent holds back only the questions that need its answer; ask the rest of the frontier now.
+A running subagent holds back only the questions that need its answer; ask the rest of the frontier now.
 
 ## Done
 

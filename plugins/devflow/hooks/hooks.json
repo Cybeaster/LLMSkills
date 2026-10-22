@@ -12,6 +12,9 @@
     ],
     "Stop": [
       { "hooks": [{ "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/devflow.sh\" stop", "timeout": 10 }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/devflow.sh\" end", "timeout": 10 }] }
     ]
   }
 }

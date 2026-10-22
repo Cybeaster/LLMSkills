@@ -48,6 +48,13 @@ p_edit() { # p_edit <cwd> <tool> <path>
 p_skill() { jq -cn --arg s "$S" --arg c "$1" --arg k "$2" --arg a "${3:-}" '{session_id: $s, cwd: $c, hook_event_name: "PostToolUse", tool_name: "Skill", tool_input: {skill: $k, args: $a}, tool_response: {}}'; }
 p_bash() { jq -cn --arg s "$S" --arg c "$1" --arg x "$2" '{session_id: $s, cwd: $c, hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: {command: $x}}'; }
 p_stop() { jq -cn --arg s "$S" --arg c "$1" --argjson a "${2:-false}" '{session_id: $s, cwd: $c, hook_event_name: "Stop", stop_hook_active: $a}'; }
+p_end() { jq -cn --arg s "$S" --arg c "$1" '{session_id: $s, cwd: $c, hook_event_name: "SessionEnd", reason: "other"}'; }
+
+arm() { hook skill "$(p_skill "$1" "${2:-devflow:requirements}")"; } # start the feature flow in $S
+age() {                                                               # age <field> <minutes>: move a stamp into the past
+	local f="$DEVFLOW_STATE_DIR/$S.json" t
+	t=$(jq --arg k "$1" --argjson m "$2" '.[$k] = (.[$k] - $m * 60000)' "$f") && printf '%s\n' "$t" >"$f"
+}
 
 # ---- assertions ----------------------------------------------------------------------------------
 contains_all() { # contains_all <text> <needle>... ; prints the first missing needle
@@ -154,10 +161,11 @@ new
 silent "no config: feature prompt" prompt "$(p_prompt "$N" "$FEATURE")"
 silent "no config: requirements skill" skill "$(p_skill "$N" devflow:requirements)"
 silent "no config: writing-plans skill" skill "$(p_skill "$N" superpowers:writing-plans)"
-silent "no config: code edit after a feature prompt" edit "$(p_edit "$N" Edit "$N/webapp/lib/x.ts")"
+silent "no config: code edit after the flow starts" edit "$(p_edit "$N" Edit "$N/webapp/lib/x.ts")"
 silent "no config: UI edit" edit "$(p_edit "$N" Write "$N/webapp/components/A.tsx")"
 silent "no config: stop after a UI edit" stop "$(p_stop "$N")"
 silent "no config: worktree outside the repo" bash "$(p_bash "$N" "git worktree add /tmp/elsewhere")"
+silent "no config: session end" end "$(p_end "$N")"
 check "no config: no state written" test ! -e "$DEVFLOW_STATE_DIR/$S.json"
 P="$T/plain"
 mkdir -p "$P/.claude"
@@ -167,13 +175,14 @@ silent "not a git repo: feature prompt" prompt "$(p_prompt "$P" "$FEATURE")"
 # ==================================================================================================
 echo "# fail open"
 new
-for m in prompt skill edit bash stop; do
+for m in prompt skill edit bash stop end; do
 	silent "garbage stdin ($m)" "$m" 'not json {'
 	silent "empty stdin ($m)" "$m" ''
 	silent "JSON array stdin ($m)" "$m" '[1,2]'
 	silent "no session_id ($m)" "$m" "$(jq -cn --arg c "$R" '{cwd: $c, prompt: "add a page", tool_input: {file_path: "webapp/x.ts", skill: "devflow:requirements", command: "git worktree add /tmp/x"}}')"
 done
 silent "unsafe session_id" prompt "$(jq -cn --arg c "$R" '{session_id: "../../x", cwd: $c, prompt: "add a page"}')"
+silent "unsafe session_id (end)" end "$(jq -cn --arg c "$R" '{session_id: "../state", cwd: $c}')"
 silent "missing cwd dir" prompt "$(jq -cn '{session_id: "s-x", cwd: "/nonexistent/dir", prompt: "add a page"}')"
 silent "unknown mode" bogus "$(p_prompt "$R" "$FEATURE")"
 OUT=$(printf '%s' "$(p_prompt "$R" "$FEATURE")" | PATH=/nonexistent "$BASH_BIN" "$HOOK" prompt 2>/dev/null)
@@ -189,14 +198,14 @@ silent "config not an object" prompt "$(p_prompt "$B" "$FEATURE")"
 new
 mkdir -p "$DEVFLOW_STATE_DIR"
 printf 'garbage' >"$DEVFLOW_STATE_DIR/$S.json"
-context "corrupt state file: still arms" UserPromptSubmit prompt "$(p_prompt "$R" "$FEATURE")" "devflow:requirements"
-check "corrupt state file: rewritten as JSON" jq -e '.armed == true' "$DEVFLOW_STATE_DIR/$S.json"
+context "corrupt state file: still nudges" UserPromptSubmit prompt "$(p_prompt "$R" "$FEATURE")" "devflow:requirements"
+check "corrupt state file: rewritten as JSON" jq -e '.nudged_at > 0' "$DEVFLOW_STATE_DIR/$S.json"
 
 # ==================================================================================================
-echo "# prompt: anchored feature regex"
+echo "# prompt: a nudge, never an arm"
 for p in "$FEATURE" \
 	"implement X and fix Y" \
-	"Build a settings panel for notifications" \
+	"Can you build a settings panel for notifications" \
 	"We need a new feature: saved searches" \
 	"Сделай новую страницу профиля" \
 	"Добавь экспорт отчётов в CSV" \
@@ -206,11 +215,13 @@ for p in "$FEATURE" \
 	"Let's brainstorm the onboarding flow" \
 	"write a design doc for the billing page"; do
 	new
-	context "arms: $p" UserPromptSubmit prompt "$(p_prompt "$R" "$p")" \
-		"devflow:requirements → devflow:design (not grilling / superpowers:brainstorming)" "webapp/, api" "docs/specs/"
+	context "nudges: $p" UserPromptSubmit prompt "$(p_prompt "$R" "$p")" \
+		"devflow:requirements → devflow:design (not grilling / superpowers:brainstorming)" "Project gate: Read docs/gate.md and follow it"
+	silent "nudge does not arm: $p" edit "$(p_edit "$R" Edit "$R/webapp/lib/x.ts")"
 done
 for p in "fix the login redirect" \
 	"Fix: add a null check in the parser" \
+	"Фикс: добавь проверку на null" \
 	"how do I add a route?" \
 	"What would it take to build X?" \
 	"why does the build add 2MB" \
@@ -222,140 +233,226 @@ for p in "fix the login redirect" \
 	"Добавь тесты для парсера" \
 	"implement the missing tests" \
 	"explain this file" \
-	"run the linter"; do
+	"commit and push" \
+	"push the branch and add a changelog line" \
+	"add a PR description and open the PR" \
+	"merge development into master" \
+	"rebase onto master and add the fixup" \
+	"build the webapp and add the output to the report" \
+	"run the linter" \
+	"deploy to dev and add a note" \
+	"review the diff and add comments" \
+	"screenshot the new page" \
+	"log in as admin and add a user" \
+	"Сделай коммит и запушь" \
+	"Добавь это в ветку dev" \
+	"Сделай ревью этого PR" \
+	"Добавь лог в обработчик" \
+	"сделай скриншот страницы" \
+	"implement the plan in docs/plans/x.md" \
+	"Now execute the plan" \
+	"выполни план"; do
 	new
-	silent "does not arm: $p" prompt "$(p_prompt "$R" "$p")"
-	silent "not armed, code edit allowed: $p" edit "$(p_edit "$R" Edit "$R/webapp/lib/x.ts")"
+	silent "no nudge: $p" prompt "$(p_prompt "$R" "$p")"
 done
 new
 hook prompt "$(p_prompt "$R" "$FEATURE")"
-silent "arms once: second feature prompt is silent" prompt "$(p_prompt "$R" "Add another panel")"
+silent "a second feature prompt within 30 min is quiet" prompt "$(p_prompt "$R" "Add another panel")"
+age nudged_at 31
+context "after 30 min a feature prompt is nudged again" UserPromptSubmit prompt "$(p_prompt "$R" "Add another panel")" "devflow:requirements"
+NG="$T/nogate"
+mkrepo "$NG" '{"codePaths":["src/"]}'
+new
+context "no gate configured: nudge" UserPromptSubmit prompt "$(p_prompt "$NG" "$FEATURE")" "devflow:requirements"
+lacks "... without a Project gate line" "Project gate"
+
+# ==================================================================================================
+echo "# arming: only when the feature flow starts"
+MODE=edit
+G="$T/gate"
+mkrepo "$G" "$CFG"
+new
+hook prompt "$(p_prompt "$G" "$FEATURE")"
+silent "a feature prompt alone leaves code free" edit "$(p_edit "$G" Edit "$G/webapp/lib/x.ts")"
+context "devflow:requirements arms" PostToolUse skill "$(p_skill "$G" devflow:requirements)" \
+	"armed" "webapp/, api" "docs/specs/" "Project gate: Read docs/gate.md and follow it" "acme-analytics-events"
+denies "armed by requirements: code edit denied" "$(p_edit "$G" Edit "$G/webapp/lib/x.ts")" "no spec yet"
+hook skill "$(p_skill "$G" devflow:design "decisions settled")"
+lacks "already armed: design adds no second arming note" "Project gate"
+new
+context "devflow:design arms" PostToolUse skill "$(p_skill "$G" devflow:design)" "armed" "Project gate:"
+denies "armed by design: code edit denied" "$(p_edit "$G" Edit "$G/webapp/lib/x.ts")" "no spec yet"
+AR="$T/arming"
+mkrepo "$AR" '{"codePaths":["src/"],"armingSkills":["itabyss-brainstorm","itabyss-brainstorm-design"],"gate":"Open the Notion gate"}'
+new
+context "armingSkills: a project wrapper arms" PostToolUse skill "$(p_skill "$AR" itabyss-brainstorm)" "armed" "Project gate: Open the Notion gate"
+denies "armed by the wrapper: code edit denied" "$(p_edit "$AR" Edit "$AR/src/x.ts")" "no spec yet"
+new
+context "armingSkills: a namespaced name arms too" PostToolUse skill "$(p_skill "$AR" proj:itabyss-brainstorm-design)" "armed"
+new
+silent "a skill not listed does not arm" skill "$(p_skill "$AR" superpowers:systematic-debugging)"
+silent "... code stays free" edit "$(p_edit "$AR" Edit "$AR/src/x.ts")"
+new
+arm "$G"
+silent "[no-devflow] disarms" prompt "$(p_prompt "$G" "it is a one-liner [no-devflow]")"
+silent "waived: code edit allowed" edit "$(p_edit "$G" Edit "$G/webapp/lib/x.ts")"
+silent "waived: a feature prompt neither nudges nor arms" prompt "$(p_prompt "$G" "$FEATURE")"
+silent "waived: still allowed" edit "$(p_edit "$G" Edit "$G/webapp/lib/x.ts")"
+context "starting the flow again re-arms" PostToolUse skill "$(p_skill "$G" devflow:requirements)" "armed"
+denies "... and the gate is back" "$(p_edit "$G" Edit "$G/webapp/lib/x.ts")" "no spec yet"
 
 # ==================================================================================================
 echo "# edit: spec gate"
-MODE=edit
 new
-silent "not armed: code edit allowed" edit "$(p_edit "$R" Edit "$R/webapp/lib/x.ts")"
-hook prompt "$(p_prompt "$R" "$FEATURE")"
-denies "armed, no spec: code edit denied" "$(p_edit "$R" Edit "$R/webapp/lib/x.ts")" "webapp/lib/x.ts" "no spec yet" "devflow:requirements"
-denies "armed, no spec: Write denied too" "$(p_edit "$R" Write "$R/webapp/lib/new.ts")" "no spec yet"
-denies "armed, no spec: codePath without a slash" "$(p_edit "$R" Edit "$R/api/server.js")" "api/server.js"
-silent "armed: a sibling of a codePath is free" edit "$(p_edit "$R" Edit "$R/apiary/x.js")"
-silent "armed: README is free" edit "$(p_edit "$R" Edit "$R/README.md")"
-silent "armed: docs are free" edit "$(p_edit "$R" Write "$R/docs/notes.md")"
-mkdir -p "$R/docs/specs"
-spec "$R/docs/specs/2026-01-01-other.md" req design split
-denies "a complete spec from another session does not unlock" "$(p_edit "$R" Edit "$R/webapp/lib/x.ts")" "no spec yet"
-silent "a non-markdown file in specDir is not a spec" edit "$(p_edit "$R" Write "$R/docs/specs/diagram.png")"
-denies "... and does not unlock" "$(p_edit "$R" Edit "$R/webapp/lib/x.ts")" "no spec yet"
-SP="$R/docs/specs/2026-10-22-csv-export.md"
-silent "writing the spec (relative path) is allowed" edit "$(p_edit "$R" Write "docs/specs/2026-10-22-csv-export.md")"
+silent "not armed: code edit allowed" edit "$(p_edit "$G" Edit "$G/webapp/lib/x.ts")"
+arm "$G"
+denies "armed, no spec: code edit denied" "$(p_edit "$G" Edit "$G/webapp/lib/x.ts")" "webapp/lib/x.ts" "no spec yet" "devflow:requirements"
+denies "armed, no spec: Write denied too" "$(p_edit "$G" Write "$G/webapp/lib/new.ts")" "no spec yet"
+denies "armed, no spec: codePath without a slash" "$(p_edit "$G" Edit "$G/api/server.js")" "api/server.js"
+silent "armed: a sibling of a codePath is free" edit "$(p_edit "$G" Edit "$G/apiary/x.js")"
+silent "armed: README is free" edit "$(p_edit "$G" Edit "$G/README.md")"
+silent "armed: docs are free" edit "$(p_edit "$G" Write "$G/docs/notes.md")"
+silent "a non-markdown file in specDir is not a spec" edit "$(p_edit "$G" Write "$G/docs/specs/diagram.png")"
+denies "... and does not unlock" "$(p_edit "$G" Edit "$G/webapp/lib/x.ts")" "no spec yet"
+SP="$G/docs/specs/2026-10-22-csv-export.md"
+silent "writing the spec (relative path) is allowed" edit "$(p_edit "$G" Write "docs/specs/2026-10-22-csv-export.md")"
 check "the spec path is remembered" jq -e --arg p "$SP" '.spec == $p' "$DEVFLOW_STATE_DIR/$S.json"
-denies "spec remembered but not on disk" "$(p_edit "$R" Edit "$R/webapp/lib/x.ts")" "docs/specs/2026-10-22-csv-export.md" "not on disk"
+denies "spec remembered but not on disk" "$(p_edit "$G" Edit "$G/webapp/lib/x.ts")" "docs/specs/2026-10-22-csv-export.md" "not on disk"
 spec "$SP"
-denies "empty spec: denied naming all three sections" "$(p_edit "$R" Edit "$R/webapp/lib/x.ts")" "## Решения" "## Дизайн" "## Work split" "devflow:requirements"
+denies "empty spec: denied naming all three sections" "$(p_edit "$G" Edit "$G/webapp/lib/x.ts")" "## Решения" "## Дизайн" "## Work split" "devflow:requirements"
 spec "$SP" req
-denies "spec with ## Решения only: names the two missing" "$(p_edit "$R" Edit "$R/webapp/lib/x.ts")" "missing ## Дизайн, ## Work split" "devflow:design"
+denies "spec with ## Решения only: names the two missing" "$(p_edit "$G" Edit "$G/webapp/lib/x.ts")" "missing ## Дизайн, ## Work split" "devflow:design"
 lacks "... and not the present one" "missing ## Решения"
+spec "$G/docs/specs/2026-01-01-other.md" req design split
+denies "own spec incomplete: another complete spec does not unlock" "$(p_edit "$G" Edit "$G/webapp/lib/x.ts")" "missing ## Дизайн, ## Work split"
 spec "$SP" req design
-denies "spec without ## Work split" "$(p_edit "$R" Write "$R/webapp/lib/x.ts")" "missing ## Work split"
+denies "spec without ## Work split" "$(p_edit "$G" Write "$G/webapp/lib/x.ts")" "missing ## Work split"
 spec "$SP" req design split
-silent "complete spec: Edit allowed" edit "$(p_edit "$R" Edit "$R/webapp/lib/x.ts")"
-silent "complete spec: Write allowed" edit "$(p_edit "$R" Write "$R/webapp/lib/y.ts")"
-silent "complete spec: MultiEdit allowed" edit "$(p_edit "$R" MultiEdit "$R/api/server.js")"
-silent "complete spec: NotebookEdit allowed" edit "$(p_edit "$R" NotebookEdit "$R/webapp/nb.ipynb")"
+silent "complete spec: Edit allowed" edit "$(p_edit "$G" Edit "$G/webapp/lib/x.ts")"
+silent "complete spec: Write allowed" edit "$(p_edit "$G" Write "$G/webapp/lib/y.ts")"
+silent "complete spec: MultiEdit allowed" edit "$(p_edit "$G" MultiEdit "$G/api/server.js")"
+silent "complete spec: NotebookEdit allowed" edit "$(p_edit "$G" NotebookEdit "$G/webapp/nb.ipynb")"
 mv "$SP" "$SP.bak"
-denies "spec checked on disk at that moment (removed again)" "$(p_edit "$R" Edit "$R/webapp/lib/x.ts")" "not on disk"
+denies "spec checked on disk at that moment (removed again)" "$(p_edit "$G" Edit "$G/webapp/lib/x.ts")" "not on disk"
 mv "$SP.bak" "$SP"
-mkdir -p "$R/webapp"
+F="$T/fallback"
+mkrepo "$F" "$CFG"
+spec "$F/docs/specs/2026-01-01-old.md" req design split
+spec "$F/docs/specs/2026-02-01-newer.md" req
+touch -t 202601010000 "$F/docs/specs/2026-01-01-old.md"
+touch -t 202602010000 "$F/docs/specs/2026-02-01-newer.md"
 new
-hook prompt "$(p_prompt "$R/webapp" "$FEATURE")"
-denies "cwd in a subdirectory, relative path" "$(p_edit "$R/webapp" Edit "lib/x.ts")" "webapp/lib/x.ts"
+arm "$F" devflow:design
+silent "no spec this session: the newest complete spec in specDir unlocks" edit "$(p_edit "$F" Edit "$F/webapp/lib/x.ts")"
+rm "$F/docs/specs/2026-01-01-old.md"
+denies "no spec this session and none complete: denied" "$(p_edit "$F" Edit "$F/webapp/lib/x.ts")" "no spec yet"
+mkdir -p "$G/webapp"
+new
+arm "$G/webapp"
+rm -f "$SP" "$G/docs/specs/2026-01-01-other.md"
+denies "cwd in a subdirectory, relative path" "$(p_edit "$G/webapp" Edit "lib/x.ts")" "webapp/lib/x.ts"
 O="$T/other"
 mkrepo "$O"
-silent "armed: a file in an unrelated repo is not judged" edit "$(p_edit "$R" Edit "$O/webapp/lib/x.ts")"
-new
-hook prompt "$(p_prompt "$R" "$FEATURE")"
-silent "[no-devflow] waives" prompt "$(p_prompt "$R" "it is a one-liner [no-devflow]")"
-silent "waived: code edit allowed" edit "$(p_edit "$R" Edit "$R/webapp/lib/x.ts")"
-silent "waived: a later feature prompt does not re-arm" prompt "$(p_prompt "$R" "$FEATURE")"
-silent "waived: still allowed" edit "$(p_edit "$R" Edit "$R/webapp/lib/x.ts")"
+silent "armed: a file in an unrelated repo is not judged" edit "$(p_edit "$G" Edit "$O/webapp/lib/x.ts")"
 NC="$T/nocode"
 mkrepo "$NC" '{"uiPaths":["src/ui/"]}'
 new
-hook prompt "$(p_prompt "$NC" "$FEATURE")"
+arm "$NC"
 silent "no codePaths: the gate is off" edit "$(p_edit "$NC" Edit "$NC/src/lib/x.ts")"
 
 # ==================================================================================================
-echo "# UI edit -> stop -> critique"
+echo "# UI edit -> stop -> critique (armed sessions only)"
+U="$T/ui"
+mkrepo "$U" '{"uiPaths":["webapp/components/","webapp/app/"],"uiExtensions":[".tsx",".css"]}'
 new
-silent "UI edit is allowed (not armed)" edit "$(p_edit "$R" Edit "$R/webapp/components/Button.tsx")"
-blocks "stop blocks after a UI edit" "$(p_stop "$R")"
-silent "stop_hook_active: no loop" stop "$(p_stop "$R" true)"
-blocks "still uncritiqued: the next stop blocks again" "$(p_stop "$R")"
-silent "impeccable critique (Skill)" skill "$(p_skill "$R" impeccable:impeccable "critique webapp/components/Button.tsx")"
-silent "stop free after the critique" stop "$(p_stop "$R")"
+hook edit "$(p_edit "$U" Edit "$U/webapp/components/Button.tsx")"
+silent "not armed: a UI bug fix never blocks Stop" stop "$(p_stop "$U")"
+arm "$U"
+silent "UI edits made before arming do not count" stop "$(p_stop "$U")"
 new
-hook edit "$(p_edit "$R" Edit "$R/webapp/components/Button.tsx")"
-hook stop "$(p_stop "$R")"
-hook skill "$(p_skill "$R" impeccable:impeccable "critique the button")"
-hook edit "$(p_edit "$R" Edit "$R/webapp/components/Button.tsx")"
-silent "block -> critique -> fixes: the continuation stop is free" stop "$(p_stop "$R" true)"
-silent "... and the fixes count as critiqued" stop "$(p_stop "$R")"
+arm "$U"
+silent "armed: UI edit is allowed" edit "$(p_edit "$U" Edit "$U/webapp/components/Button.tsx")"
+blocks "armed: stop blocks after a UI edit" "$(p_stop "$U")"
+silent "stop_hook_active: no loop" stop "$(p_stop "$U" true)"
+blocks "still uncritiqued: the next stop blocks again" "$(p_stop "$U")"
+silent "impeccable critique (Skill)" skill "$(p_skill "$U" impeccable:impeccable "critique webapp/components/Button.tsx")"
+silent "stop free after the critique" stop "$(p_stop "$U")"
 new
-hook skill "$(p_skill "$R" impeccable:impeccable "critique the button")"
-hook edit "$(p_edit "$R" Write "$R/webapp/app/page.css")"
-blocks "a critique before the UI edit is stale" "$(p_stop "$R")"
+arm "$U"
+hook edit "$(p_edit "$U" Edit "$U/webapp/components/Button.tsx")"
+silent "[no-devflow] after a UI edit" prompt "$(p_prompt "$U" "skip the flow [no-devflow]")"
+silent "waived: stop never blocks" stop "$(p_stop "$U")"
 new
-hook edit "$(p_edit "$R" Edit "$R/webapp/components/Button.tsx")"
-hook skill "$(p_skill "$R" impeccable:impeccable "polish webapp/components")"
-blocks "impeccable without critique does not count" "$(p_stop "$R")"
+arm "$U"
+hook edit "$(p_edit "$U" Edit "$U/webapp/components/Button.tsx")"
+hook stop "$(p_stop "$U")"
+hook skill "$(p_skill "$U" impeccable:impeccable "critique the button")"
+hook edit "$(p_edit "$U" Edit "$U/webapp/components/Button.tsx")"
+silent "block -> critique -> fixes: the continuation stop is free" stop "$(p_stop "$U" true)"
+silent "... and the fixes count as critiqued" stop "$(p_stop "$U")"
 new
-hook edit "$(p_edit "$R" Edit "$R/webapp/components/Button.tsx")"
-hook skill "$(p_skill "$R" impeccable "critique header")"
-silent "unqualified impeccable skill with critique counts" stop "$(p_stop "$R")"
+arm "$U"
+hook skill "$(p_skill "$U" impeccable:impeccable "critique the button")"
+hook edit "$(p_edit "$U" Write "$U/webapp/app/page.css")"
+blocks "a critique before the UI edit is stale" "$(p_stop "$U")"
 new
-hook edit "$(p_edit "$R" Edit "$R/webapp/components/Button.tsx")"
-silent "user-typed /impeccable critique" prompt "$(p_prompt "$R" "/impeccable critique the header")"
-silent "... counts as a critique" stop "$(p_stop "$R")"
+arm "$U"
+hook edit "$(p_edit "$U" Edit "$U/webapp/components/Button.tsx")"
+hook skill "$(p_skill "$U" impeccable:impeccable "polish webapp/components")"
+blocks "impeccable without critique does not count" "$(p_stop "$U")"
 new
-hook edit "$(p_edit "$R" Edit "$R/webapp/components/util.ts")"
-silent "UI path with a non-UI extension: stop free" stop "$(p_stop "$R")"
-hook edit "$(p_edit "$R" Edit "$R/webapp/lib/Thing.tsx")"
-silent "UI extension outside uiPaths: stop free" stop "$(p_stop "$R")"
+arm "$U"
+hook edit "$(p_edit "$U" Edit "$U/webapp/components/Button.tsx")"
+hook skill "$(p_skill "$U" impeccable "critique header")"
+silent "unqualified impeccable skill with critique counts" stop "$(p_stop "$U")"
 new
+arm "$U"
+hook edit "$(p_edit "$U" Edit "$U/webapp/components/Button.tsx")"
+silent "user-typed /impeccable critique" prompt "$(p_prompt "$U" "/impeccable critique the header")"
+silent "... counts as a critique" stop "$(p_stop "$U")"
+new
+arm "$U"
+hook edit "$(p_edit "$U" Edit "$U/webapp/components/util.ts")"
+silent "UI path with a non-UI extension: stop free" stop "$(p_stop "$U")"
+hook edit "$(p_edit "$U" Edit "$U/webapp/lib/Thing.tsx")"
+silent "UI extension outside uiPaths: stop free" stop "$(p_stop "$U")"
+new
+arm "$NC"
 hook edit "$(p_edit "$NC" Edit "$NC/src/ui/Any.vue")"
 blocks "no uiExtensions: every file under uiPaths counts" "$(p_stop "$NC")"
 NU="$T/noui"
 mkrepo "$NU" '{"codePaths":["src/"]}'
 new
+arm "$NU"
+spec "$NU/docs/specs/2026-10-22-a.md" req design split
+hook edit "$(p_edit "$NU" Write "$NU/docs/specs/2026-10-22-a.md")"
 hook edit "$(p_edit "$NU" Edit "$NU/src/components/A.tsx")"
 silent "no uiPaths: stop never blocks" stop "$(p_stop "$NU")"
 
 # ==================================================================================================
 echo "# skill: stamps and analytics reminders"
 new
-context "requirements start: analytics reminder" PostToolUse skill "$(p_skill "$R" devflow:requirements)" "acme-analytics-events" "Analytics delta"
-silent "design start: silent" skill "$(p_skill "$R" devflow:design "decisions settled")"
-hook edit "$(p_edit "$R" Write "$SP")"
-context "writing-plans: both delta lines + analytics" PostToolUse skill "$(p_skill "$R" superpowers:writing-plans)" \
+context "requirements start: analytics reminder" PostToolUse skill "$(p_skill "$G" devflow:requirements)" "acme-analytics-events" "Analytics delta"
+silent "design start (already armed): silent" skill "$(p_skill "$G" devflow:design "decisions settled")"
+hook edit "$(p_edit "$G" Write "$SP")"
+context "writing-plans: both delta lines + analytics" PostToolUse skill "$(p_skill "$G" superpowers:writing-plans)" \
 	"Behavior-contract delta" "Analytics delta" "acme-analytics-events" "docs/specs/2026-10-22-csv-export.md"
-context "executing-plans: hand-off reminder" PostToolUse skill "$(p_skill "$R" superpowers:executing-plans)" "Analytics delta" "acme-analytics-events"
-context "subagent-driven-development: hand-off reminder" PostToolUse skill "$(p_skill "$R" superpowers:subagent-driven-development)" "Behavior-contract delta"
-hook skill "$(p_skill "$R" impeccable:impeccable "critique x")"
-silent "unrelated skill: silent" skill "$(p_skill "$R" superpowers:systematic-debugging)"
-check "stamps are plain integer milliseconds" jq -e '[.requirements_at, .design_at, .plan_at, .critique_at]
+context "executing-plans: hand-off reminder" PostToolUse skill "$(p_skill "$G" superpowers:executing-plans)" "Analytics delta" "acme-analytics-events"
+context "subagent-driven-development: hand-off reminder" PostToolUse skill "$(p_skill "$G" superpowers:subagent-driven-development)" "Behavior-contract delta"
+hook skill "$(p_skill "$G" impeccable:impeccable "critique x")"
+silent "unrelated skill: silent" skill "$(p_skill "$G" superpowers:systematic-debugging)"
+check "stamps are plain integer milliseconds" jq -e '[.requirements_at, .design_at, .plan_at, .critique_at, .armed_at]
 	| all(type == "number" and . == floor and . > 1000000000000 and . < 100000000000000)' "$DEVFLOW_STATE_DIR/$S.json"
-NA="$T/noanalytics"
-mkrepo "$NA" '{"codePaths":["src/"]}'
 new
-silent "no analyticsSkill: requirements start is silent" skill "$(p_skill "$NA" devflow:requirements)"
-context "no analyticsSkill: writing-plans still asks for the delta lines" PostToolUse skill "$(p_skill "$NA" writing-plans)" "Behavior-contract delta" "Analytics delta"
+context "no analyticsSkill: requirements start only arms" PostToolUse skill "$(p_skill "$NG" devflow:requirements)" "armed" "src/"
+lacks "... without an analytics reminder" "run the"
+context "no analyticsSkill: writing-plans still asks for the delta lines" PostToolUse skill "$(p_skill "$NG" writing-plans)" "Behavior-contract delta" "Analytics delta"
 lacks "... without naming an analytics skill" "run the"
 
 # ==================================================================================================
 echo "# bash: worktree hygiene"
 MODE=bash
+mkdir -p "$R/webapp"
 new
 silent "worktree under .worktrees/" bash "$(p_bash "$R" "git worktree add .worktrees/feat -b feat")"
 silent "options before the path" bash "$(p_bash "$R" "git worktree add -b feat --lock .worktrees/feat main")"
@@ -385,7 +482,8 @@ git -C "$M" worktree add -q "$M/.worktrees/feat" -b feat 2>/dev/null
 W="$M/.worktrees/feat"
 check "fixture: the worktree has no config of its own" test ! -e "$W/.claude/devflow.json"
 new
-context "worktree session finds the main config" UserPromptSubmit prompt "$(p_prompt "$W" "$FEATURE")" "docs/specs/"
+context "worktree session finds the main config" UserPromptSubmit prompt "$(p_prompt "$W" "$FEATURE")" "Project gate:"
+arm "$W"
 MODE=edit
 denies "worktree: code edit gated" "$(p_edit "$W" Edit "$W/webapp/lib/x.ts")" "webapp/lib/x.ts" "no spec yet"
 denies "worktree: an edit in the main checkout is judged too" "$(p_edit "$W" Edit "$M/webapp/lib/x.ts")" "webapp/lib/x.ts"
@@ -398,7 +496,23 @@ denies "worktree session: nested .worktrees/ denied" "$(p_bash "$W" "git worktre
 mkdir -p "$W/.claude"
 printf '{"specDir":"design/","codePaths":["src/"]}\n' >"$W/.claude/devflow.json"
 new
-context "a worktree's own config wins" UserPromptSubmit prompt "$(p_prompt "$W" "$FEATURE")" "design/" "src/"
+context "a worktree's own config wins" PostToolUse skill "$(p_skill "$W" devflow:requirements)" "design/" "src/"
+
+# ==================================================================================================
+echo "# session end"
+new
+hook prompt "$(p_prompt "$R" "$FEATURE")"
+check "fixture: the session has state" test -s "$DEVFLOW_STATE_DIR/$S.json"
+mkdir -p "$DEVFLOW_STATE_DIR/$S.json.lock"
+silent "SessionEnd is silent" end "$(p_end "$R")"
+check "SessionEnd deletes the state file" test ! -e "$DEVFLOW_STATE_DIR/$S.json"
+check "... and a leftover lock" test ! -e "$DEVFLOW_STATE_DIR/$S.json.lock"
+new
+mkdir -p "$DEVFLOW_STATE_DIR"
+printf '{"armed":true}' >"$DEVFLOW_STATE_DIR/$S.json"
+silent "SessionEnd from a repo without config" end "$(p_end "$N")"
+check "... still deletes the state" test ! -e "$DEVFLOW_STATE_DIR/$S.json"
+check "hooks.json wires SessionEnd to the end mode" jq -e '.hooks.SessionEnd[0].hooks[0].command | endswith("devflow.sh\" end")' "$here/../hooks/hooks.json"
 
 # ==================================================================================================
 echo "# environment"
