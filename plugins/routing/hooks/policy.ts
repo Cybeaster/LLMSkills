@@ -101,7 +101,7 @@ export function agentHeader(p: Policy, b: Budget): string {
   const cls = b.cls && Object.hasOwn(p.classes, b.cls) ? `[${b.cls}]` : 'unclassified'
   const effort = b.effort ? ` at effort ${b.effort}` : ''
   return [
-    `[routing] You run as ${cls} on ${b.model ?? 'inherited'}${effort}. Stay within that budget: don't over-explore.`,
+    `[routing] Requested as ${cls} on ${b.model ?? 'inherited'}${effort}. Size the work to that budget.`,
     'If you delegate (Agent tool / workflow agent()), follow these floors — tag the description with one class and pass model + effort at or above it:',
     floors(p),
   ].join('\n')

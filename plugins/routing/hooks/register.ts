@@ -90,7 +90,8 @@ export const register: Register = on => {
   // every new non-fork agent (subagent, teammate, workflow agent) is told its class, budget and the floors:
   // prompt.compose never shapes a subagent's system prompt, so its task prompt is the only place to say it
   on('agent.spawn', async ($, e, next) => {
-    if (e.fork || e.resume) return next(e)
+    // another plugin's programmatic spawn carries that plugin's own prompt
+    if (e.fork || e.resume || next.origin.plugin !== 'engine') return next(e)
     const p = await loadPolicy($)
     if (!e.workflow) {
       const b = takeBudget(e.tool_use_id)

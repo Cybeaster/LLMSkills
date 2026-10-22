@@ -164,7 +164,7 @@ test('floors are one line, one entry per class', async () => {
 test('the agent header names the class, model and effort, then the floors', async () => {
   const h = agentHeader(P, { cls: 'search', model: 'haiku', effort: 'low' })
   const [first, second, third, ...rest] = h.split('\n')
-  expect(first).toBe("[routing] You run as [search] on haiku at effort low. Stay within that budget: don't over-explore.")
+  expect(first).toBe("[routing] Requested as [search] on haiku at effort low. Size the work to that budget.")
   expect(second).toMatch(/^If you delegate \(Agent tool \/ workflow agent\(\)\)/)
   expect(third).toBe(floors(P))
   expect(rest).toEqual([])
@@ -172,9 +172,9 @@ test('the agent header names the class, model and effort, then the floors', asyn
 })
 
 test('the agent header says unclassified, inherited, and drops an unknown effort', async () => {
-  expect(agentHeader(P, {})).toMatch(/^\[routing\] You run as unclassified on inherited\. Stay/)
-  expect(agentHeader(P, { cls: 'misc', model: 'opus' })).toMatch(/^\[routing\] You run as unclassified on opus\. Stay/)
-  expect(agentHeader(P, { cls: 'constructor', model: 'opus' })).toMatch(/You run as unclassified/)
+  expect(agentHeader(P, {})).toMatch(/^\[routing\] Requested as unclassified on inherited\. Size/)
+  expect(agentHeader(P, { cls: 'misc', model: 'opus' })).toMatch(/^\[routing\] Requested as unclassified on opus\. Size/)
+  expect(agentHeader(P, { cls: 'constructor', model: 'opus' })).toMatch(/Requested as unclassified/)
   expect(agentHeader(P, { model: 'opus' })).not.toMatch(/effort (undefined|low)/)
 })
 

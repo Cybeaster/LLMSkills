@@ -25,7 +25,7 @@ subagent never sees the routing section, yet its own `Agent` calls are held to t
 other. The `agent.spawn` hook closes that gap through the task prompt instead:
 
 ```
-[routing] You run as [search] on haiku at effort low. Stay within that budget: don't over-explore.
+[routing] Requested as [search] on haiku at effort low. Size the work to that budget.
 If you delegate (Agent tool / workflow agent()), follow these floors — tag the description with one class and pass model + effort at or above it:
 search haiku/low · mechanical haiku/medium · implement opus/high · …
 ```

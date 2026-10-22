@@ -109,6 +109,25 @@ test("another plugin's Agent call passes untagged, with no row", { plugins: [OTH
   expect(rows(files)).toEqual([])
 })
 
+// Another plugin's programmatic spawn: its agent's prompt is that plugin's own, never prefixed.
+const SPAWNER = {
+  name: 'spawner',
+  register(on: On) {
+    on('command.run', async ($) => {
+      await $.agent.spawn({ prompt: 'exact spec', description: 'x' } as never)
+      return { text: 'spawned' }
+    })
+  },
+}
+
+test("another plugin's spawn keeps its prompt", { plugins: [SPAWNER] }, async ($, on) => {
+  engine(on, new Map())
+  let seen: string | undefined
+  on('agent.spawn', (_, e) => ((seen = e.prompt), { model: 'haiku', agentId: 'a9' }))
+  await $.command.run({ name: 'go', args: '' } as never)
+  expect(seen).toBe('exact spec')
+})
+
 // An agent.spawn as the engine raises it for a workflow script's agent() call with no opts.model.
 const SPAWN = {
   tool_use_id: 'tu1',
@@ -236,7 +255,7 @@ test('a tagged Agent spawn is told its class, model, effort and the floors', asy
   expect(r.deny).toBeUndefined()
   expect(got).toHaveLength(1)
   const lines = (got[0]?.prompt ?? '').split('\n')
-  expect(lines[0]).toBe("[routing] You run as [search] on haiku at effort low. Stay within that budget: don't over-explore.")
+  expect(lines[0]).toBe("[routing] Requested as [search] on haiku at effort low. Size the work to that budget.")
   expect(lines[1]).toMatch(/follow these floors/)
   expect(lines[2]).toBe('search haiku/low · content opus/xhigh')
   expect(lines.slice(3)).toEqual(['', 'TASK'])
@@ -247,10 +266,10 @@ test('a workflow agent gets the header with its filled model and no effort', asy
   const got = spawned(on)
   await $.agent.spawn(SPAWN)
   expect(got[0]?.model).toBe('opus')
-  expect(got[0]?.prompt).toMatch(/^\[routing\] You run as unclassified on opus\. Stay within that budget/)
+  expect(got[0]?.prompt).toMatch(/^\[routing\] Requested as unclassified on opus\. Size the work/)
   expect(got[0]?.prompt).toMatch(/\nsearch haiku\/low · content opus\/xhigh\n\np$/)
   await $.agent.spawn({ ...SPAWN, description: '[content] lesson 3', model: 'fable' })
-  expect(got[1]?.prompt).toMatch(/^\[routing\] You run as \[content\] on fable\. Stay/)
+  expect(got[1]?.prompt).toMatch(/^\[routing\] Requested as \[content\] on fable\. Size/)
 })
 
 test('a fork and a resume start with their prompt untouched', async ($, on) => {
@@ -265,5 +284,5 @@ test('a spawn with no Agent call behind it is unclassified on an inherited model
   engine(on, new Map())
   const got = spawned(on)
   await $.agent.spawn({ ...SPAWN_BASE, tool_use_id: 'tu7', prompt: 'X', description: 'plain', subagentType: 'general-purpose' } as never)
-  expect(got[0]?.prompt).toMatch(/^\[routing\] You run as unclassified on inherited\. Stay/)
+  expect(got[0]?.prompt).toMatch(/^\[routing\] Requested as unclassified on inherited\. Size/)
 })
